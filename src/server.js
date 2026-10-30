@@ -1,3 +1,4 @@
+const { createScoringService } = require('./scoring/service');
 const { createApp } = require('./app');
 const { Pool } = require('pg');
 const { createAuthRepository } = require('./auth/repository');
@@ -31,7 +32,7 @@ if (databaseUrl) {
   for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {
     if (process.env[name]) evaluators[serviceKey] = createMaterialEvaluator({ serviceKey, url: process.env[name] });
   }
-  evaluations = createUnifiedEvaluationService({ evaluators, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository) });
+  evaluations = createUnifiedEvaluationService({ evaluators, scoring: createScoringService(), repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository) });
 }
 createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies: process.env.NODE_ENV === 'production' || publicOrigin?.startsWith('https:') }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);

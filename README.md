@@ -1,6 +1,6 @@
 # Science 测评后端
 
-独立进程，提供登录、题库及受开关控制的单题测评接口。已接入文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）和新材料（1115）WebSocket；1110、评分和自动化尚未迁入，不代替现有管理端生产运行。
+独立进程，提供登录、题库及受开关控制的单题测评接口。已接入文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）和新材料（1115）WebSocket；五服务独立评分已接入；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
 
 ## 架构与当前状态
 
@@ -15,7 +15,7 @@
   └─ 运行记录与题库仓储：通过显式数据库连接访问
 ```
 
-这是目标边界。登录和题库使用测评平台会话，并通过显式配置连接共享数据库；保留内部令牌保护的题目生成预览接口。运行核心已接入受权限与写入开关保护的创建、SSE、历史和详情接口，两类文献服务不依赖旧管理端归档及 MinIO。其他适配器、评分和自动化接入尚待迁移。现有管理后台仍处理当前运行流量与定时任务。
+这是目标边界。登录和题库使用测评平台会话，并通过显式配置连接共享数据库；保留内部令牌保护的题目生成预览接口。运行核心已接入受权限与写入开关保护的创建、SSE、历史和详情接口，两类文献服务不依赖旧管理端归档及 MinIO。三类材料适配器与独立评分已接入；原自动化调度仍待迁移。现有管理后台仍处理当前运行流量与定时任务。
 
 需要 Node.js 22。通过部署环境提供至少 32 字节的 `EVALUATION_SERVICE_TOKEN`，以及模型的 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`）。默认监听 `127.0.0.1:7714`，可使用 `EVALUATION_HOST` 和 `PORT` 配置。不要把令牌或模型密钥提交到仓库。
 
@@ -62,7 +62,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 分别配置对应服务的 `/start` WebSocket 地址，并设置 `EVALUATION_RUN_WRITE_ENABLED=true` 后才允许创建运行。只配置航空文献时可单独使用，不依赖 1106；未配置的服务在前端不可选，后端也拒绝其创建请求。全局写开关关闭或缺少写权限时，两者均不可执行。可用状态只代表已配置，不表示实时探活成功。
 
-题目通过 `instruction` 字段提交，每次运行生成独立 taskid；正文逐帧转发，`[start]`/`[end]` 构成完整结束条件。连接中断或超时会保存失败状态及已有回答，不自动重试被测服务。首版不产生旧管理端报告/证据对象、不启动夜检、不提供自动评分，评分明确为 `absent`。
+题目通过 `instruction` 字段提交，每次运行生成独立 taskid；正文逐帧转发，`[start]`/`[end]` 构成完整结束条件。连接中断或超时会保存失败状态及已有回答，不自动重试被测服务。不产生旧管理端报告/证据对象、不启动夜检；运行结束后接入下述独立评分。
 
 审核并手工执行 `migrations/003_evaluation_runs.sql` 可建立与管理端 041/042 兼容的运行记录及幂等键存储。仅允许 `science_admin`；现有运行表和记录保留，不自动执行生产迁移。启用共享库的写入或部署前另行确认。
 
@@ -84,7 +84,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 与文献服务相同，必须显式配置连接地址、打开 `EVALUATION_RUN_WRITE_ENABLED` 并具备权限；各服务可独立配置。首帧包含独立taskid和user_name，新材料另带空file_metadata；不自动重试运行。1112题目上限200字符，其他服务500字符。
 
-采集progress/retrieval_progress/result/generated_files；1112另采集无type的contract、candidates和stage帧。文本标量保留，控制对象不混入回答。1112在[end]后等待1200ms接收尾帧；1111/1115等待300ms。连接失败、缺少起止标记、超时或超限均保存失败与已有输出。自动评分为absent；执行结束不保证原服务业务结果完整或科学正确。
+采集progress/retrieval_progress/result/generated_files；1112另采集无type的contract、candidates和stage帧。文本标量保留，控制对象不混入回答。1112在[end]后等待1200ms接收尾帧；1111/1115等待300ms。连接失败、缺少起止标记、超时或超限均保存失败与已有输出。运行结束后接入下述独立评分；执行结束不保证原服务业务结果完整或科学正确。
 
 1111/1115结束后从配置的同一服务推导 `/alloy/tasks/:taskid` 或 `/new-material/tasks/:taskid` 只读拉取结果，15秒超时、2MiB上限、禁止重定向；失败显式保留提示，不覆盖流式结果。1112没有任务快照接口，只使用已采集的阶段帧。结构化采集最多2MiB、100个1112协议帧；进度保留最近50条，截断有明确标记。新增数据保存在既有run JSON字段，无新增数据库迁移或旧记录回写。SSE新增state事件传递结构化状态，慢连接缓冲上限8MiB；原text/run/score/done契约保留。
 
@@ -99,3 +99,27 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 既有人工reply接口保留兼容：`POST /api/evaluation/unified/runs/:id/reply`，仍校验写权限、同源、写开关、当前进程发起人、请求身份和必填项，重复/过期答复拒绝。正常新运行不再进入人工等待；原人工记录和重启快照不自动续跑或回写。
 
 专项验证：`node --test test/material-evaluator.test.js`；`EVALUATION_MATERIAL_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX npm test`启用材料HTTP/持久化测试，该临时实例须与运行/题库测试分别隔离。前端`yarn test:services`覆盖结果、确认表单及安全展示。
+
+## 独立评分（evaluation-v1）
+
+当前五服务运行结束后自动检查原始Markdown并分别调用DeepSeek、千问，不再依赖原服务评分接口。执行失败/没有输出的运行不生成完整模型评分；模型未配置、失败、超时不记零分，也不改变执行结果。读取历史不发起模型调用、不回写旧数据。
+
+- 模型配置仅来自后端环境：DeepSeek优先`EVALUATION_DEEPSEEK_API_KEY/BASE_URL/MODEL`，兼容`DEEPSEEK_API_KEY/BASE_URL/MODEL`，默认deepseek-chat。千问优先`EVALUATION_QWEN_API_KEY/BASE_URL/MODEL`，兼容`QWEN_API_KEY/BASE_URL/MODEL`以及旧`NPC_API_KEY/NPC_API_BASE`和`DASHSCOPE_API_KEY`；默认qwen3.7-flash与北京兼容入口。各地区密钥与模型可用性由部署配置决定，不自动读取旧管理端.env。客户端使用JSON Object、temperature=0；千问关闭thinking。参考[DeepSeek JSON模式](https://api-docs.deepseek.com/guides/json_mode/)、[千问结构化输出](https://www.alibabacloud.com/help/en/model-studio/qwen-structured-output)。
+- 只根据题面提取一份冻结要求清单（最多15项），DeepSeek不可用时可由千问提取；不把答案或另一模型评分放入清单生成。重评同题同规则版本复用清单。
+- 维度0–100：可读性40%、专业性40%、图文辅助20%。图文不适用由冻结清单确定，其余维度各50%；总分由程序计算，两模型不取平均。图表按帮助程度评分，未打开图片/附件内容需显式说明。
+- 各模型分别保存评语、亮点、不足、建议与逐要求证据。met/partial引用必须是答案或结构化材料的连续原文；不能核对时降为unclear。关键要求未满足时不能合格，截断时不认定完整合格。总分不等同科学正确率，未做独立外部核验。
+- Markdown原文机检使用CommonMark/GFM/remark-math及KaTeX，保存行列、片段、错误/提示与建议。代码和货币不当公式；围栏开放为提示，非法KaTeX为错误；链接仅查格式/协议，不发出远程访问。最多检查120000字符、100项问题；不完整输入标partial/not_evaluable。前端容错不改变原文检查。
+- 单次评分输入最多60000字符正文与30000字符结构化材料（敏感字段和URL认证参数隐藏），截断显式保存；不自动抓附件或执行代码。每次模型请求90秒、JSON响应512KiB、最多6000输出token；结构不合法仅重试一次。全轮210秒，当前进程最多4轮评分并发，满载记失败供手动重评。执行并发容量与评分分开释放。
+- run.scoring保存版本、轮次ID、输入摘要、冻结清单和起止时间；run.markdownSyntax及scores保存原文机检和独立评分。全程沿用既有JSON列，无新增迁移。评分在初始状态、逐模型返回及结束时保存并通过run/score事件更新。
+
+### 调用接口
+
+继续使用测评会话鉴权。所有读取要求`team-services:read`；写入要求`team-services:write`、同源Origin、非cross-site及`EVALUATION_RUN_WRITE_ENABLED=true`。自动化调用方须带已授权会话及配置的公开Origin；不新增免登录公开接口。
+
+- `POST /api/evaluation/unified/runs`沿用原请求与幂等契约，创建执行后自动评分；GET详情或SSE获取结果。
+- `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：只对保存的完整执行结果重评，202返回`{runId,attemptId,reused}`，不调用被测服务。同轮进行中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
+- `GET /api/evaluation/unified/runs/:id`含`canRescore`，只表示当前权限/开关/快照允许，最终POST仍校验。重启后未过期评分只返回快照；过期pending在响应中标失败供显式重评，不回写原记录、不偷偷续跑。
+- `GET /api/evaluation/unified/runs`含两模型轻量分数/状态摘要，不返回完整评语。
+- `GET /api/evaluation/unified/question-scores?items=<JSON>`，最多50个`{id,datasetVersion}`，返回同题同版本、各服务最近一次运行的`runId/serviceKey/scores`摘要。题库修改版本后不沿用旧分。
+
+测试：`node --test test/scoring.test.js`；`EVALUATION_SCORING_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/scoring-postgres.test.js`仅接受专用临时PostgreSQL。测试独立于其他三个数据库测试实例，不允许连接共享数据库。真实模型联调使用公开虚构样本，不发送历史业务答案。多人评分、榜单、周报发布和数学建模参考尚未实现。

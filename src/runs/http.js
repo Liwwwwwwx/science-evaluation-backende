@@ -15,9 +15,13 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
       { key: 'alloy', label: '合金材料' },
       { key: 'synthesis', label: '合成制备' },
       { key: 'new-material', label: '新材料' },
-    ].map(item => ({ ...item, enabled: writable && configured.includes(item.key), scoring: 'absent' })) });
+    ].map(item => ({ ...item, enabled: writable && configured.includes(item.key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent' })) });
   }
   if (!evaluations) throw new TeamServiceError(503, 'EVALUATION_UNAVAILABLE', '独立运行尚未配置');
+  if (url.pathname === `${base}/question-scores` && req.method === 'GET') {
+    let items; try { items = JSON.parse(url.searchParams.get('items') || '[]'); } catch { invalid('题目版本参数无效'); }
+    return reply(res, 200, await evaluations.questionScores(items));
+  }
   const artifact = /^\/api\/evaluation\/unified\/runs\/([^/]+)\/artifacts\/(\d{1,3})$/.exec(url.pathname);
   if (artifact) {
     if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
@@ -41,18 +45,28 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     if ((origin && !['manual', 'automation', 'legacy'].includes(origin)) || !Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('运行列表参数无效');
     return reply(res, 200, await evaluations.list({ origin, page, pageSize }));
   }
-  const match = /^\/api\/evaluation\/unified\/runs\/([^/]+)(\/events|\/reply)?$/.exec(url.pathname);
+  const match = /^\/api\/evaluation\/unified\/runs\/([^/]+)(\/events|\/reply|\/score)?$/.exec(url.pathname);
   if (!match) throw new TeamServiceError(404, 'NOT_FOUND', 'Not found');
   if (!UUID.test(match[1])) invalid('运行 ID 无效');
   const scope = user.permissions.includes('team-services:write') ? `evaluation-user:${user.id}` : null;
-  if (match[2] === '/reply' && req.method === 'POST') {
+  if (['/reply', '/score'].includes(match[2]) && req.method === 'POST') {
     if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
     if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
     if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
+    if (match[2] === '/score') {
+      const input = await readBody(req, 1024);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) invalid('重评使用已保存答案，请发送空对象');
+      return reply(res, 202, await evaluations.rescore(match[1], { scope, key: req.headers['idempotency-key'] }));
+    }
     return reply(res, 200, await evaluations.reply(match[1], await readBody(req, 16 * 1024), { scope }));
   }
-  if (req.method !== 'GET' || match[2] === '/reply') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
-  if (!match[2]) return reply(res, 200, await evaluations.get(match[1], { scope }));
+  if (req.method !== 'GET' || ['/reply','/score'].includes(match[2])) throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+  if (!match[2]) {
+    const value = await evaluations.get(match[1], { scope });
+    const scoring = value.run?.scoring;
+    const leased = scoring && !scoring.finishedAt && Date.parse(scoring.expiresAt) > Date.now();
+    return reply(res, 200, { ...value, canRescore: !!(scope && runWriteEnabled && evaluations.scoringEnabled && ['done','error'].includes(value.run?.status) && !['running','scoring'].includes(value.status) && !leased) });
+  }
   // 先读取一次，保证不存在/不可读时返回 JSON 错误而不是半条 SSE。
   await evaluations.get(match[1]);
   let unsubscribe = () => {}; let heartbeat; let closed = false; let ready = false; const pending = [];

@@ -1,3 +1,6 @@
+function scoreSummary(scores) {
+  return Object.fromEntries(Object.entries(scores || {}).filter(([key]) => ['deepSeekScore','qwenScore','quality'].includes(key)).map(([key, value]) => [key, { status: value?.status, model: value?.model, total: value?.quality?.total ?? null, taskStatus: value?.quality?.taskCompletion?.status || null, provisional: value?.quality?.source?.truncated === true }]));
+}
 function date(value) { return value ? new Date(value).toISOString() : null; }
 function map(row) {
   if (!row) return null;
@@ -63,6 +66,27 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         WHERE id=$1 AND status='scoring' RETURNING *`, [id, scores, scoreError, status]);
       return map(result.rows[0]);
     },
+    async claimScoring(id, previousId, scoring, scores) {
+      const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
+        SET run=jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),scores=$4,score_error=NULL,status=CASE WHEN run->>'status'='error' THEN 'error' ELSE 'scoring' END,updated_at=now()
+        WHERE id=$1 AND run->'scoring'->>'attemptId' IS NOT DISTINCT FROM $2::text AND status IN ('done','error','scoring') RETURNING id`, [id, previousId, scoring, scores]);
+      return result.rowCount === 1;
+    },
+    async updateScoring(id, attemptId, value) {
+      const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
+        SET run=jsonb_set(jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),'{markdownSyntax}',$4::jsonb),scores=$5,score_error=NULL,status=$6,updated_at=now()
+        WHERE id=$1 AND run->'scoring'->>'attemptId'=$2 RETURNING id`, [id, attemptId, value.scoring, value.markdownSyntax, value.scores, value.status]);
+      return result.rowCount === 1;
+    },
+    async questionScores(items) {
+      if (!items.length) return [];
+      const result = await (await adminPool()).query(`SELECT DISTINCT ON (r.question_id,r.dataset_version,r.service_key)
+        r.id,r.question_id,r.dataset_version,r.service_key,r.scores,r.started_at,r.status
+        FROM public.unified_evaluation_runs r JOIN jsonb_to_recordset($1::jsonb) AS q(id text,"datasetVersion" text)
+        ON r.question_id=q.id AND r.dataset_version=q."datasetVersion"
+        ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items)]);
+      return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
+    },
     async list({ origin = null, page = 1, pageSize = 20 } = {}) {
       const requestedPage = Number(page);
       const requestedSize = Number(pageSize);
@@ -72,9 +96,9 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const current = await adminPool();
       const count = await current.query('SELECT count(*)::int AS total FROM public.unified_evaluation_runs WHERE ($1::text IS NULL OR origin=$1)', params);
       const result = await current.query(`SELECT id, service_key, origin, question, question_id, dataset_version, question_source_type,
-        batch_id, status, started_at, finished_at FROM public.unified_evaluation_runs WHERE ($1::text IS NULL OR origin=$1)
+        batch_id, status, scores, started_at, finished_at FROM public.unified_evaluation_runs WHERE ($1::text IS NULL OR origin=$1)
         ORDER BY started_at DESC, id DESC LIMIT $2 OFFSET $3`, [origin, safeSize, (safePage - 1) * safeSize]);
-      return { items: result.rows.map(map), total: count.rows[0].total, page: safePage, pageSize: safeSize };
+      return { items: result.rows.map(row => ({ ...map(row), scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },
   };
 }
