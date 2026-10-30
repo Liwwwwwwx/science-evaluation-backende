@@ -5,7 +5,7 @@ const { createQuestionBankGenerationService } = require('./question-bank/generat
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), authService, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -15,10 +15,10 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
     res.end(JSON.stringify(value));
   }
   function fail(res, status, code, message) { return reply(res, status, { error: { code, message } }); }
-  async function readBody(req) {
+  async function readBody(req, maxBody = MAX_BODY) {
     if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw Object.assign(new Error('Expected JSON'), { status: 415, code: 'INVALID_CONTENT_TYPE' });
     const chunks = []; let size = 0;
-    for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY) throw Object.assign(new Error('Request too large'), { status: 413, code: 'REQUEST_TOO_LARGE' }); chunks.push(chunk); }
+    for await (const chunk of req) { size += chunk.length; if (size > maxBody) throw Object.assign(new Error('Request too large'), { status: 413, code: 'REQUEST_TOO_LARGE' }); chunks.push(chunk); }
     let input;
     try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'INVALID_JSON' }); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'INVALID_JSON' });
@@ -42,6 +42,33 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
   }
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname.startsWith('/api/question-bank/')) {
+      try {
+        if (!authService || !questionBank) return fail(res, 503, 'QUESTION_BANK_UNAVAILABLE', '题库服务尚未配置');
+        const action = url.pathname.slice('/api/question-bank/'.length);
+        const methods = { access: 'GET', questions: 'GET', import: 'POST', 'random-save': 'POST', generate: 'POST', domain: 'PUT', update: 'PUT', delete: 'DELETE' };
+        if (!Object.hasOwn(methods, action) || req.method !== methods[action]) return fail(res, 404, 'NOT_FOUND', 'Not found');
+        const user = await authService.authenticate(session(req));
+        const write = methods[action] !== 'GET';
+        if (action === 'questions' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+        if (write && !user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有题库操作权限');
+        if (write && (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site')) return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        if (write && action !== 'generate' && !questionBankWriteEnabled) return fail(res, 503, 'QUESTION_BANK_WRITE_DISABLED', '题库写入尚未启用');
+        if (action === 'access') return reply(res, 200, { access: { permissions: user.permissions } });
+        if (action === 'questions') return reply(res, 200, await questionBank.list(url.searchParams));
+        const input = await readBody(req, 256 * 1024);
+        if (action === 'generate') return reply(res, 200, await generator.generate(input));
+        if (action === 'import') return reply(res, 201, await questionBank.import(input));
+        if (action === 'random-save') return reply(res, 200, await questionBank.saveRandom(input));
+        if (typeof input.id !== 'string' || !input.id || input.id.length > 200) return fail(res, 400, 'INVALID_INPUT', '题目 ID 无效');
+        if (action === 'domain') return reply(res, 200, await questionBank.setDomain(input.id, input));
+        return reply(res, 200, action === 'update' ? await questionBank.update(input.id, input) : await questionBank.retire(input.id, input));
+      } catch (error) {
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'INTERNAL_ERROR' : error.code || 'REQUEST_FAILED', status === 500 ? '题库服务暂不可用' : error.message);
+      }
+    }
     if (authService && ['/api/auth/login', '/api/auth/me', '/api/auth/logout', '/api/auth/logout-all'].includes(req.url)) {
       try {
         if (req.method === 'GET' && req.url === '/api/auth/me') return reply(res, 200, { ok: true, user: await authService.authenticate(session(req)) });
