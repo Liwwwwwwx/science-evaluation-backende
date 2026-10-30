@@ -85,3 +85,33 @@ test('产物只接受HTTP链接，拒绝脚本/凭据并解析相对地址', () 
   const files = collectArtifacts([{ url: 'javascript:alert(1)' }, { url: 'https://user:password@x/a' }, { name: 'a', preview_url: '/files/a.png' }], 'http://127.0.0.1/start');
   assert.deepEqual(files, [{ name: 'a', url: 'http://127.0.0.1/files/a.png' }]);
 });
+
+
+test('非法Unicode成果名不会拒绝收尾，正常资产仍保留并给出提示', async () => {
+  const evaluator = createMaterialEvaluator({ serviceKey: 'new-material', url: 'ws://127.0.0.1/new-material/start', endSettleMs: 0,
+    createSocket: () => socketFor((_, socket) => frame(socket, '[start]完整回答[end]')),
+    fetchImpl: async () => Response.json({ artifacts: { presentation: { assets: [{ path: 'broken\ud800.glb' }, { path: 'valid.glb' }] } } }),
+  });
+  const { completion } = await evaluator.startQuestionRun({ question: '生成晶体结构并保留完整结果。' }, { onText() {} });
+  const result = await completion;
+  assert.equal(result.status, 'done'); assert.match(result.details.artifactError, /路径无效/);
+  assert.equal(result.details.artifacts.length, 1); assert.match(result.details.artifacts[0].url, /valid\.glb$/);
+  assert.equal(result.details.snapshot.ok, true);
+});
+
+test('异常成果路径不会挂起统一运行，并保留正文及释放执行容量', { timeout: 1000 }, async () => {
+  const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
+  let calls = 0;
+  const evaluator = createMaterialEvaluator({ serviceKey: 'new-material', url: 'ws://127.0.0.1/new-material/start', endSettleMs: 0,
+    createSocket: () => socketFor((_, socket) => { calls++; frame(socket, '[start]已有回答[end]'); }),
+    fetchImpl: async () => Response.json({ artifacts: { presentation: { assets: [{ path: calls === 1 ? 'broken\ud800.glb' : 'valid.glb' }] } } }),
+  });
+  const service = createUnifiedEvaluationService({ evaluators: { 'new-material': evaluator }, maxActive: 1 });
+  const first = await service.start({ serviceKey: 'new-material', question: '异常产物也需要结束并保留已有正文。' });
+  const result = await first.nativeCompletion;
+  assert.equal(result.status, 'done'); assert.match(result.details.artifactError, /路径无效/);
+  await new Promise(resolve => setImmediate(resolve));
+  const saved = await service.get(first.runId); assert.equal(saved.status, 'done'); assert.equal(saved.answer, '[start]已有回答[end]');
+  const next = await service.start({ serviceKey: 'new-material', question: '后续运行仍能正常使用执行容量。' });
+  const nextResult = await next.nativeCompletion; assert.equal(nextResult.status, 'done'); assert.equal(nextResult.details.artifacts.length, 1);
+});

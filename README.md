@@ -92,6 +92,8 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 `GET /api/evaluation/unified/runs/:runId/artifacts/:index` 使用现有会话和读取权限，按运行已保存的产物索引只读代理，不接受客户端URL。只允许该运行服务的任务资产/文件路径和已核对的公开材料产物源；禁止凭据、重编码路径、重定向及HTML/SVG等主动内容。15秒超时、32MiB上限，固定扩展名MIME及nosniff/sandbox响应头；403/404/413/415/502分别表达来源、缺失、大小、类型和上游错误。不会归档、生成或回写成果，文件过期时前端显示恢复入口。
 
+材料适配器收尾保证completion正常结算：非法Unicode成果名会跳过对应预览并记录artifactError，保留正文、快照和其他可用文件；其他成果整理异常将当前运行标为失败并保留已有输出，避免未处理的异步异常影响进程和执行容量。
+
 `requirement_review_request`默认由测评平台立即自动发送 `checkpoint.reply`（action=continue），覆盖两类文献及三类材料服务。不等待120秒或人工操作，不伪造补充答案、不把服务建议标为用户授权；原请求source=service，自动答复source=automatic，并记录delivery=sent/failed。相同request_id只发送一次，单运行最多自动继续10个不同请求；身份错误、服务拒绝或发送失败如实结束为失败。页面显示自动答复次数，完整请求/答复随run JSON持久化。此策略不覆盖1110的user_input_request。
 
 既有人工reply接口保留兼容：`POST /api/evaluation/unified/runs/:id/reply`，仍校验写权限、同源、写开关、当前进程发起人、请求身份和必填项，重复/过期答复拒绝。正常新运行不再进入人工等待；原人工记录和重启快照不自动续跑或回写。

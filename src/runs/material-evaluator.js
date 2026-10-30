@@ -65,26 +65,37 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
         if (settled || ending) return; ending = true;
         clearTimeout(timer); clearTimeout(endTimer); pendingRaw = null; details.pendingReview = null;
         try { socket?.close(); } catch {}
-        if (config.snapshot && !error) {
-          const snapshotUrl = new URL(httpUrl); snapshotUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}`); snapshotUrl.search = '';
-          try {
-            const data = await readJsonBounded(await fetchImpl(snapshotUrl, { signal: AbortSignal.timeout(15000), redirect: 'error' }));
-            if (!data || typeof data !== 'object' || Array.isArray(data) || (data.taskid && data.taskid !== id)) throw Error('任务快照身份不匹配');
-            details.snapshot = { ok: true, data }; // 快照完整保留；采集帧另有限额。
-          } catch { details.snapshot = { ok: false, error: '任务快照读取失败，已保留流式结果' }; }
-        } else if (!config.snapshot) details.snapshot = { ok: false, skipped: true, error: '该服务不提供任务快照接口' };
-        const textAssets = [...text.matchAll(/https?:\/\/[^\s<>()[\]"']+?\.(?:png|jpe?g|gif|webp|svg|glb|stl|cif|csv|pdf)(?:\?[^\s<>()[\]"']*)?/gi)].map(item => ({ url: item[0] }));
-        const presentation = details.snapshot?.data?.artifacts?.presentation;
-        const declaredAssets = serviceKey === 'new-material' && Array.isArray(presentation?.assets) ? presentation.assets.flatMap(asset => {
-          if (typeof asset?.path !== 'string') return [];
-          const name = asset.path.split('/').pop();
-          if (!name || !/\.(?:png|jpe?g|gif|webp|glb|stl|cif)$/i.test(name)) return [];
-          const assetUrl = new URL(httpUrl); assetUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}/assets/${encodeURIComponent(name)}`); assetUrl.search = '';
-          return [{ name: asset.name || name, url: assetUrl.href }];
-        }) : [];
-        details.artifacts = collectArtifacts({ result: details.result, snapshot: details.snapshot, frames: details.protocolFrames, files: details.generatedFiles, textAssets, declaredAssets }, httpUrl);
-        settled = true;
-        resolveCompletion({ status: error ? 'error' : 'done', taskid: id, elapsedMs: Date.now() - startedAt, error: error || null, details });
+        let completionError = error;
+        try {
+          if (config.snapshot && !error) {
+            const snapshotUrl = new URL(httpUrl); snapshotUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}`); snapshotUrl.search = '';
+            try {
+              const data = await readJsonBounded(await fetchImpl(snapshotUrl, { signal: AbortSignal.timeout(15000), redirect: 'error' }));
+              if (!data || typeof data !== 'object' || Array.isArray(data) || (data.taskid && data.taskid !== id)) throw Error('任务快照身份不匹配');
+              details.snapshot = { ok: true, data }; // 快照完整保留；采集帧另有限额。
+            } catch { details.snapshot = { ok: false, error: '任务快照读取失败，已保留流式结果' }; }
+          } else if (!config.snapshot) details.snapshot = { ok: false, skipped: true, error: '该服务不提供任务快照接口' };
+          const textAssets = [...text.matchAll(/https?:\/\/[^\s<>()[\]"']+?\.(?:png|jpe?g|gif|webp|svg|glb|stl|cif|csv|pdf)(?:\?[^\s<>()[\]"']*)?/gi)].map(item => ({ url: item[0] }));
+          const presentation = details.snapshot?.data?.artifacts?.presentation;
+          const declaredAssets = serviceKey === 'new-material' && Array.isArray(presentation?.assets) ? presentation.assets.flatMap(asset => {
+            if (typeof asset?.path !== 'string') return [];
+            const name = asset.path.split('/').pop();
+            if (!name || !/\.(?:png|jpe?g|gif|webp|glb|stl|cif)$/i.test(name)) return [];
+            let encodedName;
+            try { encodedName = encodeURIComponent(name); }
+            catch { details.artifactError = '部分成果路径无效，已跳过对应预览链接'; return []; }
+            const assetUrl = new URL(httpUrl); assetUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}/assets/${encodedName}`); assetUrl.search = '';
+            return [{ name: asset.name || name, url: assetUrl.href }];
+          }) : [];
+          details.artifacts = collectArtifacts({ result: details.result, snapshot: details.snapshot, frames: details.protocolFrames, files: details.generatedFiles, textAssets, declaredAssets }, httpUrl);
+        } catch {
+          // 服务返回的数据不能让异步收尾拒绝或悬挂，必须保留已有输出并结束当前运行。
+          completionError ||= '服务成果整理失败，已保留回答及结构化结果';
+          details.artifactError = '成果文件整理失败，请查看完整结构化结果';
+        } finally {
+          settled = true;
+          resolveCompletion({ status: completionError ? 'error' : 'done', taskid: id, elapsedMs: Date.now() - startedAt, error: completionError || null, details });
+        }
       };
       const timer = setTimeout(() => void finish(`${config.label}执行超时`), timeoutMs ?? config.timeoutMs);
       const automaticReview = createAutomaticReview({ taskid: id, review: details.review, send: frame => socket.send(JSON.stringify(frame)), onRecord: emit, onError: error => void finish(error) });
