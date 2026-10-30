@@ -79,7 +79,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       const result = await completion;
       active -= 1;
       executionSlotReleased = true;
-      job.run = { status: result.status, verdict: result.verdict == null ? null : result.verdict, checks: result.checks || null, markdownSyntax: result.markdownSyntax || null,
+      job.run = { ...job.run, details: result.details || job.run?.details || null, status: result.status, verdict: result.verdict == null ? null : result.verdict, checks: result.checks || null, markdownSyntax: result.markdownSyntax || null,
         caseId: result.caseId || null, caseTitle: result.caseTitle || null,
         reportKey: result.reportKey || (result.report && result.report.key) || null,
         evidenceKey: result.evidenceKey || (result.evidence && result.evidence.key) || null,
@@ -114,7 +114,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         await save(job).catch(() => { job.persistenceError = true; });
         send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_FAILED', message: job.error });
       }
-    } finally { job.settled = true; if (!executionSlotReleased) active -= 1; prune(); }
+    } finally { job.settled = true; job.reply = null; if (!executionSlotReleased) active -= 1; prune(); }
   }
   async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null } = {}, internal = null) {
     if (typeof serviceKey !== 'string' || !SERVICE_KEYS.includes(serviceKey) || !evaluators || !evaluators[serviceKey]) throw new TeamServiceError(400, 'UNIFIED_EVAL_SERVICE_INVALID', '不支持该测评服务');
@@ -136,7 +136,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (!['manual', 'automation', 'legacy'].includes(origin)) throw new TeamServiceError(400, 'UNIFIED_EVAL_ORIGIN_INVALID', '无效的运行来源');
     for (const value of [questionId, datasetVersion, sourceType, batchId]) if (value != null && (typeof value !== 'string' || value.length > 200)) throw new TeamServiceError(400, 'UNIFIED_EVAL_METADATA_INVALID', '运行来源信息无效');
     active += 1;
-    const job = { runId: crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'running', answer: '', answerTruncated: false, run: null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode };
+    const job = { runId: crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'running', answer: '', answerTruncated: false, run: evaluators[serviceKey]?.serviceAddress ? { serviceAddress: evaluators[serviceKey].serviceAddress, serviceAddressSource: 'run' } : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: internal?.idempotency?.scope, reply: null };
     const onText = (delta) => {
       if (typeof delta !== 'string') return;
       const remaining = Math.max(0, MAX_ANSWER_CHARS - job.answer.length);
@@ -146,6 +146,10 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       // 订阅建立前的短暂缓冲也受恢复正文的大小限制。
       const outgoing = job.events.subscribed ? delta : delta.slice(0, remaining);
       if (outgoing) send(job, 'text', { runId: job.runId, delta: outgoing });
+    };
+    const onState = details => {
+      job.run = { ...job.run, details }; scheduleSave(job);
+      send(job, 'state', { runId: job.runId, run: job.run });
     };
     try {
       if (idempotency) {
@@ -161,9 +165,9 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         ? { run: { id: internal.nativeRunId }, completion: Promise.resolve().then(() => internal.execute(onText)) }
         : internal && internal.caseDef
           ? await adapters[serviceKey].startCase(internal.caseDef, onText)
-          : await adapters[serviceKey].start(body, onText);
+          : await adapters[serviceKey].start(body, onText, onState);
       if (!started || !started.run || (!existingRun && !started.run.id) || !started.completion || typeof started.completion.then !== 'function') throw new Error('invalid evaluator response');
-      job.nativeRunId = started.run.id || null; runs.set(job.runId, job);
+      job.nativeRunId = started.run.id || null; job.reply = started.reply || null; runs.set(job.runId, job);
       void save(job).catch(() => { job.persistenceError = true; });
       void finish(job, started.completion);
       return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: started.completion, subscribe: (listener) => job.events.subscribe(listener) };
@@ -193,12 +197,12 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     }
     return start(safe, { idempotency: { scope, key, hash }, caseDef, scoreMode: evaluators && evaluators[safe.serviceKey]?.scoreMode });
   }
-  async function observe(runId, listener) {
+  async function observe(runId, listener, { scope } = {}) {
     const job = runs.get(runId);
-    if (!job) return { snapshot: await get(runId), live: false, unsubscribe: () => {} };
-    const current = snapshot(job);
+    if (!job) return { snapshot: await get(runId, { scope }), live: false, unsubscribe: () => {} };
+    const current = { ...snapshot(job), canReply: !!scope && job.ownerScope === scope && !job.settled && typeof job.reply === 'function' };
     if (job.settled) return { snapshot: current, live: false, unsubscribe: () => {} };
-    const unsubscribe = job.events.subscribe(listener, { discardPending: true });
+    const unsubscribe = job.events.subscribe((event, data) => listener(event, event === 'state' ? { ...data, canReply: current.canReply } : data), { discardPending: true });
     return { snapshot: current, live: true, unsubscribe };
   }
   async function beginAutomation(serviceKey, nativeRun, execute, { scoreMode, waitForCapacity = false } = {}) {
@@ -230,13 +234,16 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     started.subscribe(() => {});
     return started.nativeSnapshot;
   }
-  async function get(runId) {
+  async function get(runId, { scope } = {}) {
     const job = runs.get(runId);
     if (!job) {
       const saved = repository ? await repository.get(runId) : null;
       if (!saved) return getJob(runId);
       // 非本进程的运行只返回已保存快照，不推断远端任务是否仍在运行。
-      return statusFields({ ...saved, recoveryState: 'snapshot_only' });
+      // 旧记录不猜测原调用地址；可展示当前配置，并明确标注来源，不回写旧数据。
+      const configuredAddress = evaluators?.[saved.serviceKey]?.serviceAddress;
+      const run = saved.run?.serviceAddress || !configuredAddress ? saved.run : { ...saved.run, serviceAddress: configuredAddress, serviceAddressSource: 'configuration' };
+      return statusFields({ ...saved, run, recoveryState: 'snapshot_only', canReply: false });
     }
     if (job.persistenceError) {
       try { await save(job); job.persistenceError = false; } catch { /* 返回当前内存快照及保存失败状态。 */ }
@@ -246,9 +253,18 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       if (!job.scoreError && !hasPending(job.scores) && job.status === 'scoring') job.status = 'done';
       await save(job);
     }
-    return snapshot(job);
+    return { ...snapshot(job), canReply: !!scope && job.ownerScope === scope && !job.settled && typeof job.reply === 'function' };
+  }
+  async function reply(runId, input, { scope } = {}) {
+    const job = runs.get(runId);
+    if (!job || job.settled || typeof job.reply !== 'function') throw new TeamServiceError(409, 'REVIEW_UNAVAILABLE', '当前进程无法答复此运行，请查看保存的记录');
+    if (!scope || job.ownerScope !== scope) throw new TeamServiceError(403, 'FORBIDDEN', '只能答复本人发起的运行');
+    job.reply(input);
+    await save(job);
+    return { ok: true, runId };
   }
   async function list(query = {}) { if (!repository) throw new TeamServiceError(503, 'UNIFIED_EVAL_STORAGE_UNAVAILABLE', '统一运行记录尚未配置'); return repository.list(query); }
-  return { start, createRun, observe, get, list, runAutomation, beginAutomation, startLegacy };
+  function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
+  return { start, createRun, observe, get, list, reply, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

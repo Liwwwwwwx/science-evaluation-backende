@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { createApp } = require('../src/app');
 const { createLiteratureEvaluator } = require('../src/runs/literature-evaluator');
+const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
 
 class Socket extends EventEmitter {
   addEventListener(...args) { this.on(...args); }
@@ -48,4 +49,66 @@ test('运行 HTTP 校验会话、读写权限、来源、开关、幂等键及�
   const disabled = createApp({ token: 'x'.repeat(32), authService, evaluations, publicOrigin: 'http://localhost' });
   await new Promise(resolve => disabled.listen(0, '127.0.0.1', resolve)); t.after(() => disabled.close());
   assert.equal((await fetch(`http://127.0.0.1:${disabled.address().port}/api/evaluation/unified/runs`, { method: 'POST', headers: { cookie: 'evaluation_session=writer', origin: 'http://localhost' } })).status, 503);
+});
+
+test('航空文献复用 instruction 协议，隔离任务标识并保留部分回答和失败原因', async () => {
+  const ids = new Set();
+  for (const mode of ['done', 'close', 'timeout', 'error', 'interaction', 'binary', 'oversize']) {
+    let payload; const chunks = []; const socket = new Socket();
+    socket.send = text => {
+      payload = JSON.parse(text);
+      socket.emit('message', { data: '[sta' });
+      socket.emit('message', { data: 'rt]航空文献正文' });
+      socket.emit('message', { data: JSON.stringify({ type: 'progress', text: '内部过程' }) });
+      if (mode === 'done') { socket.emit('message', { data: '[en' }); socket.emit('message', { data: 'd]' }); socket.emit('close'); }
+      if (mode === 'close') socket.emit('close');
+      if (mode === 'error') socket.emit('message', { data: '{"type":"error"}' });
+      if (mode === 'interaction') socket.emit('message', { data: '{"type":"user_input_request"}' });
+      if (mode === 'binary') socket.emit('message', { data: new Uint8Array([1]) });
+      if (mode === 'oversize') socket.emit('message', { data: 'x'.repeat(1024 * 1024) });
+    };
+    const evaluator = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: 'ws://127.0.0.1:1108/start', timeoutMs: 30,
+      createSocket: target => { assert.equal(target, 'ws://127.0.0.1:1108/start'); queueMicrotask(() => socket.emit('open')); return socket; } });
+    const started = await evaluator.startQuestionRun({ question: '请检索高超声速飞行器热防护材料文献。' }, { onText: text => chunks.push(text) });
+    const result = await started.completion;
+    assert.equal(result.status, mode === 'done' ? 'done' : 'error');
+    assert.match(payload.taskid, /^evaluation-literature-aircraft-/); ids.add(payload.taskid);
+    assert.equal(payload.instruction, '请检索高超声速飞行器热防护材料文献。');
+    assert.deepEqual(payload.file_metadata, []); assert.equal(payload.user_name, 'science-evaluation');
+    assert.equal(result.taskid, payload.taskid);
+    assert.equal(chunks.join(''), `[start]航空文献正文${mode === 'done' ? '[end]' : ''}`);
+    if (!['done', 'interaction'].includes(mode)) assert.match(result.error, /航空文献服务/);
+    assert.equal(evaluator.scoreMode, 'none'); assert.equal((await evaluator.getRunQuality()).status, 'absent');
+  }
+  assert.equal(ids.size, 7);
+});
+
+test('服务可用性按各自适配器、写开关和用户权限确定，1108可单独配置', async t => {
+  const authService = { authenticate: async token => {
+    if (!token) throw Object.assign(Error('请登录'), { status: 401 });
+    return { id: token, permissions: token === 'reader' ? ['team-services:read'] : ['team-services:read', 'team-services:write'] };
+  } };
+  for (const keys of [[], ['literature'], ['literature-aircraft'], ['literature', 'literature-aircraft'], ['alloy'], ['synthesis'], ['new-material'], ['literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material']]) {
+    const evaluator = { startQuestionRun: () => { throw Error('不能触发被测服务'); } };
+    const evaluations = createUnifiedEvaluationService({ evaluators: Object.fromEntries(keys.map(key => [key, evaluator])) });
+    for (const write of [false, true]) {
+      const server = createApp({ token: 'x'.repeat(32), authService, evaluations, runWriteEnabled: write, publicOrigin: 'http://localhost' });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+      const url = `http://127.0.0.1:${server.address().port}/api/evaluation/unified/services`;
+      assert.equal((await fetch(url)).status, 401);
+      for (const user of ['reader', 'writer']) {
+        const response = await fetch(url, { headers: { cookie: `evaluation_session=${user}` } });
+        assert.equal(response.status, 200);
+        const { items } = await response.json();
+        assert.deepEqual(items.filter(item => item.enabled).map(item => item.key), write && user === 'writer' ? keys : []);
+        assert.ok(items.every(item => item.scoring === 'absent'));
+      }
+      for (const key of ['literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'].filter(key => !keys.includes(key))) {
+        const response = await fetch(url.replace('/services', '/runs'), { method: 'POST',
+          headers: { cookie: 'evaluation_session=writer', origin: 'http://localhost', 'content-type': 'application/json', 'Idempotency-Key': 'unconfigured' },
+          body: JSON.stringify({ serviceKey: key, question: '请检索航空热防护材料相关文献。' }) });
+        assert.equal(response.status, write ? 400 : 503);
+      }
+    }
+  }
 });

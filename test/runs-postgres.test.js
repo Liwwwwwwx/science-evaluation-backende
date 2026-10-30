@@ -8,6 +8,8 @@ const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluati
 const { createUnifiedEvaluationRepository } = require('../src/runs/unified-evaluation.repository');
 const { createRunQuestionResolver } = require('../src/runs/question-resolver');
 const { createEvalQuestionBankRepository } = require('../src/question-bank/repository');
+const { createLiteratureEvaluator } = require('../src/runs/literature-evaluator');
+const { EventEmitter } = require('node:events');
 
 const socket = process.env.EVALUATION_RUN_TEST_PG_SOCKET || '';
 test('隔离 PostgreSQL：领域题执行/SSE断线重连/幂等/历史及重启快照', { skip: !socket }, async t => {
@@ -29,7 +31,18 @@ test('隔离 PostgreSQL：领域题执行/SSE断线重连/幂等/历史及重启
     },
     async getRunQuality(){return {status:'absent'};},
   };
-  const createService = () => createUnifiedEvaluationService({evaluators:{literature:evaluator},repository,resolveQuestion:createRunQuestionResolver(questionRepository)});
+  let aircraftCalls = 0;
+  const aircraftEvaluator = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: 'ws://127.0.0.1:1108/start', createSocket: () => {
+    const socket = new EventEmitter(); socket.addEventListener = socket.on;
+    socket.close = () => socket.emit('close');
+    socket.send = payload => {
+      aircraftCalls++; assert.match(JSON.parse(payload).taskid, /^evaluation-literature-aircraft-/);
+      socket.emit('message', {data:'[start]'});
+      setTimeout(() => { socket.emit('message', {data:'航空文献回答与公式 $q=mc\\Delta T$[end]'}); socket.emit('close'); }, 60);
+    };
+    queueMicrotask(() => socket.emit('open')); return socket;
+  } });
+  const createService = () => createUnifiedEvaluationService({evaluators:{literature:evaluator,'literature-aircraft':aircraftEvaluator},repository,resolveQuestion:createRunQuestionResolver(questionRepository)});
   const authService = {authenticate:async token=>{if(!token)throw Object.assign(Error('请登录'),{status:401});return {id:'1',permissions:['team-services:read','team-services:write']};}};
   const startServer = async evaluations => {
     const server=createApp({token:'x'.repeat(32),authService,evaluations,runWriteEnabled:true,publicOrigin:'http://localhost'});
@@ -63,4 +76,36 @@ test('隔离 PostgreSQL：领域题执行/SSE断线重连/幂等/历史及重启
   assert.equal((await questionRepository.listQuestionsPaged({sourceType:'random',runnableFor:'literature'})).total,0);
   assert.equal((await post({serviceKey:'literature',question:'临时问题也应保存完整回答。'},'temporary')).status,201);
   await new Promise(resolve=>setTimeout(resolve,160));assert.equal(calls,2);
+
+  // 同一领域题可在另一个服务执行，服务切换不能复用旧请求的幂等键。
+  await pool.query("UPDATE eval_questions SET status='active',criteria=NULL WHERE id='domain-question'");
+  const aircraftInput={...input,serviceKey:'literature-aircraft'};
+  assert.equal((await post(aircraftInput)).status,409);
+  const aircraftPair=await Promise.all([post(aircraftInput,'aircraft-once'),post(aircraftInput,'aircraft-once')]);
+  assert.ok(aircraftPair.every(r=>r.status===201));
+  const aircraftCreated=await Promise.all(aircraftPair.map(r=>r.json()));
+  assert.equal(aircraftCreated[0].runId,aircraftCreated[1].runId);assert.equal(aircraftCalls,1);
+  const aircraftId=aircraftCreated[0].runId;
+  const abort=new AbortController();
+  const aircraftSse=await fetch(base+`/runs/${aircraftId}/events`,{headers,signal:abort.signal});
+  const aircraftReader=aircraftSse.body.getReader();await aircraftReader.read();abort.abort();await aircraftReader.cancel().catch(()=>{});
+  assert.match(await(await fetch(base+`/runs/${aircraftId}/events`,{headers})).text(),/event: done/);
+  const aircraftSaved=await(await fetch(base+`/runs/${aircraftId}`,{headers})).json();
+  assert.equal(aircraftSaved.serviceKey,'literature-aircraft');assert.equal(aircraftSaved.status,'done');
+  assert.equal(aircraftSaved.answer,'[start]航空文献回答与公式 $q=mc\\Delta T$[end]');
+  assert.equal(aircraftSaved.executionStatus,'succeeded');assert.equal(aircraftSaved.scoringStatus,'absent');
+  assert.equal(aircraftSaved.questionId,'domain-question');assert.equal(aircraftSaved.datasetVersion,'gen-v1');
+  const afterAircraftRestart=await startServer(createService());
+  const aircraftRestored=await(await fetch(afterAircraftRestart+`/runs/${aircraftId}`,{headers})).json();
+  assert.equal(aircraftRestored.answer,aircraftSaved.answer);assert.equal(aircraftRestored.recoveryState,'snapshot_only');
+  const replay=await fetch(afterAircraftRestart+'/runs',{method:'POST',headers:{...headers,'Idempotency-Key':'aircraft-once'},body:JSON.stringify(aircraftInput)});
+  const replayed=await replay.json();assert.equal(replayed.runId,aircraftId);assert.equal(replayed.reused,true);assert.equal(aircraftCalls,1);
+  assert.equal((await(await fetch(afterAircraftRestart+'/runs',{headers})).json()).total,3);
+  // 旧服务题仍保持服务约束，跨服务不可执行；带专属规则的旧题仍被过滤。
+  await pool.query("UPDATE eval_questions SET service_key='literature' WHERE id='domain-question'");
+  assert.equal((await post(aircraftInput,'wrong-service')).status,409);
+  assert.equal((await questionRepository.listQuestionsPaged({sourceType:'random',runnableFor:'literature-aircraft'})).total,0);
+  await pool.query("UPDATE eval_questions SET service_key='literature-aircraft' WHERE id='domain-question'");
+  assert.equal((await questionRepository.listQuestionsPaged({sourceType:'random',runnableFor:'literature-aircraft'})).total,1);
+  assert.equal((await questionRepository.listQuestionsPaged({sourceType:'random',runnableFor:'literature'})).total,0);
 });

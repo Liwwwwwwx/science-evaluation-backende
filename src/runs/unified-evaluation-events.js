@@ -10,7 +10,11 @@ function createRunEvents() {
         for (const listener of listeners) {
           try { listener(event, data); } catch { /* 单个监听者失败不影响执行 */ }
         }
-      } else if (!subscribed) pending.push({ event, data });
+      } else if (!subscribed) {
+        // 结构化状态是完整快照，订阅前只保留最新一份，避免重复累积大结果。
+        if (event === 'state') pending = pending.filter(item => item.event !== 'state');
+        pending.push({ event, data });
+      }
     },
     subscribe(next, { discardPending = false } = {}) {
       listeners.add(next);

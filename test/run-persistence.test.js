@@ -2,6 +2,35 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createUnifiedEvaluationRepository } = require('../src/runs/unified-evaluation.repository');
 const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
+const { publicServiceAddress } = require('../src/runs/service-address');
+
+test('服务地址去掉认证信息、查询参数和片段', () => {
+  assert.equal(publicServiceAddress('wss://user:password@example.com:1115/new-material/start?token=secret#key'), 'wss://example.com:1115/new-material/start');
+  assert.equal(publicServiceAddress('javascript:alert(1)'), null);
+  assert.equal(publicServiceAddress(undefined), null);
+});
+
+test('运行保留当时地址，配置变化不覆盖历史；旧记录标注当前配置且不回写', async () => {
+  const rows = new Map(); let writes = 0; let finish;
+  const repository = {
+    findIdempotent: async () => null,
+    createIdempotent: async job => { rows.set(job.runId, structuredClone(job)); return { created: true, runId: job.runId }; },
+    save: async job => { writes++; rows.set(job.runId, structuredClone(job)); },
+    get: async id => structuredClone(rows.get(id)),
+  };
+  const evaluator = { serviceAddress: 'ws://original.example:1106/start', scoreMode: 'none', startQuestionRun: async () => ({ run: { id: 'native' }, completion: new Promise(resolve => { finish = resolve; }) }) };
+  const first = createUnifiedEvaluationService({ repository, evaluators: { literature: evaluator } });
+  const created = await first.createRun({ serviceKey: 'literature', question: '检索材料相关的文献并说明依据。' }, { scope: 'user', key: 'once' });
+  assert.equal((await first.get(created.runId)).run.serviceAddress, evaluator.serviceAddress);
+  finish({ status: 'done' }); await new Promise(resolve => setImmediate(resolve));
+  const restarted = createUnifiedEvaluationService({ repository, evaluators: { literature: { ...evaluator, serviceAddress: 'ws://new.example:1106/start' } } });
+  const saved = await restarted.get(created.runId);
+  assert.equal(saved.run.serviceAddress, 'ws://original.example:1106/start'); assert.equal(saved.run.serviceAddressSource, 'run');
+  rows.set('old', { serviceKey: 'literature', status: 'done', run: { status: 'done' } });
+  const before = writes; const old = await restarted.get('old');
+  assert.equal(old.run.serviceAddress, 'ws://new.example:1106/start'); assert.equal(old.run.serviceAddressSource, 'configuration');
+  assert.equal(rows.get('old').run.serviceAddress, undefined); assert.equal(writes, before);
+});
 
 test('运行记录仅接受指定数据库，拒绝写入其他数据库', async () => {
   assert.throws(() => createUnifiedEvaluationRepository());

@@ -3,10 +3,10 @@ function createUnifiedEvaluationAdapters(evaluators = {}) {
   return Object.fromEntries(Object.entries(evaluators).map(([serviceKey, evaluator]) => {
     const isAlphaRsi = serviceKey === 'alpha-rsi';
     return [serviceKey, {
-      start(body, onText) {
+      start(body, onText, onState) {
         return isAlphaRsi
           ? evaluator.askQuestionStream(body, { onText })
-          : evaluator.startQuestionRun(body, { onText });
+          : evaluator.startQuestionRun(body, { onText, onState });
       },
       async startCase(caseDef, onText) {
         let completion;
