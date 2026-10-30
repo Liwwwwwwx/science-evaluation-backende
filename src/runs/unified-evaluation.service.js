@@ -110,7 +110,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         job.persistenceError = true;
         send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_PERSISTENCE_FAILED', message: '运行已结束，但记录保存失败；请稍后读取原运行，不要重复发起。' });
       } else {
-        job.status = 'error'; job.error = '测评执行失败'; job.finishedAt = new Date().toISOString();
+        job.status = 'error'; job.scores = { quality: { status: 'absent' } }; job.error = '测评执行失败'; job.finishedAt = new Date().toISOString();
         await save(job).catch(() => { job.persistenceError = true; });
         send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_FAILED', message: job.error });
       }
@@ -136,7 +136,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (!['manual', 'automation', 'legacy'].includes(origin)) throw new TeamServiceError(400, 'UNIFIED_EVAL_ORIGIN_INVALID', '无效的运行来源');
     for (const value of [questionId, datasetVersion, sourceType, batchId]) if (value != null && (typeof value !== 'string' || value.length > 200)) throw new TeamServiceError(400, 'UNIFIED_EVAL_METADATA_INVALID', '运行来源信息无效');
     active += 1;
-    const job = { runId: crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'running', answer: '', answerTruncated: false, run: null, scores: null, scoreError: null, error: null, startedAt: new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode };
+    const job = { runId: crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'running', answer: '', answerTruncated: false, run: null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode };
     const onText = (delta) => {
       if (typeof delta !== 'string') return;
       const remaining = Math.max(0, MAX_ANSWER_CHARS - job.answer.length);
@@ -191,7 +191,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       if (!['fixed', 'random'].includes(safe.sourceType) || !safe.questionId || !safe.datasetVersion || !resolveQuestion) throw new TeamServiceError(400, 'QUESTION_SOURCE_INVALID', '请选择有效的题目和版本');
       caseDef = await resolveQuestion(safe);
     }
-    return start(safe, { idempotency: { scope, key, hash }, caseDef });
+    return start(safe, { idempotency: { scope, key, hash }, caseDef, scoreMode: evaluators && evaluators[safe.serviceKey]?.scoreMode });
   }
   async function observe(runId, listener) {
     const job = runs.get(runId);
@@ -235,16 +235,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (!job) {
       const saved = repository ? await repository.get(runId) : null;
       if (!saved) return getJob(runId);
-      if (saved.status === 'scoring' && saved.nativeRunId && evaluators && evaluators[saved.serviceKey] && typeof repository.refreshScores === 'function') {
-        try {
-          const scores = await readScores(saved);
-          const status = hasPending(scores) ? 'scoring' : 'done';
-          const updated = await repository.refreshScores(runId, scores, null, status);
-          if (updated) return statusFields({ ...updated, recoveryState: 'snapshot_only' });
-          const current = await repository.get(runId);
-          if (current) return statusFields({ ...current, recoveryState: 'snapshot_only' });
-        } catch { /* 保留已存快照，评分读取失败不伪装成评分失败。 */ }
-      }
       // 非本进程的运行只返回已保存快照，不推断远端任务是否仍在运行。
       return statusFields({ ...saved, recoveryState: 'snapshot_only' });
     }

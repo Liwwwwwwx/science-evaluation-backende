@@ -51,3 +51,15 @@ test('独立运行核心区分执行与评分状态', async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal((await service.get(run.runId)).scoringStatus, 'failed');
 });
+
+test('未配置评分的服务从运行开始即显示无评分；重启快照不刷新旧评分', async () => {
+  let finish; let reads = 0;
+  const evaluator = { scoreMode: 'none', async startQuestionRun() { return { run: { id: 'native' }, completion: new Promise(resolve => { finish = resolve; }) }; }, async getRunQuality() { reads++; throw Error('must not read'); } };
+  const repository = { findIdempotent: async () => null, createIdempotent: async job => ({ created: true, runId: job.runId }), save: async () => {}, get: async () => ({ runId: 'saved', serviceKey: 'literature', nativeRunId: 'foreign-native', status: 'scoring', scores: { quality: { status: 'pending' } }, run: { status: 'done' } }) };
+  const service = createUnifiedEvaluationService({ evaluators: { literature: evaluator }, repository });
+  const created = await service.createRun({ serviceKey: 'literature', question: '请检索材料性能相关的文献。' }, { scope: 'user', key: 'once' });
+  assert.equal((await service.get(created.runId)).scoringStatus, 'absent');
+  finish({ status: 'done' }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await service.get(created.runId)).executionStatus, 'succeeded');
+  const saved = await service.get('saved'); assert.equal(saved.recoveryState, 'snapshot_only'); assert.equal(saved.status, 'scoring'); assert.equal(reads, 0);
+});

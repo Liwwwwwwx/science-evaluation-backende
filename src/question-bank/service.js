@@ -21,16 +21,17 @@ function createQuestionBankService(repo) {
       const serviceKey = query.get('service') || null;
       const sourceType = query.get('source') || null;
       const domainKey = query.get('domain') || null;
+      const runnableFor = query.get('runnableFor') || null;
       const status = query.get('status') || 'active';
       const search = (query.get('search') || '').trim();
       const limit = Number(query.get('limit') || 20); const offset = Number(query.get('offset') || 0);
-      if ((domainKey && domainKey !== 'unclassified' && !Object.hasOwn(DOMAINS, domainKey)) || (serviceKey && !services.has(serviceKey)) || (sourceType && !['fixed', 'random'].includes(sourceType)) || status !== 'active' || search.length > 500 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 1000000) fail(400, 'INVALID_QUERY', '题库查询参数无效');
+      if ((runnableFor && !services.has(runnableFor)) || (domainKey && domainKey !== 'unclassified' && !Object.hasOwn(DOMAINS, domainKey)) || (serviceKey && !services.has(serviceKey)) || (sourceType && !['fixed', 'random'].includes(sourceType)) || status !== 'active' || search.length > 500 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 1000000) fail(400, 'INVALID_QUERY', '题库查询参数无效');
       if (!sourceType || sourceType === 'fixed') {
         const relevant = cases.filter(c => !serviceKey || c.serviceKey === serviceKey);
         const baselines = relevant.map(c => ({ serviceKey: c.serviceKey, caseId: c.id, questionId: fixedQuestionId(c.serviceKey, c.id), datasetVersion: fixedDatasetVersionOf(c.serviceKey, cases.filter(x => x.serviceKey === c.serviceKey)) }));
         if ((await repo.findMissingFixedCaseBaselines(baselines)).length) fail(503, 'FIXED_CASE_BASELINE_MISSING', '内置固定案例基线尚未登记');
       }
-      return repo.listQuestionsPaged({ serviceKey, domainKey, sourceType, status, search: search || null, limit, offset });
+      return repo.listQuestionsPaged({ serviceKey, domainKey, runnableFor, sourceType, status, search: search || null, limit, offset });
     },
     async import(input) {
       if (!input || !Array.isArray(input.items) || input.items.length < 1 || input.items.length > 100) fail(400, 'FIXED_CASE_ITEMS_INVALID', 'items 需为 1-100 条');

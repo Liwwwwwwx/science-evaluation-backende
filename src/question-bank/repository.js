@@ -1022,13 +1022,17 @@ function createEvalQuestionBankRepository({ pool } = {}) {
   }
 
   // 分页检索（管理端题库页）：筛选 + 题面搜索 + 总数。
-  async function listQuestionsPaged({ serviceKey, domainKey, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
+  async function listQuestionsPaged({ serviceKey, domainKey, runnableFor, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
     const where = ['1 = 1'];
     const params = [];
     if (status) { params.push(status); where.push(`status = $${params.length}`); }
     if (serviceKey) { params.push(serviceKey); where.push(`service_key = $${params.length}`); }
     if (domainKey === 'unclassified') where.push('domain_key IS NULL');
     else if (domainKey) { params.push(domainKey); where.push(`domain_key = $${params.length}`); }
+    if (runnableFor) {
+      params.push(runnableFor); where.push(`(service_key IS NULL OR service_key = $${params.length})`);
+      where.push("layer = 'base' AND source_type IN ('fixed', 'random') AND (criteria IS NULL OR criteria = 'null'::jsonb)");
+    }
     if (layer) { params.push(layer); where.push(`layer = $${params.length}`); }
     if (sourceType) { params.push(sourceType); where.push(`source_type = $${params.length}`); }
     if (search) { params.push(`%${search}%`); where.push(`question ILIKE $${params.length}`); }

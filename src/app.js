@@ -1,11 +1,12 @@
 const http = require('node:http');
+const { handleRuns } = require('./runs/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, evaluations, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -43,6 +44,18 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname.startsWith('/api/evaluation/unified/')) {
+      try {
+        if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
+        const user = await authService.authenticate(session(req));
+        if (req.method === 'GET' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有运行查看权限');
+        return await handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply });
+      } catch (error) {
+        if (res.headersSent) { res.end(); return; }
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'EVALUATION_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '测评服务暂不可用，请保留幂等键后重试' : error.message);
+      }
+    }
     if (url.pathname.startsWith('/api/question-bank/')) {
       try {
         if (!authService || !questionBank) return fail(res, 503, 'QUESTION_BANK_UNAVAILABLE', '题库服务尚未配置');
