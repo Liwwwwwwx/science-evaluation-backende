@@ -5,6 +5,8 @@ const { createConversationEvents } = require('./conversation-events');
 const { stackConfirmation } = require('./mission-confirmations');
 
 const MAX_ANSWER_CHARS = 1024 * 1024;
+// 接收上限与归档预算分开：下游团队的完整输出可能超过单条归档预算。
+const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_FRAMES = 100000;
@@ -96,7 +98,11 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
         else if (raw && typeof raw.text === 'function') raw = await raw.text();
         if (settled) return;
         if (typeof raw !== 'string') return finish('Mission 返回了不支持的数据帧');
-        if (Buffer.byteLength(raw) > MAX_FRAME_BYTES) return finish('Mission 数据帧超过保存上限');
+        const messageBytes = Buffer.byteLength(raw);
+        if (messageBytes > MAX_MESSAGE_BYTES) {
+          transport.rejectedFrameBytes = messageBytes; transport.maxFrameBytes = MAX_MESSAGE_BYTES;
+          return finish('Mission 数据帧超过接收上限（8 MiB）');
+        }
         let frame; try { frame = JSON.parse(raw); } catch {}
         received = true;
         transport.receivedFrames = frameCount; transport.lastFrameAt = new Date().toISOString();

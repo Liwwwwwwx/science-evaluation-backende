@@ -175,3 +175,32 @@ test('统一运行允许主服务五个并发，第六个排队且完成后自�
   for (const socket of sockets.slice(1)) { socket.message('[start]完成[end]'); socket.emit('close', { code: 1000 }); }
   await flush();
 });
+
+test('超过256KiB的合法团队输出仍完整接收，正常结束后才完成', async () => {
+  const { evaluator, sockets } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '比较材料性能并提供公开来源' }, { onText() {} });
+  await flush();
+  const content = '材料参数与来源。'.repeat(20000);
+  const frame = { type: 'display.team_output', event_id: 'large-team', phase: 'end', content };
+  assert.ok(Buffer.byteLength(JSON.stringify(frame)) > 256 * 1024);
+  sockets[0].message(frame);
+  sockets[0].message({ type: 'display.final_answer', event_id: 'final', phase: 'end', content: '已经完成材料对比。' });
+  sockets[0].emit('close', { code: 1000 });
+  const result = await started.completion;
+  assert.equal(result.status, 'done');
+  assert.equal(result.details.displayEvents.find(frame => frame.event_id === 'large-team').content, content);
+  assert.equal(result.details.truncated, false);
+});
+
+test('超出接收上限仍明确失败并记录大小，不将不完整输出冒充完成', async () => {
+  const { evaluator, sockets } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '检查超大帧失败行为' }, { onText() {} });
+  await flush();
+  const bytes = 8 * 1024 * 1024 + 1;
+  sockets[0].message('x'.repeat(bytes));
+  const result = await started.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /超过接收上限/);
+  assert.equal(result.details.transport.rejectedFrameBytes, bytes);
+  assert.equal(result.details.transport.maxFrameBytes, 8 * 1024 * 1024);
+});
