@@ -37,6 +37,22 @@ test('压缩快照之后只追加新序号，最终总结完整content替换预�
   assert.equal(state.data.displayEvents[1].content, '完整总结'); assert.equal(state.data.displayEvents[1].phase, 'end');
 });
 
+test('大内容的结束帧不重复保存增量，迟到增量不覆盖最终正文', () => {
+  for (const type of ['display.team_output', 'display.final_answer']) {
+    const state = createConversationEvents();
+    const content = 'x'.repeat(600 * 1024);
+    assert.equal(state.record({ type, event_id: 'large', phase: 'delta', seq: 1, delta: content }), true);
+    assert.equal(state.record({ type, event_id: 'large', phase: 'end', seq: 2, content }), true);
+    assert.equal(state.record({ type, event_id: 'large', phase: 'delta', seq: 1, delta: content }), true);
+    const event = state.data.displayEvents[0];
+    assert.equal(event.phase, 'end');
+    assert.equal(event.content, content);
+    assert.equal(event.delta, undefined);
+    assert.equal(state.data.truncated, false);
+    assert.match(packInput({ question: '测试', answer: '', run: { details: state.data } }).answer, /x{100}/);
+  }
+});
+
 test('文件归一化去重、未知业务JSON保留、心跳忽略、超限明确标记', () => {
   const state = createConversationEvents({ baseUrl: 'http://localhost:1234' });
   const frame = { type: 'display.artifact', event_id: 'file', file_metadata: [{ original_filename: '图.png', download_url: '/files/figure.png' }, { name: '危险', url: 'javascript:alert(1)' }, { name: '缺少地址' }] };

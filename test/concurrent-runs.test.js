@@ -26,6 +26,35 @@ function fixture() {
   return { rows, pending, repository, evaluators, service: createUnifiedEvaluationService({ repository, evaluators, maxActive: 6, maxPerService: 5 }) };
 }
 
+test('统一运行可将航空服务限制为单并发，同时允许其他服务运行', async () => {
+  const { repository, evaluators, pending } = fixture();
+  evaluators['literature-aircraft'] = evaluators.literature;
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 6, maxPerService: 5, serviceLimits: { 'literature-aircraft': 1 } });
+  const create = (serviceKey, n) => service.createRun({ serviceKey, question: `服务独立并发测试 ${serviceKey}-${n}` }, { scope: 'user', key: `limit-${serviceKey}-${n}` });
+  const first = await create('literature-aircraft', 1);
+  const second = await create('literature-aircraft', 2);
+  await create('alloy', 1);
+  assert.equal((await service.get(second.runId)).status, 'queued');
+  assert.equal(pending.size, 2);
+  pending.get((await service.get(first.runId)).question)({ status: 'error', error: '模拟失败' });
+  await tick();
+  assert.equal((await service.get(second.runId)).status, 'running');
+  for (const resolve of pending.values()) resolve({ status: 'done' });
+  await tick();
+});
+
+test('自动批次同一个幂等键只创建一次，并保留失败原因', async () => {
+  const { service, pending } = fixture();
+  const input = { serviceKey: 'alloy', question: '自动批次失败原因记录测试', batchId: 'batch-1' };
+  const first = await service.createBatchRun(input, { key: 'batch-1:alloy:1' });
+  const second = await service.createBatchRun(input, { key: 'batch-1:alloy:1' });
+  assert.equal(first.runId, second.runId);
+  assert.equal(second.reused, true);
+  pending.get(input.question)({ status: 'error', error: '模拟服务连接断开' });
+  await tick();
+  assert.equal((await service.get(first.runId)).error, '模拟服务连接断开');
+});
+
 test('每服务五个运行，第六个排队；其他服务可运行，结果不串扰', async () => {
   const { service, pending } = fixture(); const created = [];
   const create = (serviceKey, n) => service.createRun({ serviceKey, question: `独立并发测试题目编号 ${serviceKey}-${n}` }, { scope: 'user', key: `${serviceKey}-${n}` });

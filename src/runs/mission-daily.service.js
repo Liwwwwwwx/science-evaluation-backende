@@ -13,7 +13,7 @@ function dailyKey(day, item) {
 }
 
 // 计划与题目快照先落库，再创建可幂等恢复的运行；不使用请求方身份或公开接口。
-function createMissionDailyService({ repository, evaluations, scoring, serviceAddress = null, enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, onError = () => {} } = {}) {
+function createMissionDailyService({ repository, evaluations, scoring, serviceAddress = null, enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, skipDate = () => false, onError = () => {} } = {}) {
   if (!repository || !evaluations) throw new Error('每日测评依赖运行及数据库');
   let timer = null; let ticking = false; let reported = false;
   async function dispatch(plan) {
@@ -31,6 +31,7 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
       if (pending) { await dispatch(pending); return; }
       const { date, minute } = localTime(now());
       if (minute < 22 * 60) return;
+      if (skipDate(date)) return;
       if (await repository.get(date)) return;
       // 只在触发窗口创建新计划；错过时记录，不在启动时堆积补跑。
       if (minute >= 22 * 60 + 10) {

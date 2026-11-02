@@ -67,6 +67,8 @@ function createConversationEvents({ baseUrl, maxBytes = 4 * 1024 * 1024, maxEven
         merged.delta = next.prefix + [...next.parts].sort((a, b) => a[0] - b[0]).map(entry => entry[1]).join('');
         if (previous?.phase === 'end' && frame.phase !== 'end') merged = { ...merged, phase: 'end', content: previous.content, status: previous.status };
         if (previous?.content && frame.phase !== 'end') merged.content = previous.content;
+        // 最终正文是权威内容；重复保存累计增量会使合法结束帧超出归档预算。
+        if (merged.phase === 'end' && typeof merged.content === 'string') delete merged.delta;
         merged.seq = Math.max(previous?.seq ?? -1, sequence ?? order);
         merged.compacted_through_seq = Math.max(next.watermark, ...next.parts.keys());
         if (!put(data.displayEvents, index, merged, eventLimit(type))) return false;

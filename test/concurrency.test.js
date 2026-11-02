@@ -2,6 +2,22 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createConcurrency } = require('../src/runs/concurrency');
 
+test('航空服务单并发时其他服务仍能独立运行', async () => {
+  const gate = createConcurrency({ maxActive: 6, maxPerKey: 5, limitsByKey: { 'literature-aircraft': 1 } });
+  const first = gate.reserve('literature-aircraft');
+  const second = gate.reserve('literature-aircraft');
+  const others = Array.from({ length: 5 }, () => gate.reserve('mission-material'));
+  assert.equal(first.queued, false);
+  assert.equal(second.queued, true);
+  assert.ok(others.every(item => !item.queued));
+  const releases = await Promise.all(others.map(item => item.ready));
+  (await first.ready)();
+  (await second.ready)();
+  releases.forEach(release => release());
+  assert.deepEqual(gate.stats(), { active: 0, queued: 0 });
+  assert.throws(() => createConcurrency({ maxActive: 5, maxPerKey: 5, limitsByKey: { aircraft: 0 } }), RangeError);
+});
+
 test('同服务并发受限，其他服务可以使用空闲容量', async () => {
   const gate = createConcurrency({ maxActive: 3, maxPerKey: 2 });
   const releaseA1 = await gate.acquire('a');
