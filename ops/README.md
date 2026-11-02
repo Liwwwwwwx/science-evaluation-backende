@@ -4,7 +4,7 @@
 
 部署目标为 36.103.177.195。前端 `http://36.103.177.195:1101`，后端 `127.0.0.1:7714`。独立账号 `science-eval`、目录 `/data/science-evaluation`、systemd 服务 `science-evaluation-{backend,frontend}`；不复用或重启 Science Admin。数据库使用现有 `science_evaluation`，不执行迁移。
 
-首次部署：管理员检查 `bootstrap.sh` 后执行。将私有配置分别放入 `shared/backend.env`、`shared/frontend.env`，属主 science-eval、权限 600。后端设置生产环境、数据库本机 5432、现有服务/模型/测试机器人配置；前后端显式 `EVALUATION_ALLOW_HTTP=true`。前端 `PORT=1101`、`HOSTNAME=0.0.0.0`、`SCIENCE_EVALUATION_BACKEND_URL=http://127.0.0.1:7714`。后端 `PORT=7714`、`EVALUATION_HOST=127.0.0.1`、`EVALUATION_PUBLIC_ORIGIN=http://36.103.177.195:1101`。更换为 HTTPS 时更新 origin 并关闭 HTTP 开关。
+首次部署：管理员检查 `bootstrap.sh` 后执行。将私有配置分别放入 `shared/backend.env`、`shared/frontend.env`，属主 science-eval、权限 600。后端设置生产环境、数据库本机 5432、现有服务/模型/测试机器人配置；需要夜间自动化时在 `shared/backend.env` 设置 `EVALUATION_AUTOMATION_ENABLED=true`（本地 `.env.local` 设为 `false`）；前后端显式 `EVALUATION_ALLOW_HTTP=true`。前端 `PORT=1101`、`HOSTNAME=0.0.0.0`、`SCIENCE_EVALUATION_BACKEND_URL=http://127.0.0.1:7714`。后端 `PORT=7714`、`EVALUATION_HOST=127.0.0.1`、`EVALUATION_PUBLIC_ORIGIN=http://36.103.177.195:1101`。更换为 HTTPS 时更新 origin 并关闭 HTTP 开关。
 
 两个仓库的 `production` 环境配置 secrets `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS`，variables `DEPLOY_HOST`、`DEPLOY_USER`。部署 SSH 密钥使用独立非 root 用户；sudo 仅允许重启/停止这两个新服务。SSH 严格验证预存主机密钥。应用凭据只在服务器，不放入 GitHub 构建配置或产物。
 

@@ -1,0 +1,20 @@
+const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const {Pool}=require('pg');
+const {createStandardsRepository}=require('../src/standards/repository');
+const socket=process.env.EVALUATION_STANDARDS_TEST_PG_SOCKET;
+test('隔离数据库：草稿、确认、版本隔离及失效题目保护',{skip:!socket},async t=>{
+  assert.match(socket,/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);
+  const pool=new Pool({host:socket,port:55481,database:'science_evaluation'});t.after(()=>pool.end());
+  await pool.query('CREATE TABLE eval_questions(id text,dataset_version text,question text,status text,PRIMARY KEY(id,dataset_version))');
+  await pool.query(fs.readFileSync(require('node:path').join(__dirname,'../migrations/009_question_standards.sql'),'utf8'));
+  const question='请比较两种材料，并说明选择依据。';await pool.query("INSERT INTO eval_questions VALUES ('q','v1',$1,'active')",[question]);
+  const questions={async getQuestion(id,version){const r=await pool.query('SELECT * FROM eval_questions WHERE id=$1 AND dataset_version=$2',[id,version]);return r.rows[0]||null;}};
+  const repo=createStandardsRepository({pool,questions});
+  const content={domain:'材料',taskType:'比较',explicitRequirements:[{requirement:'比较两种材料',critical:true,source:'比较两种材料'}],evaluationCriteria:[{name:'比较',category:'required',description:'比较两种材料',howToJudge:'检查比较内容',source:'比较两种材料'}],missingInformation:[]};
+  const input={questionId:'q',datasetVersion:'v1',question,content};const a=await repo.save(input,'user');const b=await repo.save(input,'user');
+  await repo.confirm(a.id,'user');await repo.confirm(b.id,'user');await repo.confirm(b.id,'user');
+  const rows=(await repo.list('q','v1')).items;assert.equal(rows.find(x=>x.id===a.id).state,'superseded');assert.equal(rows.find(x=>x.id===b.id).state,'confirmed');assert.equal((await repo.list('q','v2')).items.length,0);
+  const ids=Array.from({length:101},()=>require('node:crypto').randomUUID());
+  await pool.query("INSERT INTO evaluation_question_standards(id,question_id,dataset_version,question,content,state,created_by,created_at) SELECT id::uuid,'q','v1',$2,'{}'::jsonb,'draft','user',now()+interval '1 minute' FROM unnest($1::text[]) id",[ids,question]);
+  const limited=(await repo.list('q','v1')).items;assert.equal(limited.length,100);assert.equal(limited[0].id,b.id);assert.equal(limited[0].state,'confirmed');
+  const c=await repo.save(input,'user');await pool.query("UPDATE eval_questions SET status='retired' WHERE id='q'");await assert.rejects(repo.confirm(c.id,'user'),{code:'QUESTION_CHANGED'});await assert.rejects(repo.save(input,'user'),{code:'QUESTION_CHANGED'});
+});

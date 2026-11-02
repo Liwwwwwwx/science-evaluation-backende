@@ -1,5 +1,19 @@
 # Science 测评后端
 
+## 评判标准助手
+
+`POST /api/evaluation/standards` 接收 `{ "question": "问题原文" }`，生成题目明确要求、评判项及待补充信息。题目长度为 8–4000 个字符；每条要求和必需项都须引用输入中存在的原文。评判项分为 `required`（题目要求）、`recommended`（专业建议）和 `needs_verification`（待核验）。接口不保存数据、不修改题库或评分规则，不自动联网查证，也不宣称模型输出经过专业验证。
+
+选取题库题目后，可保存单题标准草稿并确认，按题目 ID 和版本隔离；确认新版本后旧确认版保留为历史。`GET /api/evaluation/question-standards?questionId=...&datasetVersion=...` 读取，`POST /api/evaluation/question-standards` 保存，`POST /api/evaluation/question-standards/:id/confirm` 确认。需要测评会话和相应读写权限，写入还需题库写入开关；生产启用前须审核并手工执行 `migrations/009_question_standards.sql`。该功能不自动用于实际评分。生成标准可在页面导出为 Markdown。
+
+服务端调用使用现有 `EVALUATION_SERVICE_TOKEN` 的 Bearer 认证；网页调用使用现有登录会话、`team-services:write` 权限和同源校验。依赖已配置的出题模型。模型不可用或结果格式不符合约束时返回错误，不返回不完整结果；示例：`curl -X POST "$BASE_URL/api/evaluation/standards" -H "Authorization: Bearer $EVALUATION_SERVICE_TOKEN" -H 'Content-Type: application/json' -d '{"question":"比较两种铝合金用于支架的适用性，并说明选择依据。"}'`。测试：`node --test test/standards.test.js`。
+
+## 自动化总开关
+
+`EVALUATION_AUTOMATION_ENABLED` 统一控制试跑批次、Mission 每日计划和每日自动汇总：显式 `true` 开启，显式 `false` 关闭；未设置时仅 `NODE_ENV=development/test` 默认关闭，其他环境默认开启。各调度器仍要求自己的开关和运行写入条件同时满足。
+
+本地 `.env.local` 显式设置 `EVALUATION_AUTOMATION_ENABLED=false`，即使 shell 里残留 `EVALUATION_TRIAL_DATE` 也不会启动调度器。生产 `shared/backend.env` 需要夜间自动化时设置 `EVALUATION_AUTOMATION_ENABLED=true`，并同步开启对应 `EVALUATION_MISSION_DAILY_ENABLED`、`EVALUATION_DAILY_REPORT_ENABLED` 等开关。该总开关不改变手工创建运行、手工生成报告或队列恢复的独立写开关。
+
 ## 单日随机题试运行
 
 本功能默认关闭。指定 `EVALUATION_TRIAL_DATE=YYYY-MM-DD` 并启用运行写入、配置六个服务与出题模型后，仅在该日北京时间 22:00–22:10 生成并提交一轮。部署前需手工审核并执行 `migrations/008_trial_batch_plans.sql`，不自动修改数据库；需要用户确认后再部署和配置。日期开关应在试运行结束后移除。
@@ -9,6 +23,14 @@
 计划先持久化完整题目、服务地址和规则，再按每题幂等键派发，排队任务可按原记录恢复。运行中断的远端任务状态可能未知，不自动重发；出题进程中断后超过两小时标记失败，需人工检查。模型生成不足或失败时整轮不派发。试运行当天跳过本平台原 Mission 每日计划；若当天已存在原计划，或上一轮 Mission 仍未结束，则试运行不会启动。旧 Science Admin 夜检不受此开关控制。
 
 试运行日报等待全部已计划任务和评分结束，不受次日 06:00 截止限制；仍使用现有测试机器人通知和通知去重规则。仅依赖数据库原子抢占防止重复派发，并发上限是单进程限制，不能用于多个后端实例共享限流。
+
+## 测评批次读取
+
+新增四个只读接口，供前端“测评批次”页使用：`GET /api/evaluation/unified/batches` 列表、`/:id` 详情、`/:id/runs` 运行列表、`/:id/comparison` 环比。接口使用现有测评会话和 `team-services:read`，只读取 `evaluation_trial_batch_plans`、`evaluation_mission_daily_plans` 与 `unified_evaluation_runs`，不调用模型、不写库、不重新发起任务。
+
+列表会把试跑和 Mission 每日计划统一成批次，按 `batch_id` 汇总运行、完成/失败/超时和两家模型均分；详情按服务展示低分题和失败题，运行列表支持服务、执行状态、排序和分页。试跑批次每次重新生成随机题，没有同题 ID，通常只能做服务汇总环比；Mission 每日计划可匹配 `question_id + dataset_version` 做逐题环比。两批次的规则哈希或评分模型不同时标记不可比，不直接相减。
+
+批次表未迁移时列表返回 `storageReady=false`，详情返回 503；读取失败、参数错误和批次不存在分别返回明确状态。应用不自动执行迁移。测试：`node --test test/batches.test.js test/batches-http.test.js`。
 
 ## 每日测评分析报告
 
@@ -67,7 +89,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 ## 题库
 
-题库使用既有 `eval_questions` 和 `eval_fixed_case_overrides` 表，依赖管理端迁移 039、040 及其内置题基线；本进程不会自动创建或迁移这些表。`GET /api/question-bank/access` 返回当前权限；`GET /api/question-bank/questions` 支持服务、题目类型、状态、搜索与分页；`POST /api/question-bank/generate` 生成候选；`POST /api/question-bank/random-save` 保存确认后的随机题；`POST /api/question-bank/import`、`PUT /api/question-bank/update`、`DELETE /api/question-bank/delete` 管理固定题和随机题；`PUT /api/question-bank/domain` 调整领域。随机题改题面以 `gen-edit-vN` 追加版本，旧版本退休且历史引用保留；删除为软删除。领域纠错不更换题目 ID，目标领域已有相同题目时拒绝操作。随机题使用既有 `rnd:服务:指纹` 身份与 `gen-v1` 版本，同服务同指纹优先复用已有活跃随机题；返回新增和复用数量。前端服务端代理将测评会话传给后端；列表要求 `team-services:read`，生成和修改要求 `team-services:write`。写请求校验来源。
+题库使用既有 `eval_questions` 和 `eval_fixed_case_overrides` 表，依赖管理端迁移 039、040 及其内置题基线；本进程不会自动创建或迁移这些表。`GET /api/question-bank/access` 返回当前权限；`GET /api/question-bank/questions` 支持服务、题目类型、状态、搜索与分页；`GET /api/question-bank/question?id=&datasetVersion=` 返回单个题目版本，供独立详情页读取；`POST /api/question-bank/generate` 生成候选；`POST /api/question-bank/random-save` 保存确认后的随机题；`POST /api/question-bank/import`、`PUT /api/question-bank/update`、`DELETE /api/question-bank/delete` 管理固定题和随机题；`PUT /api/question-bank/domain` 调整领域。随机题改题面以 `gen-edit-vN` 追加版本，旧版本退休且历史引用保留；删除为软删除。领域纠错不更换题目 ID，目标领域已有相同题目时拒绝操作。随机题使用既有 `rnd:服务:指纹` 身份与 `gen-v1` 版本，同服务同指纹优先复用已有活跃随机题；返回新增和复用数量。前端服务端代理将测评会话传给后端；列表要求 `team-services:read`，生成和修改要求 `team-services:write`。写请求校验来源。
 
 随机题保存、固定题导入、编辑和删除默认关闭，需明确设置 `EVALUATION_QUESTION_BANK_WRITE_ENABLED=true` 才能使用；生产环境开启前须先获得用户确认。AI 生成只返回候选、不写入题库，但会调用已配置的模型；用户在前端确认后才保存。编辑保留旧版本，删除只退休记录。题目数据、固定题覆盖及历史版本与旧管理端共用，不能擅自迁移或修改生产数据。内置题清单来自迁移时的旧后端版本；如旧管理端变更基线，需要同步核对清单和版本。
 
@@ -96,7 +118,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 - `GET /api/evaluation/unified/services`：返回主服务与五类下游服务及各自可用状态；只有对应适配器已配置、具备写权限且写入已启用时标为可用。
 - `POST /api/evaluation/unified/runs`：要求 `team-services:write`、同源 Origin 及 1–128 字符 `Idempotency-Key`。请求 `{serviceKey,question,questionId?,datasetVersion?,sourceType?}`；题库来源字段须完整，后端核验有效版本与原题，服务型旧题仍约束服务，领域题可选择被测服务。来源统一为人工运行。成功返回 `{runId,serviceKey,reused}`。
-- `GET /api/evaluation/unified/runs`：要求 `team-services:read`，支持 `origin/page/pageSize`；沿用管理平台授权用户共享查看运行记录的范围。
+- `GET /api/evaluation/unified/runs`：要求 `team-services:read`，支持 `origin/page/pageSize`，以及 `q/domain/questionId/datasetVersion/from/to` 筛选；沿用管理平台授权用户共享查看运行记录的范围。
 - `GET /api/evaluation/unified/runs/:id`：回答及题目版本快照；服务重启后返回 `recoveryState=snapshot_only`，不自动重跑，也不更新其他进程的旧评分。
 - `GET /api/evaluation/unified/runs/:id/events`：SSE，先给 `snapshot`，再给 `execution/text/state/run/score/done/error`。客户端断线不会取消执行，可重新订阅；无本进程执行状态时只返回快照并关闭连接。
 

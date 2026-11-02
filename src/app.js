@@ -1,14 +1,16 @@
 const http = require('node:http');
 const { handleRuns } = require('./runs/http');
+const { handleBatches } = require('./runs/batch-http');
 const { handleRules } = require('./scoring/rule-http');
 const { handleDailyReports } = require('./daily-reports/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
+const { createStandardsService } = require('./standards/service');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -46,6 +48,44 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/evaluation/question-standards' || /^\/api\/evaluation\/question-standards\/[^/]+\/confirm$/.test(url.pathname)) {
+      try {
+        if (!authService || !standardsRepository) return fail(res,503,'STANDARDS_UNAVAILABLE','标准存储尚未配置');
+        const user=await authService.authenticate(session(req));
+        if (req.method==='GET' && url.pathname.endsWith('question-standards')) {
+          if (!user.permissions.includes('team-services:read')) return fail(res,403,'FORBIDDEN','没有题库查看权限');
+          return reply(res,200,await standardsRepository.list(url.searchParams.get('questionId'),url.searchParams.get('datasetVersion')));
+        }
+        if (req.method!=='POST') return fail(res,405,'METHOD_NOT_ALLOWED','请求方式不支持');
+        if (!user.permissions.includes('team-services:write')) return fail(res,403,'FORBIDDEN','没有标准管理权限');
+        if (req.headers.origin!==publicOrigin || req.headers['sec-fetch-site']==='cross-site') return fail(res,403,'INVALID_ORIGIN','请求来源无效');
+        if (!questionBankWriteEnabled) return fail(res,503,'STANDARDS_WRITE_DISABLED','标准保存尚未启用');
+        const input=await readBody(req,128*1024);
+        const match=/^\/api\/evaluation\/question-standards\/([^/]+)\/confirm$/.exec(url.pathname);
+        return reply(res,200,match ? await standardsRepository.confirm(match[1],user.id) : await standardsRepository.save(input,user.id));
+      } catch(error) {
+        if (error.code==='42P01') return fail(res,503,'STANDARDS_STORAGE_UNAVAILABLE','标准存储尚未迁移');
+        const code=Number.isInteger(error.status) ? error.status : 500;
+        return fail(res,code,code===500?'STANDARDS_FAILED':error.code || 'REQUEST_FAILED',code===500?'标准存储暂不可用':error.message);
+      }
+    }
+    if (url.pathname === '/api/evaluation/standards') {
+      try {
+        if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+        const auth = req.headers.authorization || '';
+        const candidate = crypto.createHash('sha256').update(auth.startsWith('Bearer ') ? auth.slice(7) : '').digest();
+        if (!crypto.timingSafeEqual(candidate, expected)) {
+          if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
+          const user = await authService.authenticate(session(req));
+          if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有生成标准的权限');
+          if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        }
+        return reply(res, 200, await standards.generate(await readBody(req, 32 * 1024)));
+      } catch (error) {
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'STANDARDS_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '标准生成服务暂不可用' : error.message);
+      }
+    }
     if (url.pathname === '/api/evaluation/rules' || url.pathname.startsWith('/api/evaluation/rules/')) {
       try {
         if (!authService) return fail(res,503,'AUTH_UNAVAILABLE','登录服务尚未配置');
@@ -61,6 +101,7 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
         if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
         const user = await authService.authenticate(session(req));
         if (req.method === 'GET' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有运行查看权限');
+        if (url.pathname === '/api/evaluation/unified/batches' || url.pathname.startsWith('/api/evaluation/unified/batches/')) return await handleBatches({ req, res, url, user, batches, reply });
         if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
         return await handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply });
       } catch (error) {
@@ -73,16 +114,17 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
       try {
         if (!authService || !questionBank) return fail(res, 503, 'QUESTION_BANK_UNAVAILABLE', '题库服务尚未配置');
         const action = url.pathname.slice('/api/question-bank/'.length);
-        const methods = { access: 'GET', questions: 'GET', import: 'POST', 'random-save': 'POST', generate: 'POST', domain: 'PUT', update: 'PUT', delete: 'DELETE' };
+        const methods = { access: 'GET', questions: 'GET', question: 'GET', import: 'POST', 'random-save': 'POST', generate: 'POST', domain: 'PUT', update: 'PUT', delete: 'DELETE' };
         if (!Object.hasOwn(methods, action) || req.method !== methods[action]) return fail(res, 404, 'NOT_FOUND', 'Not found');
         const user = await authService.authenticate(session(req));
         const write = methods[action] !== 'GET';
-        if (action === 'questions' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+        if (['questions', 'question'].includes(action) && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
         if (write && !user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有题库操作权限');
         if (write && (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site')) return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
         if (write && action !== 'generate' && !questionBankWriteEnabled) return fail(res, 503, 'QUESTION_BANK_WRITE_DISABLED', '题库写入尚未启用');
         if (action === 'access') return reply(res, 200, { access: { permissions: user.permissions } });
         if (action === 'questions') return reply(res, 200, await questionBank.list(url.searchParams));
+        if (action === 'question') return reply(res, 200, { question: await questionBank.get(url.searchParams.get('id'), url.searchParams.get('datasetVersion')) });
         const input = await readBody(req, 256 * 1024);
         if (action === 'generate') return reply(res, 200, await generator.generate(input));
         if (action === 'import') return reply(res, 201, await questionBank.import(input));

@@ -17,6 +17,13 @@ function version(input) {
 }
 function createQuestionBankService(repo) {
   return {
+    async get(id, datasetVersion) {
+      if (typeof id !== 'string' || !id || id.length > 200) fail(400, 'INVALID_QUESTION_ID', '题目 ID 无效');
+      if (typeof datasetVersion !== 'string' || !datasetVersion || datasetVersion.length > 100) fail(400, 'INVALID_DATASET_VERSION', '数据集版本无效');
+      const question = await repo.getQuestion(id, datasetVersion);
+      if (!question) fail(404, 'QUESTION_NOT_FOUND', '题目不存在');
+      return question;
+    },
     async list(query) {
       const serviceKey = query.get('service') || null;
       const sourceType = query.get('source') || null;
