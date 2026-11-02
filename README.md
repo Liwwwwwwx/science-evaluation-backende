@@ -210,3 +210,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 每日结束汇总可单独接入测试机器人：手工审核并执行 `migrations/006_mission_daily_notifications.sql`，配置 `MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL` 和 `EVALUATION_MISSION_DAILY_NOTIFY_ENABLED=true`；不回退到正式机器人。仅当每日计划、运行写入、主服务和通知开关均就绪时启用。整批执行和评分结束后发送一条包含数量和两模型均分的汇总；跳过或无题的计划发送原因。每轮先在数据库原子抢占，再调用飞书，结果记录为 `sent`、`failed` 或 `unknown`；发送不确定或进程中断时不会自动重发，须人工核对。仅处理创建于最近 48 小时的计划，避免启用时批量补发旧通知；状态接口返回配置和最近一次通知状态。模拟测试不会发送真实飞书消息。
 
 专项：`node --test test/mission-evaluator.test.js test/mission-daily.test.js`；`EVALUATION_MISSION_DAILY_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/mission-daily-postgres.test.js` 必须使用新建的专用临时 PostgreSQL。
+
+## CI/CD 与 HTTP 独立部署
+
+发布配置见 [ops/README.md](ops/README.md)。用户明确使用 HTTP 时，设置 `EVALUATION_ALLOW_HTTP=true` 并配置实际 `EVALUATION_PUBLIC_ORIGIN`，生产环境才允许 HTTP origin 和非 Secure 会话 Cookie；HTTPS 始终使用 Secure。默认行为仍要求 HTTPS。

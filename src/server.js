@@ -20,11 +20,13 @@ const { createMissionDailyReportService } = require('./notifications/mission-dai
 const { createQuestionBankService } = require('./question-bank/service');
 const { createDailyReportRepository } = require('./daily-reports/repository');
 const { createDailyReportService } = require('./daily-reports/service');
+const { httpSettings } = require('./runtime-config');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
 const databaseUrl = process.env.EVALUATION_DATABASE_URL;
 let publicOrigin = process.env.EVALUATION_PUBLIC_ORIGIN;
+let secureCookies = true;
 let authService;
 let questionBank;
 let evaluations;
@@ -33,9 +35,7 @@ let missionDailyReport;
 let dailyReports;
 let rules;
 if (databaseUrl) {
-  if (!publicOrigin) throw new Error('EVALUATION_PUBLIC_ORIGIN is required when authentication is enabled');
-  const origin = new URL(publicOrigin);
-  if (origin.origin !== publicOrigin || (origin.protocol !== 'https:' && !(process.env.NODE_ENV !== 'production' && origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)))) throw new Error('EVALUATION_PUBLIC_ORIGIN must be an HTTPS origin');
+  ({ publicOrigin, secureCookies } = httpSettings());
   const pool = new Pool({ connectionString: databaseUrl });
   rules = createRuleService(createRuleRepository(pool));
   authService = createAuthService(createAuthRepository(pool));
@@ -76,7 +76,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies: process.env.NODE_ENV === 'production' || publicOrigin?.startsWith('https:') }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();
