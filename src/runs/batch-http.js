@@ -10,7 +10,13 @@ const SORTS = new Set(['scoreAsc', 'scoreDesc', 'startedAtAsc', 'startedAtDesc']
 
 function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', message); }
 function validDate(value) { return DATE.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value; }
-function integer(value, fallback, min, max) { const number = Number(value); return Number.isInteger(number) && number >= min && number <= max ? number : fallback; }
+function integer(value, fallback, min, max) {
+  if (value === null) return fallback;
+  if (!/^\d+$/.test(value)) invalid('分页参数无效');
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) invalid('分页参数无效');
+  return number;
+}
 
 async function handleBatches({ req, res, url, user, batches, reply }) {
   if (!batches) throw new TeamServiceError(503, 'BATCHES_UNAVAILABLE', '批次读取尚未配置');

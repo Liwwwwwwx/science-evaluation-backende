@@ -40,6 +40,12 @@ function totalScore(scores, key) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
 }
 
+function usableScore(row, key) {
+  const item = row.scores?.[JUDGES[key]];
+  if (item?.status !== 'ready' || row.answer_truncated === true || item.quality?.source?.truncated === true) return null;
+  return totalScore(row.scores, key);
+}
+
 function executionOf(row) {
   const runStatus = row.run_status || null;
   const error = String(row.error || '');
@@ -57,10 +63,10 @@ function mapRun(row) {
     serviceKey: row.service_key,
     status: row.status,
     execution: executionOf(row),
-    scores: { deepSeek: totalScore(row.scores, 'deepSeek'), qwen: totalScore(row.scores, 'qwen') },
+    scores: { deepSeek: usableScore(row, 'deepSeek'), qwen: usableScore(row, 'qwen') },
     error: row.error || null,
     startedAt: iso(row.started_at) || '',
-    elapsedMs: Number.isFinite(Number(row.elapsed_ms)) ? Number(row.elapsed_ms) : null,
+    elapsedMs: row.elapsed_ms != null && row.elapsed_ms !== '' && Number.isFinite(Number(row.elapsed_ms)) ? Number(row.elapsed_ms) : null,
     answerTruncated: row.answer_truncated === true,
     ruleSnapshot: row.rule_snapshot || null,
     rawScores: row.scores || null,
@@ -233,7 +239,7 @@ function comparableScores(previous, current) {
     const after = current.rawScores?.[JUDGES[key]];
     if (before?.status !== 'ready' || after?.status !== 'ready') continue;
     if (previous.answerTruncated || current.answerTruncated || before.quality?.source?.truncated === true || after.quality?.source?.truncated === true) continue;
-    if (before.model && after.model && before.model !== after.model) continue;
+    if (!before.model || !after.model || before.model !== after.model) continue;
     const beforeScore = totalScore(previous.rawScores, key);
     const afterScore = totalScore(current.rawScores, key);
     if (beforeScore !== null && afterScore !== null) return [beforeScore, afterScore];
@@ -247,7 +253,7 @@ function levelOf(previous, current, before, after) {
   const currentFailed = ['failed', 'timeout'].includes(current.execution);
   if (!previousFailed && currentFailed) return 'new_failure';
   if (previousFailed && current.execution === 'completed') return 'fixed';
-  if (before === null || after === null) return 'stable';
+  if (before === null || after === null) return null;
   const delta = after - before;
   if (delta <= -THRESHOLD_POINTS) return 'regressed';
   if (delta >= THRESHOLD_POINTS) return 'improved';
@@ -285,11 +291,11 @@ function ruleHashes(plan, runs) {
   return [...new Set([
     plan.rule_snapshot?.hash,
     ...runs.map((run) => run.ruleSnapshot?.hash),
-  ].filter((value) => typeof value === 'string' && value))];
+  ].filter((value) => typeof value === 'string' && value))].sort();
 }
 
 function models(runs) {
-  return [...new Set(runs.flatMap((run) => Object.values(JUDGES).map((key) => run.rawScores?.[key]?.model)).filter((value) => typeof value === 'string' && value))];
+  return [...new Set(runs.flatMap((run) => Object.values(JUDGES).map((key) => run.rawScores?.[key]?.model)).filter((value) => typeof value === 'string' && value))].sort();
 }
 
 function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
@@ -298,6 +304,9 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
     return { base, previous: null, comparable: false, mode: 'none', reason: '没有更早的同来源批次可用于比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
   const previous = { batchId: previousPlan.id, date: dateOnly(previousPlan.plan_date), planned: servicePlans(previousPlan).reduce((sum, service) => sum + service.expected, 0) };
+  if (basePlan.source !== previousPlan.source) {
+    return { base, previous, comparable: false, mode: 'none', reason: '不同来源的批次不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
+  }
   const baseHashes = ruleHashes(basePlan, baseRuns);
   const previousHashes = ruleHashes(previousPlan, previousRuns);
   const baseModels = models(baseRuns);
@@ -309,7 +318,8 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
     return { base, previous, comparable: false, mode: 'none', reason: '两批次使用的评分模型不同，不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
   const questions = questionComparisons(baseRuns, previousRuns);
-  const strict = baseHashes.length > 0 && previousHashes.length > 0 && baseHashes.join('\0') === previousHashes.join('\0') && baseModels.length > 0 && previousModels.length > 0 && baseModels.join('\0') === previousModels.join('\0');
+  const sameRule = baseHashes.length === 1 && previousHashes.length === 1 && baseHashes[0] === previousHashes[0];
+  const strict = sameRule && baseModels.length > 0 && previousModels.length > 0 && baseModels.join('\0') === previousModels.join('\0');
   const mode = questions.length && strict ? 'question' : 'aggregate';
   const keys = [...new Set([...servicePlans(basePlan).map((service) => service.key), ...servicePlans(previousPlan).map((service) => service.key)])];
   const services = keys.map((serviceKey) => {
@@ -322,8 +332,8 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
       serviceKey,
       label: SERVICE_LABELS[serviceKey] || serviceKey,
       scoreDelta: {
-        deepSeek: after?.scores.deepSeek.mean != null && before?.scores.deepSeek.mean != null ? Math.round((after.scores.deepSeek.mean - before.scores.deepSeek.mean) * 10) / 10 : null,
-        qwen: after?.scores.qwen.mean != null && before?.scores.qwen.mean != null ? Math.round((after.scores.qwen.mean - before.scores.qwen.mean) * 10) / 10 : null,
+        deepSeek: strict && after?.scores.deepSeek.model && after.scores.deepSeek.model === before?.scores.deepSeek.model && after.scores.deepSeek.mean != null && before?.scores.deepSeek.mean != null ? Math.round((after.scores.deepSeek.mean - before.scores.deepSeek.mean) * 10) / 10 : null,
+        qwen: strict && after?.scores.qwen.model && after.scores.qwen.model === before?.scores.qwen.model && after.scores.qwen.mean != null && before?.scores.qwen.mean != null ? Math.round((after.scores.qwen.mean - before.scores.qwen.mean) * 10) / 10 : null,
       },
       completionDelta: (after?.totals.completed || 0) - (before?.totals.completed || 0),
       failureDelta: afterFailures - beforeFailures,
@@ -336,7 +346,7 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
     previous,
     comparable: true,
     mode,
-    reason: mode === 'question' ? null : (baseHashes.length && previousHashes.length ? '没有同题同版本记录，只比较服务汇总。' : '部分批次缺少规则版本，只比较服务汇总。'),
+    reason: mode === 'question' ? null : (!strict ? '评分规则或模型版本无法确认，分数不作比较；仅展示执行汇总。' : '没有同题同版本记录，只比较服务汇总。'),
     matchedQuestions: questions.length,
     thresholdPoints: THRESHOLD_POINTS,
     services,
@@ -348,16 +358,20 @@ function createBatchReadService({ repository } = {}) {
   if (!repository) throw new Error('批次读取仓储未配置');
 
   async function list({ source = 'all', state = '', from = '', to = '', page = 1, pageSize = PAGE_SIZE } = {}) {
-    const result = await repository.plans({ source, from, to, limit: 500 });
-    if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
-    const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id));
-    const byBatch = new Map();
-    for (const run of runs) {
-      const mapped = mapRun(run);
-      if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
-      byBatch.get(run.batch_id).push(mapped);
+    const items = [];
+    const chunkSize = 100;
+    for (let offset = 0; ; offset += chunkSize) {
+      const result = await repository.plans({ source, from, to, limit: chunkSize, offset });
+      if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
+      const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id));
+      const byBatch = new Map();
+      for (const run of runs) {
+        if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
+        byBatch.get(run.batch_id).push(mapRun(run));
+      }
+      items.push(...result.items.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state));
+      if (result.items.length < chunkSize) break;
     }
-    const items = result.items.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state);
     const safePage = Math.min(Math.max(Number(page) || 1, 1), Math.max(1, Math.ceil(items.length / pageSize)));
     return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true };
   }

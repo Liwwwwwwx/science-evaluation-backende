@@ -2,6 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createStandardsService } = require('../src/standards/service');
 const { createApp } = require('../src/app');
+const { createStandardsRepository } = require('../src/standards/repository');
+
+test('无效标准标识在访问数据库前返回 400', async () => {
+  const repo = createStandardsRepository({ pool: { query() { throw new Error('不应查询数据库'); } }, questions: {} });
+  await assert.rejects(repo.confirm('-'.repeat(36), 'user'), { status: 400, code: 'INVALID_STANDARD' });
+});
 
 const question = '请比较两种材料，并说明选择依据。';
 const sample = { domain: '材料选型', taskType: '比较', explicitRequirements: [{ requirement: '比较两种材料', critical: true, source: '比较两种材料' }], evaluationCriteria: [{ name: '材料比较', category: 'required', description: '比较两种材料', howToJudge: '检查是否比较两种材料', source: '比较两种材料' }, { name: '适用边界', category: 'recommended', description: '说明条件', howToJudge: '检查是否说明使用条件', source: null }], missingInformation: ['未提供载荷'] };

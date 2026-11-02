@@ -27,7 +27,7 @@ function createBatchReadRepository({ pgPool } = {}) {
   }
 
   return {
-    async plans({ source = 'all', from = '', to = '', limit = 200 } = {}) {
+    async plans({ source = 'all', from = '', to = '', limit = 200, offset = 0 } = {}) {
       const tables = await available();
       const sources = source === 'all' ? ['trial', 'mission'] : [source];
       const selected = sources.filter((key) => tables[key]);
@@ -37,9 +37,11 @@ function createBatchReadRepository({ pgPool } = {}) {
       if (from) { params.push(from); where.push(`plan_date >= $${params.length}::date`); }
       if (to) { params.push(to); where.push(`plan_date <= $${params.length}::date`); }
       params.push(Math.min(Math.max(Number(limit) || 200, 1), 500));
+      const limitParameter = params.length;
+      params.push(Math.max(Number(offset) || 0, 0));
       const sql = `SELECT * FROM (${selected.map(planSelect).join(' UNION ALL ')}) plans
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-        ORDER BY plan_date DESC, created_at DESC LIMIT $${params.length}`;
+        ORDER BY plan_date DESC, created_at DESC, id DESC LIMIT $${limitParameter} OFFSET $${params.length}`;
       const result = await (await database()).query(sql, params);
       return { storageReady: true, items: result.rows };
     },

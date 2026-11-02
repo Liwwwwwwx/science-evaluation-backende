@@ -11,7 +11,7 @@ function createStandardsRepository({ pool, questions }) {
   return {
     async list(id, version) {
       if (!valid(id, version)) throw fail(400,'INVALID_QUESTION','题目版本无效');
-      const result = await (await db()).query('SELECT id,state,question,content,model,created_at,confirmed_at FROM evaluation_question_standards WHERE question_id=$1 AND dataset_version=$2 ORDER BY created_at DESC,id DESC LIMIT 100',[id,version]);
+      const result = await (await db()).query("SELECT id,state,question,content,model,created_at,confirmed_at FROM evaluation_question_standards WHERE question_id=$1 AND dataset_version=$2 ORDER BY (state='confirmed') DESC,created_at DESC,id DESC LIMIT 100",[id,version]);
       return { items: result.rows.map(row => ({ id:row.id,state:row.state,question:row.question,content:row.content,model:row.model,createdAt:row.created_at,confirmedAt:row.confirmed_at })) };
     },
     async save(input, actor) {
@@ -24,7 +24,7 @@ function createStandardsRepository({ pool, questions }) {
       return { id,state:'draft' };
     },
     async confirm(id, actor) {
-      if (typeof id !== 'string' || !/^[a-f\d-]{36}$/i.test(id)) throw fail(400,'INVALID_STANDARD','标准标识无效');
+      if (typeof id !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)) throw fail(400,'INVALID_STANDARD','标准标识无效');
       const client=await (await db()).connect();
       try {
         await client.query('BEGIN');

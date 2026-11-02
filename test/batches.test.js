@@ -48,7 +48,7 @@ function run(overrides = {}) {
 
 function repository({ plans = [], runs = [] } = {}) {
   return {
-    async plans() { return { storageReady: true, items: plans }; },
+    async plans({ limit = 200, offset = 0 } = {}) { return { storageReady: true, items: plans.slice(offset, offset + limit) }; },
     async plan(id) { return { storageReady: true, plan: plans.find((item) => item.id === id) || null }; },
     async previousPlan(source, date) { return plans.filter((item) => item.source === source && item.plan_date < date).sort((a, b) => b.plan_date.localeCompare(a.plan_date))[0] || null; },
     async runsByBatchIds(ids) { return runs.filter((item) => ids.includes(item.batch_id)); },
@@ -89,6 +89,33 @@ test('批次列表按计划和运行聚合，区分完成、失败和服务计�
 test('存储未迁移时列表返回空并标记 storageReady=false', async () => {
   const service = createBatchReadService({ repository: { async plans() { return { storageReady: false, items: [] }; } } });
   assert.deepEqual(await service.list(), { items: [], total: 0, page: 1, pageSize: 20, storageReady: false });
+});
+
+test('超过 500 个批次时列表和状态筛选仍包含旧记录', async () => {
+  const plans = Array.from({ length: 501 }, (_, index) => plan({ id: `batch-${index}`, state: index === 500 ? 'failed' : 'submitted' }));
+  const service = createBatchReadService({ repository: repository({ plans }) });
+  const last = await service.list({ page: 26, pageSize: 20 });
+  assert.equal(last.total, 501);
+  assert.equal(last.items[0].batchId, 'batch-500');
+  const failed = await service.list({ state: 'failed' });
+  assert.equal(failed.total, 1);
+  assert.equal(failed.items[0].batchId, 'batch-500');
+});
+
+test('未开始的运行耗时保持空值', async () => {
+  const service = createBatchReadService({ repository: repository({ plans: [plan()], runs: [run({ status: 'queued', run_status: null, elapsed_ms: null })] }) });
+  const detail = await service.get(MISSION);
+  assert.equal(detail.services[0].maxElapsedMs, null);
+  const runs = await service.runs(MISSION);
+  assert.equal(runs.items[0].elapsedMs, null);
+});
+
+test('不同来源的批次不能计算环比', async () => {
+  const service = createBatchReadService({ repository: repository({ plans: [plan(), trialPlan()] }) });
+  const result = await service.comparison(MISSION, { against: TRIAL });
+  assert.equal(result.comparable, false);
+  assert.equal(result.mode, 'none');
+  assert.match(result.reason, /不同来源/);
 });
 
 test('批次详情聚合服务指标，低分和失败列表只返回公开运行字段', async () => {
@@ -187,9 +214,30 @@ test('逐题分差只使用双方都可用的同一评委，并排除暂定或�
     const result = await service.comparison(MISSION);
     assert.equal(result.mode, 'question');
     const question = result.questions[0];
-    assert.deepEqual([question.before.score, question.after.score, question.delta], item.expected);
-    assert.equal(question.level, 'stable');
+    if (item.expected[0] === null) assert.equal(question, undefined);
+    else {
+      assert.deepEqual([question.before.score, question.after.score, question.delta], item.expected);
+      assert.equal(question.level, 'stable');
+    }
   });
+});
+
+test('规则或模型来源缺失时不展示分数差，截断评分不列入低分', async () => {
+  const current = plan({ rule_snapshot: null });
+  const previous = plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01', rule_snapshot: null });
+  const runs = [
+    run({ id: 'current', rule_snapshot: null, answer_truncated: true }),
+    run({ id: 'previous', batch_id: MISSION_PREVIOUS, rule_snapshot: null }),
+  ];
+  const service = createBatchReadService({ repository: repository({ plans: [current, previous], runs }) });
+  const comparison = await service.comparison(MISSION);
+  assert.equal(comparison.mode, 'aggregate');
+  assert.equal(comparison.services[0].scoreDelta.deepSeek, null);
+  assert.match(comparison.reason, /无法确认/);
+  const detail = await service.get(MISSION);
+  assert.equal(detail.services[0].lowScores.length, 0);
+  const listed = await service.runs(MISSION);
+  assert.equal(listed.items[0].scores.deepSeek, null);
 });
 
 test('未结束的运行不判定为已修复或新增失败', async () => {

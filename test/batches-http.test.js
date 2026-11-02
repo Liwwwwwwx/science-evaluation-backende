@@ -29,6 +29,10 @@ test('批次只读接口校验权限、参数、方法和批次 ID', async (t) =
   assert.equal((await fetch(base)).status, 401);
   assert.equal((await fetch(base, { headers })).status, 200);
   assert.equal((await fetch(`${base}?source=bad`, { headers })).status, 400);
+  for (const query of ['page=abc', 'page=0', 'page=', 'pageSize=101', 'pageSize=1.5']) {
+    assert.equal((await fetch(`${base}?${query}`, { headers })).status, 400, query);
+    assert.equal((await fetch(`${base}/${ID}/runs?${query}`, { headers })).status, 400, query);
+  }
   assert.equal((await fetch(`${base}/not-a-uuid`, { headers })).status, 400);
   assert.equal((await fetch(`${base}/${ID}`, { method: 'POST', headers })).status, 405);
   assert.equal((await fetch(`${base}/${ID}/comparison?against=bad`, { headers })).status, 400);
