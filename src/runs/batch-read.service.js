@@ -337,8 +337,8 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
       },
       completionDelta: (after?.totals.completed || 0) - (before?.totals.completed || 0),
       failureDelta: afterFailures - beforeFailures,
-      newFailureCount: mode === 'question' ? matched.filter((question) => question.level === 'new_failure').length : Math.max(0, afterFailures - beforeFailures),
-      fixedCount: mode === 'question' ? matched.filter((question) => question.level === 'fixed').length : Math.max(0, beforeFailures - afterFailures),
+      newFailureCount: mode === 'question' ? matched.filter((question) => question.level === 'new_failure').length : null,
+      fixedCount: mode === 'question' ? matched.filter((question) => question.level === 'fixed').length : null,
     };
   });
   return {

@@ -275,6 +275,8 @@ test('试跑批次没有同题 ID 时只做服务汇总环比', async () => {
   assert.equal(value.matchedQuestions, 0);
   assert.equal(value.questions.length, 0);
   assert.equal(value.services.find((item) => item.serviceKey === 'alloy').scoreDelta.deepSeek, 5);
+  assert.equal(value.services.find((item) => item.serviceKey === 'alloy').newFailureCount, null);
+  assert.equal(value.services.find((item) => item.serviceKey === 'alloy').fixedCount, null);
 });
 
 test('规则版本不同时标记不可比', async () => {
