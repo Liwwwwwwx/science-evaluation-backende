@@ -5,6 +5,8 @@ const { createConversationEvents } = require('./conversation-events');
 const { stackConfirmation } = require('./mission-confirmations');
 
 const MAX_ANSWER_CHARS = 1024 * 1024;
+// 接收上限与归档预算分开：下游团队的完整输出可能超过单条归档预算。
+const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_FRAMES = 100000;
@@ -27,7 +29,8 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
       const details = { process: process.data, progress: [], review: [], result: null, transport, ...conversation.data };
       const processSteps = new Set();
       const seen = new Set();
-      let socket; let timer; let errorTimer; let settled = false; let text = ''; let messageChain = Promise.resolve(); let frameCount = 0; let stateBytes = 0; let emitTimer; let summaryActive = false; let received = false;
+      const openSummaries = new Set(); const completedSummaries = new Set();
+      let socket; let timer; let errorTimer; let settled = false; let text = ''; let messageChain = Promise.resolve(); let frameCount = 0; let stateBytes = 0; let emitTimer; let received = false;
       let resolveCompletion;
       const completion = new Promise(resolve => { resolveCompletion = resolve; });
       const emit = () => { clearTimeout(emitTimer); emitTimer = null; details.truncated ||= conversation.data.truncated; onState(structuredClone(details)); };
@@ -96,7 +99,11 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
         else if (raw && typeof raw.text === 'function') raw = await raw.text();
         if (settled) return;
         if (typeof raw !== 'string') return finish('Mission 返回了不支持的数据帧');
-        if (Buffer.byteLength(raw) > MAX_FRAME_BYTES) return finish('Mission 数据帧超过保存上限');
+        const messageBytes = Buffer.byteLength(raw);
+        if (messageBytes > MAX_MESSAGE_BYTES) {
+          transport.rejectedFrameBytes = messageBytes; transport.maxFrameBytes = MAX_MESSAGE_BYTES;
+          return finish('Mission 数据帧超过接收上限（8 MiB）');
+        }
         let frame; try { frame = JSON.parse(raw); } catch {}
         received = true;
         transport.receivedFrames = frameCount; transport.lastFrameAt = new Date().toISOString();
@@ -114,7 +121,7 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
             conversation.record(frame, text.length);
             return finish(`Mission 交互尚未支持：${frame.type.slice(0, 100)}，已保存请求，未自动选择。`);
           }
-          if (frame.type === 'text.delta' && typeof frame.delta === 'string' && !summaryActive) {
+          if (frame.type === 'text.delta' && typeof frame.delta === 'string' && !openSummaries.size) {
             if (text.length + frame.delta.length > MAX_ANSWER_CHARS) return finish('Mission 回答超过保存上限');
             text += frame.delta; onText(frame.delta);
             return;
@@ -130,7 +137,13 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
               } else conversation.record({ ...frame, type: 'display.final_answer', event_id: frame.event_id || 'legacy-final', phase: 'end', content: finalText }, text.length);
             }
           }
-          if (frame.type === 'display.final_answer') summaryActive = ['start', 'delta'].includes(frame.phase);
+          if (frame.type === 'display.final_answer') {
+            // 生命周期独立于归档：归档超限、重复或迟到帧都不能掩盖未结束的总结。
+            const identity = typeof frame.event_id === 'string' && frame.event_id ? `id:${frame.event_id}` : 'anonymous';
+            const key = createHash('sha256').update(identity).digest('hex');
+            if (['end', 'exit'].includes(frame.phase)) { openSummaries.delete(key); completedSummaries.add(key); }
+            else if (!completedSummaries.has(key)) openSummaries.add(key);
+          }
           if (['progress', 'retrieval_progress', 'retrival_progress', 'stage', 'phase_start', 'phase_end', 'stage_start', 'stage_end'].includes(frame.type)) recordProgress(frame);
           if (frame.type === 'display.process.step') {
             const step = frame.step_id || frame.event_id;
@@ -147,7 +160,7 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
           return;
         }
         // dual 模式的裸文本与最终总结增量是同一份内容，统一由总结卡展示。
-        if (summaryActive) return;
+        if (openSummaries.size) return;
         if (text.length + raw.length > MAX_ANSWER_CHARS) return finish('Mission 回答超过保存上限');
         text += raw; onText(raw);
       }
@@ -166,7 +179,7 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
           transport.closeCode = Number.isInteger(event?.code) ? event.code : null;
           transport.wasClean = typeof event?.wasClean === 'boolean' ? event.wasClean : null;
           void messageChain.then(() => {
-            const incomplete = details.displayEvents.some(frame => frame.type === 'display.final_answer' && !['end', 'exit'].includes(frame.phase));
+            const incomplete = openSummaries.size > 0;
             const error = !received ? 'Mission 连接未返回业务输出' : ![1000, 1001].includes(transport.closeCode) ? `Mission 连接中断（关闭码 ${transport.closeCode ?? '未知'}）` : incomplete ? 'Mission 最终总结未收到结束帧' : null;
             finish(error);
           });
