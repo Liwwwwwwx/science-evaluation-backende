@@ -105,7 +105,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items)]);
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
     },
-    async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', from = '', to = '' } = {}) {
+    async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', questionId = '', datasetVersion = '', from = '', to = '' } = {}) {
       const requestedPage = Number(page);
       const requestedSize = Number(pageSize);
       const safePage = Number.isInteger(requestedPage) && requestedPage > 0 ? Math.min(requestedPage, 100000) : 1;
@@ -122,6 +122,8 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         ) q ON true`;
       const where = []; const params = [];
       if (origin) { params.push(origin); where.push(`r.origin=$${params.length}`); }
+      if (questionId) { params.push(questionId); where.push(`r.question_id=$${params.length}`); }
+      if (datasetVersion) { params.push(datasetVersion); where.push(`r.dataset_version=$${params.length}`); }
       if (term) { params.push(term); const index = params.length; where.push(`(POSITION($${index} IN lower(r.question)) > 0 OR POSITION($${index} IN r.id::text) > 0)`); }
       if (domainFilter) { if (domainFilter === 'unclassified') where.push('q.domain_key IS NULL'); else { params.push(domainFilter); where.push(`q.domain_key=$${params.length}`); } }
       if (fromDate) { params.push(fromDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date >= $${params.length}::date`); }

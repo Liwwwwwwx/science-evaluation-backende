@@ -48,13 +48,15 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const origin = url.searchParams.get('origin');
     const q = (url.searchParams.get('q') || '').trim();
     const domain = (url.searchParams.get('domain') || '').trim();
-    const from = (url.searchParams.get('from') || '').trim();
-    const to = (url.searchParams.get('to') || '').trim();
+    const questionId = (url.searchParams.get('questionId') || '').trim();
+    const datasetVersion = (url.searchParams.get('datasetVersion') || '').trim();
+    const from = url.searchParams.get('from') || '';
+    const to = url.searchParams.get('to') || '';
     const page = Number(url.searchParams.get('page') || 1); const pageSize = Number(url.searchParams.get('pageSize') || 20);
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const validDate = value => { if (!datePattern.test(value)) return false; const date = new Date(`${value}T00:00:00Z`); return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value; };
-    if ((origin && !['manual', 'automation', 'legacy'].includes(origin)) || q.length > 100 || (domain && domain !== 'unclassified' && !/^[a-z0-9-]{1,64}$/.test(domain)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to) || !Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('运行列表参数无效');
-    const value = await evaluations.list({ origin, page, pageSize, q, domain, from, to });
+    if ((origin && !['manual', 'automation', 'legacy'].includes(origin)) || q.length > 100 || questionId.length > 200 || datasetVersion.length > 100 || (domain && domain !== 'unclassified' && !/^[a-z0-9-]{1,64}$/.test(domain)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to) || !Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('运行列表参数无效');
+    const value = await evaluations.list({ origin, page, pageSize, q, domain, questionId, datasetVersion, from, to });
     const canRescoreBase = !!(user.permissions.includes('team-services:write') && runWriteEnabled && evaluations.scoringEnabled);
     return reply(res, 200, { ...value, items: value.items.map(item => ({ ...item, canRescore: canRescoreBase && ['done', 'error'].includes(item.status) })) });
   }

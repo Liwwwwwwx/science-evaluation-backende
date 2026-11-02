@@ -61,7 +61,7 @@ test('题库接口校验登录、读写权限、来源与写入开关', async t 
     if (token === 'writer') return { permissions: ['team-services:read', 'team-services:write'] };
     throw Object.assign(new Error('请先登录'), { status: 401, code: 'UNAUTHORIZED' });
   } };
-  const bank = { list: async () => ({ items: [], total: 0 }), import: async () => ({ items: [] }) };
+  const bank = { list: async () => ({ items: [], total: 0 }), get: async (id, datasetVersion) => ({ id, datasetVersion, question: '测试题目内容' }), import: async () => ({ items: [] }) };
   const server = createApp({ token: 'x'.repeat(32), authService, questionBank: bank, publicOrigin: 'http://localhost:6715' });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -69,6 +69,10 @@ test('题库接口校验登录、读写权限、来源与写入开关', async t 
   const post = (cookie, origin = 'http://localhost:6715') => fetch(base + '/api/question-bank/import', { method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ items: [] }) });
   assert.equal((await get('questions')).status, 401);
   assert.equal((await get('questions', 'evaluation_session=reader')).status, 200);
+  const detail = await get('question?id=q&datasetVersion=v1', 'evaluation_session=reader');
+  assert.equal(detail.status, 200);
+  assert.equal((await detail.json()).question.datasetVersion, 'v1');
+  assert.equal((await get('question?id=q&datasetVersion=v1')).status, 401);
   assert.equal((await post('evaluation_session=reader')).status, 403);
   const randomDenied = await fetch(base + '/api/question-bank/random-save', { method: 'POST', headers: { cookie: 'evaluation_session=reader', origin: 'http://localhost:6715', 'content-type': 'application/json' }, body: '{"items":[]}' });
   assert.equal(randomDenied.status, 403);

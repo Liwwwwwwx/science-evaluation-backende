@@ -226,17 +226,27 @@ function detailOf(plan, runs) {
   };
 }
 
-function compareScore(run) {
-  return run.scores.deepSeek ?? run.scores.qwen;
+function comparableScores(previous, current) {
+  if (previous.execution !== 'completed' || current.execution !== 'completed') return [null, null];
+  for (const key of Object.keys(JUDGES)) {
+    const before = previous.rawScores?.[JUDGES[key]];
+    const after = current.rawScores?.[JUDGES[key]];
+    if (before?.status !== 'ready' || after?.status !== 'ready') continue;
+    if (previous.answerTruncated || current.answerTruncated || before.quality?.source?.truncated === true || after.quality?.source?.truncated === true) continue;
+    if (before.model && after.model && before.model !== after.model) continue;
+    const beforeScore = totalScore(previous.rawScores, key);
+    const afterScore = totalScore(current.rawScores, key);
+    if (beforeScore !== null && afterScore !== null) return [beforeScore, afterScore];
+  }
+  return [null, null];
 }
 
-function levelOf(previous, current) {
+function levelOf(previous, current, before, after) {
+  if (previous.execution === 'unfinished' || current.execution === 'unfinished') return null;
   const previousFailed = ['failed', 'timeout'].includes(previous.execution);
   const currentFailed = ['failed', 'timeout'].includes(current.execution);
   if (!previousFailed && currentFailed) return 'new_failure';
-  if (previousFailed && !currentFailed) return 'fixed';
-  const before = compareScore(previous);
-  const after = compareScore(current);
+  if (previousFailed && current.execution === 'completed') return 'fixed';
   if (before === null || after === null) return 'stable';
   const delta = after - before;
   if (delta <= -THRESHOLD_POINTS) return 'regressed';
@@ -253,20 +263,21 @@ function questionComparisons(currentRuns, previousRuns) {
   for (const [key, after] of current) {
     const before = previous.get(key);
     if (!before) continue;
-    const level = levelOf(before, after);
+    const [beforeScore, afterScore] = comparableScores(before, after);
+    const level = levelOf(before, after, beforeScore, afterScore);
     questions.push({
       questionId: after.questionId,
       datasetVersion: after.datasetVersion,
       question: after.question || before.question,
       serviceKey: after.serviceKey,
-      before: { score: compareScore(before), status: before.execution },
-      after: { score: compareScore(after), status: after.execution },
-      delta: compareScore(before) !== null && compareScore(after) !== null ? compareScore(after) - compareScore(before) : null,
+      before: { score: beforeScore, status: before.execution },
+      after: { score: afterScore, status: after.execution },
+      delta: beforeScore !== null && afterScore !== null ? afterScore - beforeScore : null,
       level,
     });
   }
   const order = { regressed: 0, new_failure: 1, improved: 2, fixed: 3, stable: 4 };
-  questions.sort((left, right) => (order[left.level] - order[right.level]) || ((left.delta ?? 0) - (right.delta ?? 0)));
+  questions.sort((left, right) => ((order[left.level] ?? 5) - (order[right.level] ?? 5)) || ((left.delta ?? 0) - (right.delta ?? 0)));
   return questions;
 }
 
@@ -329,7 +340,7 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
     matchedQuestions: questions.length,
     thresholdPoints: THRESHOLD_POINTS,
     services,
-    questions: mode === 'question' ? questions : [],
+    questions: mode === 'question' ? questions.filter((question) => question.level !== null) : [],
   };
 }
 

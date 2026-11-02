@@ -28,3 +28,12 @@ test('API 允许授权会话或服务令牌，限制权限和跨站请求', asyn
   assert.equal((await post({ authorization: `Bearer ${token}` })).status, 200);
   assert.equal(calls, 2);
 });
+test('关联标准接口按读写权限和开关保护', async t => {
+  const authService={async authenticate(value){if(!value)throw Object.assign(Error('请登录'),{status:401});return{id:'u',permissions:value==='writer'?['team-services:read','team-services:write']:['team-services:read']};}};
+  let saved=0;const standardsRepository={async list(){return{items:[]};},async save(){saved++;return{id:'draft',state:'draft'};}};
+  const app=createApp({token:'a'.repeat(32),publicOrigin:'http://localhost',authService,standardsRepository,questionBankWriteEnabled:true});
+  await new Promise(resolve=>app.listen(0,'127.0.0.1',resolve));t.after(()=>app.close());const base=`http://127.0.0.1:${app.address().port}/api/evaluation/question-standards`;
+  assert.equal((await fetch(base+'?questionId=q&datasetVersion=v',{headers:{cookie:'evaluation_session=reader'}})).status,200);
+  const post=(cookie,origin)=>fetch(base,{method:'POST',headers:{cookie:`evaluation_session=${cookie}`,origin,'content-type':'application/json'},body:'{}'});
+  assert.equal((await post('reader','http://localhost')).status,403);assert.equal((await post('writer','http://evil.test')).status,403);assert.equal((await post('writer','http://localhost')).status,200);assert.equal(saved,1);
+});

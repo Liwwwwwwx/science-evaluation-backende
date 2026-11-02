@@ -164,6 +164,54 @@ test('Mission 同题批次输出逐题环比，包含回归、新增失败和修
   assert.equal(value.services[0].fixedCount, 1);
 });
 
+test('逐题分差只使用双方都可用的同一评委，并排除暂定或无效评分', async (t) => {
+  const score = (model, total, extra = {}) => ({ status: 'ready', model, quality: { total }, ...extra });
+  const deep = (total, extra) => score('deepseek-chat', total, extra);
+  const qwen = (total, extra) => score('qwen', total, extra);
+  const cases = [
+    { name: '单侧 DeepSeek 失败时改用双方 Qwen', before: { deepSeekScore: deep(80), qwenScore: qwen(50) }, after: { deepSeekScore: deep(30, { status: 'failed' }), qwenScore: qwen(50) }, expected: [50, 50, 0] },
+    { name: '没有共同可用评委时不计算分差', before: { deepSeekScore: deep(80), qwenScore: qwen(50, { status: 'failed' }) }, after: { deepSeekScore: deep(30, { status: 'failed' }), qwenScore: qwen(50) }, expected: [null, null, null] },
+    { name: '评分输入截断时排除该评委', before: { deepSeekScore: deep(80), qwenScore: qwen(50) }, after: { deepSeekScore: deep(30, { quality: { total: 30, source: { truncated: true } } }), qwenScore: qwen(50) }, expected: [50, 50, 0] },
+    { name: '唯一评分输入截断时不计算分差', before: { deepSeekScore: deep(80) }, after: { deepSeekScore: deep(30, { quality: { total: 30, source: { truncated: true } } }) }, expected: [null, null, null] },
+    { name: '回答截断时不使用任何评委分数', before: { deepSeekScore: deep(80), qwenScore: qwen(50) }, after: { deepSeekScore: deep(30), qwenScore: qwen(20) }, truncated: true, expected: [null, null, null] },
+    { name: '无效分数不能参与比较', before: { deepSeekScore: deep(80), qwenScore: qwen(50) }, after: { deepSeekScore: deep(101), qwenScore: qwen(50) }, expected: [50, 50, 0] },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const service = createBatchReadService({ repository: repository({
+      plans: [plan(), plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' })],
+      runs: [
+        run({ id: 'current', scores: item.after, answer_truncated: item.truncated === true }),
+        run({ id: 'previous', batch_id: MISSION_PREVIOUS, scores: item.before }),
+      ],
+    }) });
+    const result = await service.comparison(MISSION);
+    assert.equal(result.mode, 'question');
+    const question = result.questions[0];
+    assert.deepEqual([question.before.score, question.after.score, question.delta], item.expected);
+    assert.equal(question.level, 'stable');
+  });
+});
+
+test('未结束的运行不判定为已修复或新增失败', async () => {
+  const service = createBatchReadService({ repository: repository({
+    plans: [plan(), plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' })],
+    runs: [
+      run({ id: 'current-q1', question_id: 'q1', status: 'queued', run_status: null }),
+      run({ id: 'previous-q1', batch_id: MISSION_PREVIOUS, question_id: 'q1', status: 'error', run_status: 'error' }),
+      run({ id: 'current-q2', question_id: 'q2', status: 'error', run_status: 'error' }),
+      run({ id: 'previous-q2', batch_id: MISSION_PREVIOUS, question_id: 'q2', status: 'running', run_status: null }),
+      run({ id: 'current-q3', question_id: 'q3', status: 'running', run_status: 'running' }),
+      run({ id: 'previous-q3', batch_id: MISSION_PREVIOUS, question_id: 'q3', status: 'error', run_status: 'error' }),
+    ],
+  }) });
+  const result = await service.comparison(MISSION);
+  assert.equal(result.mode, 'question');
+  assert.equal(result.matchedQuestions, 3);
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.services[0].fixedCount, 0);
+  assert.equal(result.services[0].newFailureCount, 0);
+});
+
 test('试跑批次没有同题 ID 时只做服务汇总环比', async () => {
   const current = trialPlan({ id: TRIAL });
   const previous = trialPlan({ id: TRIAL_PREVIOUS, plan_date: '2026-11-01' });
