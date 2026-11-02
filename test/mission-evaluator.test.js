@@ -229,3 +229,20 @@ test('已结束总结的迟到增量不能重新打开生命周期', async () =>
   sockets[0].emit('close', { code: 1000 });
   assert.equal((await started.completion).status, 'done');
 });
+
+test('正文超过1MiB字符仍可接收，超过3MiB才失败', async () => {
+  const accepted = fixture();
+  const longRun = await accepted.evaluator.startQuestionRun({ question: '检查长正文接收' }, { onText() {} });
+  await flush();
+  accepted.sockets[0].message({ type: 'text.delta', delta: 'x'.repeat(1536 * 1024) });
+  accepted.sockets[0].emit('close', { code: 1000 });
+  assert.equal((await longRun.completion).status, 'done');
+
+  const rejected = fixture();
+  const tooLong = await rejected.evaluator.startQuestionRun({ question: '检查超长正文失败' }, { onText() {} });
+  await flush();
+  rejected.sockets[0].message({ type: 'text.delta', delta: 'x'.repeat(3 * 1024 * 1024 + 1) });
+  const result = await tooLong.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /保存上限/);
+});

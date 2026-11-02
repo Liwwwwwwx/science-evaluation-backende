@@ -9,9 +9,10 @@ const { createConversationEvents } = require('./conversation-events');
 const MATERIAL_SERVICES = {
   alloy: { label: '合金材料', field: 'idea', timeoutMs: 900000, endSettleMs: 300, snapshot: true },
   synthesis: { label: '合成制备', field: 'idea', timeoutMs: 360000, endSettleMs: 1200, snapshot: false },
-  'new-material': { label: '新材料', field: 'instruction', timeoutMs: 600000, endSettleMs: 300, snapshot: true },
+  'new-material': { label: '新材料', field: 'instruction', timeoutMs: 900000, endSettleMs: 300, snapshot: true },
 };
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
+const MAX_ANSWER_CHARS = 3 * 1024 * 1024;
 function inputError(message) { throw new TeamServiceError(400, 'REVIEW_INPUT_INVALID', message); }
 
 async function readJsonBounded(response) {
@@ -163,8 +164,12 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
               details.review.push({ at: new Date().toISOString(), requestId: frame.request_id, action: 'requested', data }); emit(); return;
             }
             if (frame.type === 'result' && accept(frame)) details.result = frame.data || frame;
-            else if (['progress', 'retrieval_progress'].includes(frame.type) && accept(frame)) {
-              details.progress.push(frame.data || frame.content || frame); if (details.progress.length > 50) details.progress.shift();
+            else if (['progress', 'retrieval_progress'].includes(frame.type)) {
+              const body = frame.data ?? frame.content ?? frame;
+              const message = typeof body === 'string' ? body : [body.message, body.text, body.title, body.content].find(value => typeof value === 'string') || '';
+              const progress = { ...(frame.stage_id ? { stage: frame.stage_id } : {}), text: message.slice(0, 1000) };
+              if (!accept(progress)) return;
+              details.progress.push(progress); if (details.progress.length > 50) details.progress.shift();
             } else if (frame.type === 'generated_files' && Array.isArray(frame.file_metadata) && accept(frame)) details.generatedFiles.push(...frame.file_metadata.slice(0, 100 - details.generatedFiles.length));
             else if (!frame.type && serviceKey === 'synthesis' && accept(frame)) {
               if (details.protocolFrames.length < 100) details.protocolFrames.push(frame); else details.truncated = true;
@@ -173,7 +178,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
             emit(); return;
           }
           if (summaryActive) return;
-          if (text.length + event.data.length > 1024 * 1024) { void finish('服务回答超过保存上限'); return; }
+          if (text.length + event.data.length > MAX_ANSWER_CHARS) { void finish('服务回答超过保存上限'); return; }
           text += event.data; onText(event.data);
           if (text.includes('[end]') && !endTimer) endTimer = setTimeout(() => void finish(text.includes('[start]') ? null : '服务缺少起始标识'), endSettleMs ?? config.endSettleMs);
         });

@@ -75,7 +75,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 | serviceKey | 展示名称 | 环境变量 | 执行超时 |
 | --- | --- | --- | --- |
-| `literature` | 文献检索 | `EVALUATION_LITERATURE_WS_URL` | 180 秒 |
+| `literature` | 文献检索 | `EVALUATION_LITERATURE_WS_URL` | 360 秒 |
 | `literature-aircraft` | 航空文献 | `EVALUATION_AIRCRAFT_LITERATURE_WS_URL` | 240 秒 |
 
 分别配置对应服务的 `/start` WebSocket 地址，并设置 `EVALUATION_RUN_WRITE_ENABLED=true` 后才允许创建运行。只配置航空文献时可单独使用，不依赖 1106；未配置的服务在前端不可选，后端也拒绝其创建请求。全局写开关关闭或缺少写权限时，两者均不可执行。可用状态只代表已配置，不表示实时探活成功。
@@ -104,7 +104,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 | --- | --- | --- | --- | --- |
 | `alloy` | 合金材料 | `EVALUATION_ALLOY_WS_URL` | `idea` | 900秒 |
 | `synthesis` | 合成制备 | `EVALUATION_SYNTHESIS_WS_URL` | `idea` | 360秒 |
-| `new-material` | 新材料 | `EVALUATION_NEW_MATERIAL_WS_URL` | `instruction` | 600秒 |
+| `new-material` | 新材料 | `EVALUATION_NEW_MATERIAL_WS_URL` | `instruction` | 900秒 |
 
 与文献服务相同，必须显式配置连接地址、打开 `EVALUATION_RUN_WRITE_ENABLED` 并具备权限；各服务可独立配置。首帧包含独立taskid和user_name，新材料另带空file_metadata；不自动重试运行。1112题目上限200字符，其他服务500字符。
 
