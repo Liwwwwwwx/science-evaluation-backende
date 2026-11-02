@@ -24,8 +24,18 @@ const { Pool } = require('pg');
 JS
   url=http://127.0.0.1:7714/health
 else
-  [[ -f "$release/server.js" ]] || exit 1
-  url=http://127.0.0.1:6714/login
+  if [[ ! -f "$release/server.js" ]]; then
+    (cd "$release"
+      export NEXT_TELEMETRY_DISABLED=1
+      npx --yes yarn@1.22.22 install --frozen-lockfile
+      npx --yes yarn@1.22.22 build
+      test -f .next/standalone/server.js
+      if [[ -d public ]]; then cp -r public .next/standalone/; fi
+      cp -r .next/static .next/standalone/.next/
+      printf "require('./.next/standalone/server.js');\n" > server.js
+    )
+  fi
+  url=http://127.0.0.1:1101/login
 fi
 old=
 if [[ -L "$root/current-$component" ]]; then old=$(readlink -f "$root/current-$component"); fi
