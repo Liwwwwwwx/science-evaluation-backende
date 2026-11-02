@@ -4,10 +4,10 @@ const { createProcessRecorder } = require('../scoring/process-review');
 const { createConversationEvents } = require('./conversation-events');
 const { stackConfirmation } = require('./mission-confirmations');
 
-const MAX_ANSWER_CHARS = 1024 * 1024;
+const MAX_ANSWER_CHARS = 3 * 1024 * 1024;
 // 接收上限与归档预算分开：下游团队的完整输出可能超过单条归档预算。
 const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
-const MAX_FRAME_BYTES = 256 * 1024;
+const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_FRAMES = 100000;
 const MAX_CHECKPOINTS = 200;
@@ -44,7 +44,7 @@ function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket 
       };
       const keep = value => {
         const size = Buffer.byteLength(JSON.stringify(value));
-        if (size > MAX_FRAME_BYTES || stateBytes + size > MAX_STATE_BYTES) { details.truncated = true; return false; }
+        if (size > MAX_RECORD_BYTES || stateBytes + size > MAX_STATE_BYTES) { details.truncated = true; return false; }
         stateBytes += size; return true;
       };
       function recordProgress(frame) {

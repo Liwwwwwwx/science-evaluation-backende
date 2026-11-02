@@ -1,13 +1,23 @@
 // 参考 ALPHA-BACKEND 的 display 归并：团队增量按 seq 去重，快照与流使用同一份状态。
-function createConversationEvents({ baseUrl, maxBytes = 2 * 1024 * 1024, maxEvents = 2000 } = {}) {
+const MAX_EVENT_BYTES = 256 * 1024;
+const MAX_ESSENTIAL_EVENT_BYTES = 1024 * 1024;
+const ESSENTIAL_TYPES = new Set([
+  'display.team_output', 'display.final_answer', 'display.artifact',
+  'display.followups', 'display.followup_request', 'display.followup_answer',
+  'display.recommendations', 'display.supplement', 'result', 'generated_files',
+]);
+const TRANSIENT_PROGRESS_TYPES = new Set(['progress', 'retrieval_progress', 'retrival_progress']);
+const eventLimit = type => ESSENTIAL_TYPES.has(type) ? MAX_ESSENTIAL_EVENT_BYTES : MAX_EVENT_BYTES;
+
+function createConversationEvents({ baseUrl, maxBytes = 4 * 1024 * 1024, maxEvents = 2000 } = {}) {
   const data = { displayEvents: [], protocolFrames: [], artifacts: [], truncated: false };
   const groups = new Map();
   let bytes = 0; let arrival = 0;
   const size = value => Buffer.byteLength(JSON.stringify(value));
-  function put(list, index, value) {
+  function put(list, index, value, limit = MAX_EVENT_BYTES) {
     const previous = index < 0 ? 0 : size(list[index]);
     const next = size(value);
-    if ((index < 0 && list.length >= maxEvents) || bytes - previous + next > maxBytes) { data.truncated = true; return false; }
+    if ((index < 0 && list.length >= maxEvents) || next > limit || bytes - previous + next > maxBytes) { data.truncated = true; return false; }
     bytes += next - previous;
     if (index < 0) list.push(value); else list[index] = value;
     return true;
@@ -32,6 +42,8 @@ function createConversationEvents({ baseUrl, maxBytes = 2 * 1024 * 1024, maxEven
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
     const type = typeof frame.type === 'string' ? frame.type : '';
     if (frame.ignore === true || ['heartbeat.ping', 'heartbeat', 'ping', 'pong'].includes(type)) return false;
+    // 进度正文已由 process/progress 摘要保留；完整大帧不进入归档预算。
+    if (TRANSIENT_PROGRESS_TYPES.has(type) && !frame.stage_id && !frame.candidates && !frame.recommendations && frame.input_count == null && frame.output_count == null) return true;
     const sequence = Number.isSafeInteger(frame.seq) && frame.seq >= 0 ? frame.seq : null;
     const order = ++arrival;
     const eventId = typeof frame.event_id === 'string' && frame.event_id ? frame.event_id : type === 'display.process.step' && typeof frame.step_id === 'string' ? `step:${frame.step_id}` : `${type}:${order}`;
@@ -57,18 +69,18 @@ function createConversationEvents({ baseUrl, maxBytes = 2 * 1024 * 1024, maxEven
         if (previous?.content && frame.phase !== 'end') merged.content = previous.content;
         merged.seq = Math.max(previous?.seq ?? -1, sequence ?? order);
         merged.compacted_through_seq = Math.max(next.watermark, ...next.parts.keys());
-        if (!put(data.displayEvents, index, merged)) return false;
+        if (!put(data.displayEvents, index, merged, eventLimit(type))) return false;
         groups.set(key, next);
       } else {
         if (previous && sequence !== null && typeof previous.seq === 'number' && sequence <= previous.seq) return false;
-        if (!put(data.displayEvents, index, merged)) return false;
+        if (!put(data.displayEvents, index, merged, eventLimit(type))) return false;
       }
       if (type === 'display.artifact') files(frame);
       return true;
     }
     if (type === 'generated_files') files(frame);
     if ((type === 'MaterialsPNG' || /stl/i.test(type)) && typeof frame.url === 'string') files({ files: [{ url: frame.url, name: frame.title }] });
-    return put(data.protocolFrames, -1, { ...frame, text_offset: offset, received_order: order });
+    return put(data.protocolFrames, -1, { ...frame, text_offset: offset, received_order: order }, eventLimit(type));
   }
   return { data, record };
 }

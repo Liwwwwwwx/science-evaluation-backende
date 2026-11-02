@@ -4,12 +4,14 @@ const { createAutomaticReview } = require('./automatic-review');
 const { createProcessRecorder } = require('../scoring/process-review');
 const { createConversationEvents } = require('./conversation-events');
 
+const MAX_ANSWER_CHARS = 3 * 1024 * 1024;
+
 // 1106/1108 协议来源：旧管理端 material-service-cases.service.js 的文献运行器。
 // 只运行问答，不调用旧管理端的归档、评分、MinIO 或夜检。
 function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, createSocket = target => new WebSocket(target) } = {}) {
   if (!['literature', 'literature-aircraft'].includes(serviceKey)) throw new Error('不支持的文献服务');
   const label = serviceKey === 'literature-aircraft' ? '航空文献服务' : '文献服务';
-  timeoutMs ??= serviceKey === 'literature-aircraft' ? 240000 : 180000;
+  timeoutMs ??= serviceKey === 'literature-aircraft' ? 240000 : 360000;
   const target = new URL(url);
   if (!['ws:', 'wss:'].includes(target.protocol)) throw new Error(`${label}必须配置 WebSocket 地址`);
   return {
@@ -55,7 +57,7 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
               return;
             }
             if (summaryActive) return;
-            if (text.length + delta.length > 1024 * 1024) { finish(`${label}回答超过保存上限`); return; }
+            if (text.length + delta.length > MAX_ANSWER_CHARS) { finish(`${label}回答超过保存上限`); return; }
             text += delta;
             onText(delta);
             if (text.includes('[end]') && !endTimer) endTimer = setTimeout(() => finish(text.includes('[start]') ? null : `${label}缺少起始标识`), 300);

@@ -65,7 +65,7 @@ test('航空文献复用 instruction 协议，隔离任务标识并保留部分�
       if (mode === 'error') socket.emit('message', { data: '{"type":"error"}' });
       if (mode === 'interaction') socket.emit('message', { data: '{"type":"user_input_request"}' });
       if (mode === 'binary') socket.emit('message', { data: new Uint8Array([1]) });
-      if (mode === 'oversize') socket.emit('message', { data: 'x'.repeat(1024 * 1024) });
+      if (mode === 'oversize') socket.emit('message', { data: 'x'.repeat(3 * 1024 * 1024 + 1) });
     };
     const evaluator = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: 'ws://127.0.0.1:1108/start', timeoutMs: 30,
       createSocket: target => { assert.equal(target, 'ws://127.0.0.1:1108/start'); queueMicrotask(() => socket.emit('open')); return socket; } });

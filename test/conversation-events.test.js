@@ -47,6 +47,35 @@ test('文件归一化去重、未知业务JSON保留、心跳忽略、超限明�
   const small = createConversationEvents({ maxBytes: 40 }); assert.equal(small.record({ type: 'result', data: 'x'.repeat(50) }), false); assert.equal(small.data.truncated, true);
 });
 
+test('大团队输出和展示事件完整保留，超大进度帧不占归档预算', () => {
+  const state = createConversationEvents();
+  const team = 'x'.repeat(409 * 1024);
+  assert.equal(state.record({ type: 'display.team_output', event_id: 'large-team', phase: 'end', content: team }), true);
+  assert.equal(state.record({ type: 'display.final_answer', event_id: 'large-final', phase: 'end', content: 'y'.repeat(281 * 1024) }), true);
+  assert.equal(state.record({ type: 'progress', message: 'z'.repeat(745 * 1024) }), true);
+  assert.equal(state.record({ type: 'result', data: { value: 'r'.repeat(300 * 1024) } }), true);
+  assert.equal(state.data.displayEvents.length, 2);
+  assert.equal(state.data.displayEvents[0].content, team);
+  assert.deepEqual(state.data.protocolFrames.map(frame => frame.type), ['result']);
+  assert.equal(state.data.truncated, false);
+});
+
+test('带阶段的进度帧保留，普通进度帧只留摘要不归档', () => {
+  const state = createConversationEvents();
+  assert.equal(state.record({ type: 'progress', stage_id: 'S1', input_count: 3, message: '阶段进度' }), true);
+  assert.equal(state.record({ type: 'progress', message: '普通进度' }), true);
+  assert.equal(state.data.protocolFrames.length, 1);
+  assert.equal(state.data.protocolFrames[0].stage_id, 'S1');
+  assert.equal(state.data.truncated, false);
+});
+
+test('超过1MiB的关键事件明确标记截断，不静默保存', () => {
+  const state = createConversationEvents();
+  assert.equal(state.record({ type: 'display.team_output', event_id: 'too-large', phase: 'delta', delta: 'x'.repeat(1024 * 1024 + 1) }), false);
+  assert.equal(state.data.displayEvents.length, 0);
+  assert.equal(state.data.truncated, true);
+});
+
 test('正常请求不传路由type和历史；子步骤结束与总结end不会提前完成，尾部文件必须保留', async () => {
   const { evaluator, socket } = setup(); const chunks = []; const states = [];
   const started = await evaluator.startQuestionRun({ question: '本题独立完成材料分析', type: '不得发送', history: ['旧内容'] }, { onText: text => chunks.push(text), onState: state => states.push(state) });
