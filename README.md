@@ -1,5 +1,11 @@
 # Science 测评后端
 
+## 评判标准助手
+
+`POST /api/evaluation/standards` 接收 `{ "question": "问题原文" }`，生成题目明确要求、评判项及待补充信息。题目长度为 8–4000 个字符；每条要求和必需项都须引用输入中存在的原文。评判项分为 `required`（题目要求）、`recommended`（专业建议）和 `needs_verification`（待核验）。接口不保存数据、不修改题库或评分规则，不自动联网查证，也不宣称模型输出经过专业验证。
+
+服务端调用使用现有 `EVALUATION_SERVICE_TOKEN` 的 Bearer 认证；网页调用使用现有登录会话、`team-services:write` 权限和同源校验。依赖已配置的出题模型。模型不可用或结果格式不符合约束时返回错误，不返回不完整结果；示例：`curl -X POST "$BASE_URL/api/evaluation/standards" -H "Authorization: Bearer $EVALUATION_SERVICE_TOKEN" -H 'Content-Type: application/json' -d '{"question":"比较两种铝合金用于支架的适用性，并说明选择依据。"}'`。测试：`node --test test/standards.test.js`。
+
 ## 单日随机题试运行
 
 本功能默认关闭。指定 `EVALUATION_TRIAL_DATE=YYYY-MM-DD` 并启用运行写入、配置六个服务与出题模型后，仅在该日北京时间 22:00–22:10 生成并提交一轮。部署前需手工审核并执行 `migrations/008_trial_batch_plans.sql`，不自动修改数据库；需要用户确认后再部署和配置。日期开关应在试运行结束后移除。
@@ -9,6 +15,14 @@
 计划先持久化完整题目、服务地址和规则，再按每题幂等键派发，排队任务可按原记录恢复。运行中断的远端任务状态可能未知，不自动重发；出题进程中断后超过两小时标记失败，需人工检查。模型生成不足或失败时整轮不派发。试运行当天跳过本平台原 Mission 每日计划；若当天已存在原计划，或上一轮 Mission 仍未结束，则试运行不会启动。旧 Science Admin 夜检不受此开关控制。
 
 试运行日报等待全部已计划任务和评分结束，不受次日 06:00 截止限制；仍使用现有测试机器人通知和通知去重规则。仅依赖数据库原子抢占防止重复派发，并发上限是单进程限制，不能用于多个后端实例共享限流。
+
+## 测评批次读取
+
+新增四个只读接口，供前端“测评批次”页使用：`GET /api/evaluation/unified/batches` 列表、`/:id` 详情、`/:id/runs` 运行列表、`/:id/comparison` 环比。接口使用现有测评会话和 `team-services:read`，只读取 `evaluation_trial_batch_plans`、`evaluation_mission_daily_plans` 与 `unified_evaluation_runs`，不调用模型、不写库、不重新发起任务。
+
+列表会把试跑和 Mission 每日计划统一成批次，按 `batch_id` 汇总运行、完成/失败/超时和两家模型均分；详情按服务展示低分题和失败题，运行列表支持服务、执行状态、排序和分页。试跑批次每次重新生成随机题，没有同题 ID，通常只能做服务汇总环比；Mission 每日计划可匹配 `question_id + dataset_version` 做逐题环比。两批次的规则哈希或评分模型不同时标记不可比，不直接相减。
+
+批次表未迁移时列表返回 `storageReady=false`，详情返回 503；读取失败、参数错误和批次不存在分别返回明确状态。应用不自动执行迁移。测试：`node --test test/batches.test.js test/batches-http.test.js`。
 
 ## 每日测评分析报告
 

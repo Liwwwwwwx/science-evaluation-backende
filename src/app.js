@@ -1,14 +1,16 @@
 const http = require('node:http');
 const { handleRuns } = require('./runs/http');
+const { handleBatches } = require('./runs/batch-http');
 const { handleRules } = require('./scoring/rule-http');
 const { handleDailyReports } = require('./daily-reports/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
+const { createStandardsService } = require('./standards/service');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -46,6 +48,23 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/evaluation/standards') {
+      try {
+        if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+        const auth = req.headers.authorization || '';
+        const candidate = crypto.createHash('sha256').update(auth.startsWith('Bearer ') ? auth.slice(7) : '').digest();
+        if (!crypto.timingSafeEqual(candidate, expected)) {
+          if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
+          const user = await authService.authenticate(session(req));
+          if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有生成标准的权限');
+          if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        }
+        return reply(res, 200, await standards.generate(await readBody(req, 32 * 1024)));
+      } catch (error) {
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'STANDARDS_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '标准生成服务暂不可用' : error.message);
+      }
+    }
     if (url.pathname === '/api/evaluation/rules' || url.pathname.startsWith('/api/evaluation/rules/')) {
       try {
         if (!authService) return fail(res,503,'AUTH_UNAVAILABLE','登录服务尚未配置');
@@ -61,6 +80,7 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
         if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
         const user = await authService.authenticate(session(req));
         if (req.method === 'GET' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有运行查看权限');
+        if (url.pathname === '/api/evaluation/unified/batches' || url.pathname.startsWith('/api/evaluation/unified/batches/')) return await handleBatches({ req, res, url, user, batches, reply });
         if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
         return await handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply });
       } catch (error) {

@@ -8,6 +8,8 @@ const { createAuthService } = require('./auth/service');
 const { createEvalQuestionBankRepository } = require('./question-bank/repository');
 const { createUnifiedEvaluationService } = require('./runs/unified-evaluation.service');
 const { createUnifiedEvaluationRepository } = require('./runs/unified-evaluation.repository');
+const { createBatchReadRepository } = require('./runs/batch-read.repository');
+const { createBatchReadService } = require('./runs/batch-read.service');
 const { createRunQuestionResolver } = require('./runs/question-resolver');
 const { createLiteratureEvaluator } = require('./runs/literature-evaluator');
 const { createMaterialEvaluator } = require('./runs/material-evaluator');
@@ -35,6 +37,7 @@ let secureCookies = true;
 let authService;
 let questionBank;
 let evaluations;
+let batches;
 let missionDaily;
 let missionDailyReport;
 let dailyReports;
@@ -60,6 +63,7 @@ if (databaseUrl) {
   if (trialDate && (process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true' || Object.values(serviceAddresses).some(value => !value))) throw new Error('试运行需要启用运行写入和全部六个服务');
   const scoring = createScoringService({ rules });
   evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate ? 26 : 25, serviceLimits: trialDate ? { 'literature-aircraft': 1 } : {} });
+  batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
     serviceAddress: evaluators['mission-material']?.serviceAddress || null,
@@ -92,7 +96,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();
