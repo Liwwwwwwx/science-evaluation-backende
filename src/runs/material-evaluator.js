@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
 const { publicServiceAddress } = require('./service-address');
 const { createAutomaticReview } = require('./automatic-review');
+const { createProcessRecorder } = require('../scoring/process-review');
 
 // 协议来源：旧管理端 material-service-cases / material-case-evidence；不调用归档或评分。
 const MATERIAL_SERVICES = {
@@ -51,7 +52,8 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
     scoreMode: 'none',
     async startQuestionRun({ question }, { onText, onState = () => {} }) {
       const id = `evaluation-${serviceKey}-${randomUUID()}`; const startedAt = Date.now();
-      const details = { progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
+      const process = createProcessRecorder(startedAt);
+      const details = { process: process.data, progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
       let socket; let settled = false; let ending = false; let text = ''; let endTimer; let pendingRaw = null; let stateBytes = 0;
       const emit = () => onState(structuredClone(details));
       const accept = value => {
@@ -137,6 +139,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
           if (Buffer.byteLength(event.data) > MAX_STATE_BYTES) { void finish('服务数据帧超过保存上限'); return; }
           let frame; try { frame = JSON.parse(event.data); } catch {}
           if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
+            if (!frame.taskid || frame.taskid === id) process.record(frame);
             if (['error', 'requirement_review_error'].includes(frame.type)) { void finish(frame.type === 'requirement_review_error' && autoContinueReview ? '服务拒绝自动继续，请查看本次确认记录' : `${config.label}返回执行错误`); return; }
             if (frame.type === 'user_input_request') { void finish('该服务返回了尚不支持的交互协议'); return; }
             if (frame.type === 'requirement_review_request') {

@@ -2,9 +2,12 @@ const crypto = require('crypto');
 const { TeamServiceError } = require('../errors');
 const { createUnifiedEvaluationAdapters } = require('./unified-evaluation-adapters');
 const { createRunEvents } = require('./unified-evaluation-events');
+const { createConcurrency } = require('./concurrency');
 
-const SERVICE_KEYS = ['alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
-const MAX_ACTIVE = 8;
+const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
+const MAX_ACTIVE = 25;
+const MAX_PER_SERVICE = 5;
+const MAX_QUEUED = 300;
 const MAX_FINISHED = 100;
 const MAX_ANSWER_CHARS = 1024 * 1024;
 const SCORE_WAIT_MS = 300000;
@@ -13,7 +16,7 @@ const SCORE_POLL_MS = 1000;
 // 执行和评分分开呈现；旧 status 保留兼容，并不把评分失败视为执行失败。
 function statusFields(value) {
   const nativeStatus = value.run && value.run.status;
-  const executionStatus = nativeStatus === 'error' || (!nativeStatus && value.status === 'error') ? 'failed'
+  const executionStatus = value.status === 'queued' ? 'queued' : nativeStatus === 'error' || (!nativeStatus && value.status === 'error') ? 'failed'
     : nativeStatus === 'done' ? 'succeeded' : 'running';
   const items = Object.values(value.scores || {}).filter((item) => item && typeof item.status === 'string');
   let scoringStatus = 'pending';
@@ -35,10 +38,11 @@ function recoverScoringSnapshot(value) {
   return { ...value, scores, status: value.run.status === 'error' ? 'error' : 'done', run: { ...value.run, scoring: { ...attempt, expired: true } } };
 }
 
-function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE } = {}) {
+function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED } = {}) {
   const runs = new Map();
   const adapters = createUnifiedEvaluationAdapters(evaluators);
-  let active = 0;
+  const concurrency = createConcurrency({ maxActive, maxPerKey: maxPerService, maxQueued });
+  const scoreConcurrency = createConcurrency({ maxActive: 4, maxPerKey: 4, maxQueued });
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   function send(job, event, data) { job.events.send(event, data); }
@@ -80,12 +84,12 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     catch { job.scoreError = '无法读取评分状态，可稍后查询'; }
     return job.scores;
   }
-  async function finish(job, completion) {
+  async function finish(job, completion, release) {
     let executionFinished = false;
     let executionSlotReleased = false;
     try {
       const result = await completion;
-      active -= 1;
+      release();
       executionSlotReleased = true;
       job.run = { ...job.run, details: result.details || job.run?.details || null, status: result.status, verdict: result.verdict == null ? null : result.verdict, checks: result.checks || null, markdownSyntax: result.markdownSyntax || null,
         caseId: result.caseId || null, caseTitle: result.caseTitle || null,
@@ -98,6 +102,9 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       send(job, 'run', { runId: job.runId, ...job.run });
       if (scoring && job.serviceKey !== 'alpha-rsi') {
         executionFinished = true;
+        job.scores = scoring.pending();
+        if (job.saveTimer) { clearTimeout(job.saveTimer); job.saveTimer = null; }
+        await save(job).catch(() => { job.persistenceError = true; });
         await runScoring(job);
         return;
       }
@@ -127,7 +134,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         await save(job).catch(() => { job.persistenceError = true; });
         send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_FAILED', message: job.error });
       }
-    } finally { job.settled = true; job.reply = null; if (!executionSlotReleased) active -= 1; prune(); }
+    } finally { job.settled = true; job.reply = null; if (!executionSlotReleased) release(); prune(); }
   }
   async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null } = {}, internal = null) {
     if (typeof serviceKey !== 'string' || !SERVICE_KEYS.includes(serviceKey) || !evaluators || !evaluators[serviceKey]) throw new TeamServiceError(400, 'UNIFIED_EVAL_SERVICE_INVALID', '不支持该测评服务');
@@ -136,6 +143,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     const existingRun = Boolean(internal && typeof internal.execute === 'function');
     const text = question.trim(); const min = existingRun ? 1 : serviceKey === 'alpha-rsi' ? 1 : 8; const max = existingRun ? 10000 : serviceKey === 'synthesis' ? 200 : 500;
     if (text.length < min || text.length > max) throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', `题目需为 ${min}–${max} 个字符`);
+    const recovered = internal?.recovered || null;
     const idempotency = internal && internal.idempotency;
     if (idempotency) {
       if (!repository || typeof repository.createIdempotent !== 'function' || typeof repository.findIdempotent !== 'function') throw new TeamServiceError(503, 'UNIFIED_EVAL_IDEMPOTENCY_UNAVAILABLE', '运行去重存储不可用');
@@ -145,11 +153,20 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         return { runId: existing.runId, serviceKey, reused: true };
       }
     }
-    if (active >= maxActive) throw new TeamServiceError(429, 'UNIFIED_EVAL_BUSY', '测评并发已达上限，请稍后重试');
+    // 支持评分规则模块注入发布版快照；恢复时只使用创建时保存的版本。
+    const ruleSnapshot = recovered ? null : internal && Object.hasOwn(internal, 'ruleSnapshot') ? internal.ruleSnapshot : scoring?.snapshotRule && serviceKey !== 'alpha-rsi' ? await scoring.snapshotRule() : null;
     if (!['manual', 'automation', 'legacy'].includes(origin)) throw new TeamServiceError(400, 'UNIFIED_EVAL_ORIGIN_INVALID', '无效的运行来源');
     for (const value of [questionId, datasetVersion, sourceType, batchId]) if (value != null && (typeof value !== 'string' || value.length > 200)) throw new TeamServiceError(400, 'UNIFIED_EVAL_METADATA_INVALID', '运行来源信息无效');
-    active += 1;
-    const job = { runId: crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'running', answer: '', answerTruncated: false, run: evaluators[serviceKey]?.serviceAddress ? { serviceAddress: evaluators[serviceKey].serviceAddress, serviceAddressSource: 'run' } : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: internal?.idempotency?.scope, reply: null };
+    let reservation;
+    try { reservation = concurrency.reserve(serviceKey); }
+    catch (error) {
+      if (error.code === 'CONCURRENCY_QUEUE_FULL') throw new TeamServiceError(429, 'UNIFIED_EVAL_BUSY', '测评等待队列已满，请稍后重试');
+      throw error;
+    }
+    const initialRun = { ...(evaluators[serviceKey]?.serviceAddress ? { serviceAddress: evaluators[serviceKey].serviceAddress, serviceAddressSource: 'run' } : {}),
+      ...(ruleSnapshot ? { ruleSnapshot } : {}),
+      ...(idempotency ? { queuePayload: { version: 1, caseDef: internal.caseDef || null, scoreMode: internal.scoreMode || null } } : {}) };
+    const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null };
     const onText = (delta) => {
       if (typeof delta !== 'string') return;
       const remaining = Math.max(0, MAX_ANSWER_CHARS - job.answer.length);
@@ -169,27 +186,69 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         const claim = await repository.createIdempotent(snapshot(job), idempotency.scope, idempotency.key, idempotency.hash);
         if (!claim.created) {
           if (!claim.matches) throw new TeamServiceError(409, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT', '幂等键已用于不同请求');
-          active -= 1;
+          if (!reservation.cancel()) (await reservation.ready)();
           return { runId: claim.runId, serviceKey, reused: true };
         }
-      } else if (repository) await repository.create(snapshot(job));
-      const body = { ...(internal && internal.legacyBody ? internal.legacyBody : {}), question: text, questionId, datasetVersion, sourceType };
-      const started = existingRun
-        ? { run: { id: internal.nativeRunId }, completion: Promise.resolve().then(() => internal.execute(onText)) }
-        : internal && internal.caseDef
-          ? await adapters[serviceKey].startCase(internal.caseDef, onText)
-          : await adapters[serviceKey].start(body, onText, onState);
-      if (!started || !started.run || (!existingRun && !started.run.id) || !started.completion || typeof started.completion.then !== 'function') throw new Error('invalid evaluator response');
-      job.nativeRunId = started.run.id || null; job.reply = started.reply || null; runs.set(job.runId, job);
-      void save(job).catch(() => { job.persistenceError = true; });
-      void finish(job, started.completion);
-      return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: started.completion, subscribe: (listener) => job.events.subscribe(listener) };
+      } else if (repository && !recovered) await repository.create(snapshot(job));
     } catch (error) {
-      active -= 1;
-      if (job.saveTimer) clearTimeout(job.saveTimer);
-      if (repository) { job.status = 'error'; job.error = '启动或记录保存失败'; job.finishedAt = new Date().toISOString(); await save(job).catch(() => {}); }
+      if (!reservation.cancel()) (await reservation.ready)();
       throw error;
     }
+    // 扫描器可能在创建记录提交后、原请求注册到内存前发现同一条记录。
+    if (runs.has(job.runId)) {
+      if (!reservation.cancel()) (await reservation.ready)();
+      return { runId: job.runId, serviceKey, reused: true };
+    }
+    runs.set(job.runId, job);
+    async function launch() {
+      const release = await reservation.ready;
+      if (!release) throw new Error('运行预约已取消');
+      try {
+        // 原子抢占后才允许向外发送；重启或其他进程只能争抢仍为 queued 的记录。
+        if (repository?.claimQueued) {
+          let claimed;
+          try { claimed = await repository.claimQueued(snapshot(job)); }
+          catch {
+            release(); if (runs.get(job.runId) === job) runs.delete(job.runId); job.settled = true;
+            send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_CLAIM_UNKNOWN', message: '派发状态暂无法确认，请重新读取原运行，勿重复发起。' });
+            return { runId: job.runId, serviceKey, reused: true };
+          }
+          if (!claimed) {
+            release(); if (runs.get(job.runId) === job) runs.delete(job.runId); job.settled = true;
+            send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_CLAIM_CHANGED', message: '运行已由其他进程处理，请重新读取原运行。' });
+            return { runId: job.runId, serviceKey, reused: true };
+          }
+        } else {
+          job.status = 'running';
+          await save(job);
+        }
+        job.status = 'running';
+        send(job, 'execution', { runId: job.runId, status: 'running', executionStatus: 'running' });
+        const body = { ...(internal && internal.legacyBody ? internal.legacyBody : {}), question: text, questionId, datasetVersion, sourceType };
+        const started = existingRun
+          ? { run: { id: internal.nativeRunId }, completion: Promise.resolve().then(() => internal.execute(onText)) }
+          : internal && internal.caseDef
+            ? await adapters[serviceKey].startCase(internal.caseDef, onText)
+            : await adapters[serviceKey].start(body, onText, onState);
+        if (!started || !started.run || (!existingRun && !started.run.id) || !started.completion || typeof started.completion.then !== 'function') throw new Error('invalid evaluator response');
+        job.nativeRunId = started.run.id || null; job.reply = started.reply || null;
+        void save(job).catch(() => { job.persistenceError = true; });
+        void finish(job, started.completion, release);
+        return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: started.completion, subscribe: (listener) => job.events.subscribe(listener) };
+      } catch (error) {
+        release();
+        if (job.saveTimer) clearTimeout(job.saveTimer);
+        job.status = 'error'; job.error = '启动或记录保存失败'; job.finishedAt = new Date().toISOString(); job.settled = true;
+        if (repository) await save(job).catch(() => { job.persistenceError = true; });
+        send(job, 'error', { runId: job.runId, code: 'UNIFIED_EVAL_FAILED', message: job.error });
+        prune();
+        throw error;
+      }
+    }
+    const launched = launch();
+    // 手动创建返回队列记录；自动化和旧调用仍等待原生运行实际启动。
+    if ((idempotency && reservation.queued) || recovered) { void launched.catch(() => {}); return { runId: job.runId, serviceKey }; }
+    return launched;
   }
   async function createRun(input, { scope, key } = {}) {
     if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
@@ -210,6 +269,47 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     }
     return start(safe, { idempotency: { scope, key, hash }, caseDef, scoreMode: evaluators && evaluators[safe.serviceKey]?.scoreMode });
   }
+  async function createMissionDailyRun(input, { key, ruleSnapshot } = {}) {
+    if (!input || typeof input.batchId !== 'string' || !input.batchId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'MISSION_DAILY_INVALID', '每日测评任务参数无效');
+    const safe = { serviceKey: 'mission-material', question: input.question, origin: 'automation', questionId: input.questionId,
+      datasetVersion: input.datasetVersion, sourceType: input.sourceType, batchId: input.batchId };
+    const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
+    return start(safe, { idempotency: { scope: 'evaluation-automation:mission-material', key, hash }, caseDef: null, scoreMode: evaluators?.['mission-material']?.scoreMode, ruleSnapshot });
+  }
+  let recoveryTimer = null;
+  let recoveryRunning = false;
+  async function recoverQueued() {
+    if (recoveryRunning || !repository?.listRecoverableQueued || !repository?.claimQueued) return;
+    recoveryRunning = true;
+    try {
+      const keys = SERVICE_KEYS.filter(key => !!evaluators?.[key]);
+      if (!keys.length) return;
+      const addresses = Object.fromEntries(keys.map(key => [key, evaluators[key].serviceAddress || null]));
+      const queued = await repository.listRecoverableQueued(keys, maxQueued + maxActive, addresses);
+      for (const row of queued) {
+        if (runs.has(row.runId)) continue;
+        const payload = row.run?.queuePayload;
+        if (!payload || payload.version !== 1 || (payload.caseDef != null && (typeof payload.caseDef !== 'object' || Array.isArray(payload.caseDef)))) continue;
+        try {
+          await start({ serviceKey: row.serviceKey, question: row.question, origin: row.origin, questionId: row.questionId,
+            datasetVersion: row.datasetVersion, sourceType: row.questionSourceType, batchId: row.batchId },
+          { recovered: row, caseDef: payload.caseDef, scoreMode: payload.scoreMode });
+        } catch (error) {
+          if (error?.code === 'UNIFIED_EVAL_BUSY') break;
+          // 无法恢复的记录继续保留，不能自动重发或覆盖原记录。
+        }
+      }
+    } finally { recoveryRunning = false; }
+  }
+  function startQueueRecovery({ intervalMs = 5000, onError = () => {} } = {}) {
+    if (recoveryTimer) return;
+    let reported = false;
+    const tick = () => { void recoverQueued().then(() => { reported = false; }).catch(() => { if (!reported) { reported = true; onError(); } }); };
+    tick();
+    recoveryTimer = setInterval(tick, intervalMs);
+    recoveryTimer.unref();
+  }
+  function stopQueueRecovery() { if (recoveryTimer) clearInterval(recoveryTimer); recoveryTimer = null; }
   async function observe(runId, listener, { scope } = {}) {
     const job = runs.get(runId);
     if (!job) return { snapshot: await get(runId, { scope }), live: false, unsubscribe: () => {} };
@@ -249,6 +349,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
   async function get(runId, { scope } = {}) {
     const job = runs.get(runId);
+    // 已完成评分必须先完成持久化，再让调用方据此发起重评或从其他进程读取。
+    if (job?.run?.scoring?.finishedAt && job.scoringWrite) await job.scoringWrite.catch(() => {});
     if (scoring && repository && job?.settled && !job.persistenceError) {
       const saved = await repository.get(runId);
       if (saved) return statusFields({ ...recoverScoringSnapshot(saved), canReply: false, recoveryState: 'snapshot_only' });
@@ -288,40 +390,57 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
   async function list(query = {}) { if (!repository) throw new TeamServiceError(503, 'UNIFIED_EVAL_STORAGE_UNAVAILABLE', '统一运行记录尚未配置'); return repository.list(query); }
 
-  async function runScoring(job, options = null) {
-    if (job.saveTimer) { clearTimeout(job.saveTimer); job.saveTimer = null; }
-    // 评分错误不改变原服务执行状态；先保存 pending，再逐模型保存最终结果。
-    const input = structuredClone(snapshot(job));
-    job.scores = scoring.pending(); job.scoreError = null;
-    const publish = async value => {
-      job.run = { ...job.run, scoring: value.scoring, markdownSyntax: value.markdownSyntax };
-      job.scores = value.scores;
-      const finished = Boolean(value.scoring.finishedAt);
-      job.status = job.run.status === 'error' ? 'error' : finished ? 'done' : 'scoring';
-      if (finished && !job.finishedAt) job.finishedAt = new Date().toISOString();
-      try {
-        if (options) {
-          const saved = await repository.updateScoring(job.runId, options.attemptId, { scoring: value.scoring, markdownSyntax: value.markdownSyntax, scores: value.scores, status: job.status });
-          if (!saved) throw new Error('评分租约已被替换');
-        } else await save(job);
-        job.persistenceError = false;
-      } catch { job.persistenceError = true; }
-      send(job, 'run', { runId: job.runId, ...job.run });
-      send(job, 'score', { runId: job.runId, scores: job.scores, scoreError: null, scoringStatus: statusFields(job).scoringStatus });
-    };
-    try { await scoring.score(input, publish, options || undefined); }
-    catch {
-      job.scores = Object.fromEntries(Object.entries(job.scores || {}).map(([key, value]) => [key, value.status === 'pending' ? { ...value, status: 'failed', error: '评分处理失败，请稍后重评' } : value]));
-      job.status = job.run.status === 'error' ? 'error' : 'done'; job.scoreError = '评分处理失败，请稍后重评';
-      try {
-        if (options) {
-          const updated = await repository.updateScoring(job.runId, options.attemptId, { scoring: { ...job.run.scoring, finishedAt: new Date().toISOString() }, markdownSyntax: job.run.markdownSyntax, scores: job.scores, status: job.status });
-          if (!updated) throw new Error('评分轮次已变化');
-        } else await save(job);
-      } catch { job.persistenceError = true; }
+  async function runScoring(job, options = null, reservedRelease = null) {
+    let release = reservedRelease;
+    if (!release) {
+      try { release = await scoreConcurrency.acquire('scoring'); }
+      catch {
+        job.scoreError = '评分等待队列已满，可稍后重评'; job.status = job.run.status === 'error' ? 'error' : 'done';
+        await save(job).catch(() => { job.persistenceError = true; });
+        send(job, 'done', { runId: job.runId, status: job.status, executionStatus: statusFields(job).executionStatus, scoringStatus: 'unknown' });
+        return;
+      }
     }
-    const { executionStatus, scoringStatus } = statusFields(job);
-    send(job, 'done', { runId: job.runId, status: job.status, executionStatus, scoringStatus });
+    try {
+      if (job.saveTimer) { clearTimeout(job.saveTimer); job.saveTimer = null; }
+      // 评分错误不改变原服务执行状态；先保存 pending，再逐模型保存最终结果。
+      const input = structuredClone(snapshot(job));
+      job.scores = scoring.pending(); job.scoreError = null;
+      const publish = async value => {
+        job.run = { ...job.run, scoring: value.scoring, markdownSyntax: value.markdownSyntax };
+        job.scores = value.scores;
+        const finished = Boolean(value.scoring.finishedAt);
+        job.status = job.run.status === 'error' ? 'error' : finished ? 'done' : 'scoring';
+        if (finished && !job.finishedAt) job.finishedAt = new Date().toISOString();
+        const persist = async () => {
+          if (options) {
+            const saved = await repository.updateScoring(job.runId, options.attemptId, { scoring: value.scoring, markdownSyntax: value.markdownSyntax, scores: value.scores, status: job.status });
+            if (!saved) throw new Error('评分租约已被替换');
+          } else await save(job);
+        };
+        job.scoringWrite = persist();
+        try {
+          await job.scoringWrite;
+          job.persistenceError = false;
+        } catch { job.persistenceError = true; }
+        finally { job.scoringWrite = null; }
+        send(job, 'run', { runId: job.runId, ...job.run });
+        send(job, 'score', { runId: job.runId, scores: job.scores, scoreError: null, scoringStatus: statusFields(job).scoringStatus });
+      };
+      try { await scoring.score(input, publish, options || undefined); }
+      catch {
+        job.scores = Object.fromEntries(Object.entries(job.scores || {}).map(([key, value]) => [key, value.status === 'pending' ? { ...value, status: 'failed', error: '评分处理失败，请稍后重评' } : value]));
+        job.status = job.run.status === 'error' ? 'error' : 'done'; job.scoreError = '评分处理失败，请稍后重评';
+        try {
+          if (options) {
+            const updated = await repository.updateScoring(job.runId, options.attemptId, { scoring: { ...job.run.scoring, finishedAt: new Date().toISOString() }, markdownSyntax: job.run.markdownSyntax, scores: job.scores, status: job.status });
+            if (!updated) throw new Error('评分轮次已变化');
+          } else await save(job);
+        } catch { job.persistenceError = true; }
+      }
+      const { executionStatus, scoringStatus } = statusFields(job);
+      send(job, 'done', { runId: job.runId, status: job.status, executionStatus, scoringStatus });
+    } finally { release(); }
   }
   async function rescore(runId, { scope, key } = {}) {
     if (!scoring || !repository?.claimScoring) throw new TeamServiceError(503, 'SCORING_UNAVAILABLE', '评分尚未配置');
@@ -337,15 +456,22 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if ((runs.get(runId) && !runs.get(runId).settled) || current.status === 'running' || (previous && !previous.finishedAt && Date.parse(previous.expiresAt) > Date.now())) throw new TeamServiceError(409, 'SCORING_BUSY', '此运行仍在执行或评分，请稍后重试');
     if (!['done', 'error'].includes(current.run?.status)) throw new TeamServiceError(409, 'RUN_INCOMPLETE', '此快照缺少最终执行结果，不能完整评分');
     if (history.length >= 19) throw new TeamServiceError(409, 'SCORING_HISTORY_LIMIT', '单次运行最多保留20轮评分，请创建新的测评运行');
+    let reservation;
+    try { reservation = scoreConcurrency.reserve('scoring'); }
+    catch { throw new TeamServiceError(429, 'SCORING_BUSY', '评分繁忙，请稍后重试'); }
+    if (reservation.queued) { reservation.cancel(); throw new TeamServiceError(429, 'SCORING_BUSY', '评分繁忙，请稍后重试'); }
+    const release = await reservation.ready;
     const attemptId = crypto.randomUUID();
     const nextHistory = previous ? [...history, { ...previous, history: undefined, scores: recoverScoringSnapshot(current).scores, markdownSyntax: current.run?.markdownSyntax }] : [];
     const options = { attemptId, requestHash, history: nextHistory };
     const initialScoring = { ...options, version: scoring.version, startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 240000).toISOString(), finishedAt: null, rubric: previous?.rubric || null };
-    const claimed = await repository.claimScoring(runId, previous?.attemptId || null, initialScoring, scoring.pending());
-    if (!claimed) throw new TeamServiceError(409, 'SCORING_CONFLICT', '运行评分已更新，请刷新后重试');
+    let claimed;
+    try { claimed = await repository.claimScoring(runId, previous?.attemptId || null, initialScoring, scoring.pending()); }
+    catch (error) { release(); throw error; }
+    if (!claimed) { release(); throw new TeamServiceError(409, 'SCORING_CONFLICT', '运行评分已更新，请刷新后重试'); }
     const job = { ...current, run: { ...current.run, scoring: initialScoring }, scores: scoring.pending(), status: current.run.status === 'error' ? 'error' : 'scoring', settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, reply: null };
     runs.set(runId, job);
-    void runScoring(job, options).finally(() => { job.settled = true; prune(); });
+    void runScoring(job, options, release).finally(() => { job.settled = true; prune(); });
     return { runId, attemptId, reused: false };
   }
   async function questionScores(items) {
@@ -355,6 +481,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, observe, get, list, reply, rescore, questionScores, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, createMissionDailyRun, observe, get, list, reply, rescore, questionScores, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

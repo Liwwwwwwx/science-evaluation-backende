@@ -60,6 +60,12 @@ test('幂等键命中已有记录时只执行一次并返回原运行', async ()
       const row = keys.get(`${args[0]}:${args[1]}`);
       return { rows: row ? [row] : [] };
     }
+    if (sql.includes("SET status='running'") && sql.includes("status='queued'")) {
+      const row = rows.get(args[0]);
+      if (!row || row.status !== 'queued') return { rows: [], rowCount: 0 };
+      Object.assign(row, { status: 'running', run: args[1], scores: args[2] });
+      return { rows: [{ id: args[0] }], rowCount: 1 };
+    }
     if (sql.startsWith('UPDATE public.unified_evaluation_runs SET native_run_id=')) {
       const row = rows.get(args[0]);
       if (!row) return { rowCount: 0 };

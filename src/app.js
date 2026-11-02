@@ -1,12 +1,13 @@
 const http = require('node:http');
 const { handleRuns } = require('./runs/http');
+const { handleRules } = require('./scoring/rule-http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, evaluations, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), authService, questionBank, evaluations, rules, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -44,6 +45,16 @@ function createApp({ token, generator = createQuestionBankGenerationService(), a
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/evaluation/rules' || url.pathname.startsWith('/api/evaluation/rules/')) {
+      try {
+        if (!authService) return fail(res,503,'AUTH_UNAVAILABLE','登录服务尚未配置');
+        const user = await authService.authenticate(session(req));
+        return await handleRules({req,res,url,user,rules,writeEnabled:rulesWriteEnabled,publicOrigin,readBody,reply});
+      } catch (error) {
+        const status = error.code === '42P01' ? 503 : Number.isInteger(error.status) ? error.status : 500;
+        return fail(res,status,status === 500 ? 'RULES_FAILED' : error.code || 'REQUEST_FAILED',status === 500 ? '规则服务暂不可用，请稍后重试' : error.code === '42P01' ? '规则存储尚未迁移' : error.message);
+      }
+    }
     if (url.pathname.startsWith('/api/evaluation/unified/')) {
       try {
         if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');

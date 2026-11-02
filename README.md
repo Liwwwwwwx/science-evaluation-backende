@@ -1,6 +1,6 @@
 # Science 测评后端
 
-独立进程，提供登录、题库及受开关控制的单题测评接口。已接入文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）和新材料（1115）WebSocket；五服务独立评分已接入；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
+独立进程，提供登录、题库及受开关控制的单题测评接口。主服务 Mission_ScienceMaterial 和文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）、新材料（1115）五类下游服务已接入独立运行与评分；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
 
 ## 架构与当前状态
 
@@ -19,7 +19,7 @@
 
 需要 Node.js 22。通过部署环境提供至少 32 字节的 `EVALUATION_SERVICE_TOKEN`，以及模型的 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`）。默认监听 `127.0.0.1:7714`，可使用 `EVALUATION_HOST` 和 `PORT` 配置。不要把令牌或模型密钥提交到仓库。
 
-启动：`npm start`；隔离测试：`npm test`。本进程不会自动启动夜间任务、通知或运行数据库迁移。
+启动：`npm start`；隔离测试：`npm test`。Mission 每日计划默认关闭，需显式配置；本进程不自动发送通知或运行数据库迁移。
 
 `GET /health` 返回存活状态。`POST /api/admin/team-services/evaluations/question-bank/generate` 需服务端 Bearer 令牌，接收 `{ "serviceKey": "alloy", "topic": "合金性能", "count": 2 }`，返回 `{ "items": [{ "serviceKey": "alloy", "question": "..." }], "model": "..." }`，错误格式为 `{ "error": { "code": "...", "message": "..." } }`。该接口只返回候选，不写数据库。浏览器不得直接使用该令牌：管理端代理必须先验证用户身份及 `team-services:write` 权限。当前代理尚未切换。
 
@@ -66,13 +66,19 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 审核并手工执行 `migrations/003_evaluation_runs.sql` 可建立与管理端 041/042 兼容的运行记录及幂等键存储。仅允许 `science_admin`；现有运行表和记录保留，不自动执行生产迁移。启用共享库的写入或部署前另行确认。
 
-- `GET /api/evaluation/unified/services`：返回五类已接入服务及各自可用状态；只有对应适配器已配置、具备写权限且写入已启用时标为可用。
+- `GET /api/evaluation/unified/services`：返回主服务与五类下游服务及各自可用状态；只有对应适配器已配置、具备写权限且写入已启用时标为可用。
 - `POST /api/evaluation/unified/runs`：要求 `team-services:write`、同源 Origin 及 1–128 字符 `Idempotency-Key`。请求 `{serviceKey,question,questionId?,datasetVersion?,sourceType?}`；题库来源字段须完整，后端核验有效版本与原题，服务型旧题仍约束服务，领域题可选择被测服务。来源统一为人工运行。成功返回 `{runId,serviceKey,reused}`。
 - `GET /api/evaluation/unified/runs`：要求 `team-services:read`，支持 `origin/page/pageSize`；沿用管理平台授权用户共享查看运行记录的范围。
 - `GET /api/evaluation/unified/runs/:id`：回答及题目版本快照；服务重启后返回 `recoveryState=snapshot_only`，不自动重跑，也不更新其他进程的旧评分。
-- `GET /api/evaluation/unified/runs/:id/events`：SSE，先给 `snapshot`，再给 `text/run/score/done/error`。客户端断线不会取消执行，可重新订阅；无本进程执行状态时只返回快照并关闭连接。
+- `GET /api/evaluation/unified/runs/:id/events`：SSE，先给 `snapshot`，再给 `execution/text/state/run/score/done/error`。客户端断线不会取消执行，可重新订阅；无本进程执行状态时只返回快照并关闭连接。
+
+多个运行可同时提交。每个服务最多同时执行 5 个，当前进程合计最多 25 个；超出执行容量的运行先保存为 `queued`，按服务有序等待，其他服务仍可使用空闲容量。最多等待 300 个，队列满时拒绝新请求。开始执行后会发送 `execution` 事件；切换页面或断开 SSE 不会取消任务。并发额度仅对当前进程生效，多实例不共享上限；五个并发对每个真实服务的容量影响尚未验证。
+
+启用运行写入后，后端启动时及运行期间定期恢复已保存完整派发快照的人工排队任务和 Mission 每日计划排队任务。保存的题面、题目版本、案例配置及已有规则快照不因重启而重新读取；服务地址发生变化时不会自动派发。派发前通过数据库原子地将 `queued` 改为 `running`，只有抢占成功的进程才调用服务；两个已升级进程争抢同一记录不会重复派发。已标记为 `running` 的任务即使进程中断或数据库响应不确定，也不会自动重发，需核对原运行。旧版未保存完整快照的排队记录及其他自动化/旧入口任务不会自动恢复。上线时必须先停掉旧版进程，旧版没有原子抢占保护，不能与本实现混合调度。执行队列恢复不涵盖进程中断时正在等待的评分。
 
 测试：`EVALUATION_RUN_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX npm test` 启用独立运行 PostgreSQL 测试，该变量必须指向专用临时实例。与 `EVALUATION_TEST_PG_SOCKET`（题库）分别使用独立实例，避免并行测试写同一张表。迁移及测试均不得指向共享库。
+
+恢复专项：`EVALUATION_RECOVERY_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/queue-recovery-postgres.test.js`，必须使用新建的专用临时 PostgreSQL，不可连接共享数据库。
 
 ## 材料单题测评（1111 / 1112 / 1115）
 
@@ -102,19 +108,19 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 ## 独立评分（evaluation-v1）
 
-当前五服务运行结束后自动检查原始Markdown并分别调用DeepSeek、千问，不再依赖原服务评分接口。执行失败/没有输出的运行不生成完整模型评分；模型未配置、失败、超时不记零分，也不改变执行结果。读取历史不发起模型调用、不回写旧数据。
+当前主服务及五类下游服务运行结束后自动检查原始Markdown并分别调用DeepSeek、千问，不再依赖原服务评分接口。执行失败/没有输出的运行不生成完整模型评分；模型未配置、失败、超时不记零分，也不改变执行结果。读取历史不发起模型调用、不回写旧数据。
 
 - 模型配置仅来自后端环境：DeepSeek优先`EVALUATION_DEEPSEEK_API_KEY/BASE_URL/MODEL`，兼容`DEEPSEEK_API_KEY/BASE_URL/MODEL`，默认deepseek-chat。千问优先`EVALUATION_QWEN_API_KEY/BASE_URL/MODEL`，兼容`QWEN_API_KEY/BASE_URL/MODEL`以及旧`NPC_API_KEY/NPC_API_BASE`和`DASHSCOPE_API_KEY`；默认qwen3.7-flash与北京兼容入口。各地区密钥与模型可用性由部署配置决定，不自动读取旧管理端.env。客户端使用JSON Object、temperature=0；千问关闭thinking。参考[DeepSeek JSON模式](https://api-docs.deepseek.com/guides/json_mode/)、[千问结构化输出](https://www.alibabacloud.com/help/en/model-studio/qwen-structured-output)。
 - 只根据题面提取一份冻结要求清单（最多15项），DeepSeek不可用时可由千问提取；不把答案或另一模型评分放入清单生成。重评同题同规则版本复用清单。
-- 维度0–100：可读性40%、专业性40%、图文辅助20%。图文不适用由冻结清单确定，其余维度各50%；总分由程序计算，两模型不取平均。图表按帮助程度评分，未打开图片/附件内容需显式说明。
-- 各模型分别保存评语、亮点、不足、建议与逐要求证据。met/partial引用必须是答案或结构化材料的连续原文；不能核对时降为unclear。关键要求未满足时不能合格，截断时不认定完整合格。总分不等同科学正确率，未做独立外部核验。
+- 维度0–100：默认可读性40%、专业性40%、图文辅助20%。图文不适用由冻结清单确定，其余维度各50%；总分由程序计算，两模型不取平均。图表按帮助程度评分，未打开图片/附件内容需显式说明。
+- 各模型分别保存评语、亮点、不足、建议与逐要求证据。成果项met/partial引用必须是答案或结构化材料的连续原文；不能核对时降为unclear并触发一次修正。约束使用下述范围核验。关键要求未满足时不能合格，截断时不认定完整合格。总分不等同科学正确率，未做独立外部核验。
 - Markdown原文机检使用CommonMark/GFM/remark-math及KaTeX，保存行列、片段、错误/提示与建议。代码和货币不当公式；围栏开放为提示，非法KaTeX为错误；链接仅查格式/协议，不发出远程访问。最多检查120000字符、100项问题；不完整输入标partial/not_evaluable。前端容错不改变原文检查。
-- 单次评分输入最多60000字符正文与30000字符结构化材料（敏感字段和URL认证参数隐藏），截断显式保存；不自动抓附件或执行代码。每次模型请求90秒、JSON响应512KiB、最多6000输出token；结构不合法仅重试一次。全轮210秒，当前进程最多4轮评分并发，满载记失败供手动重评。执行并发容量与评分分开释放。
+- 单次评分输入最多60000字符正文与30000字符结构化材料（敏感字段和URL认证参数隐藏），截断显式保存；不自动抓附件或执行代码。每次模型请求90秒、JSON响应512KiB、最多6000输出token；JSON解析、结构或必要证据不合规共用一次修正额度，单评委最多两次；HTTP失败和超时不自动重发。全轮210秒，当前进程最多4轮评分并发；自动评分容量不足时等待，队列满才提示可稍后重评。手动重评容量不足时返回繁忙，未占用评分租约。执行并发容量与评分分开释放。
 - run.scoring保存版本、轮次ID、输入摘要、冻结清单和起止时间；run.markdownSyntax及scores保存原文机检和独立评分。全程沿用既有JSON列，无新增迁移。评分在初始状态、逐模型返回及结束时保存并通过run/score事件更新。
 
 ### 调用接口
 
-继续使用测评会话鉴权。所有读取要求`team-services:read`；写入要求`team-services:write`、同源Origin、非cross-site及`EVALUATION_RUN_WRITE_ENABLED=true`。自动化调用方须带已授权会话及配置的公开Origin；不新增免登录公开接口。
+继续使用测评会话鉴权。所有读取要求`team-services:read`；写入要求`team-services:write`、同源Origin、非cross-site及`EVALUATION_RUN_WRITE_ENABLED=true`。通过 HTTP 调用的外部自动化须带已授权会话及配置的公开 Origin；内部每日调度使用独立的服务端身份与幂等范围，不新增免登录公开接口。
 
 - `POST /api/evaluation/unified/runs`沿用原请求与幂等契约，创建执行后自动评分；GET详情或SSE获取结果。
 - `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：只对保存的完整执行结果重评，202返回`{runId,attemptId,reused}`，不调用被测服务。同轮进行中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
@@ -123,3 +129,54 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 - `GET /api/evaluation/unified/question-scores?items=<JSON>`，最多50个`{id,datasetVersion}`，返回同题同版本、各服务最近一次运行的`runId/serviceKey/scores`摘要。题库修改版本后不沿用旧分。
 
 测试：`node --test test/scoring.test.js`；`EVALUATION_SCORING_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/scoring-postgres.test.js`仅接受专用临时PostgreSQL。测试独立于其他三个数据库测试实例，不允许连接共享数据库。真实模型联调使用公开虚构样本，不发送历史业务答案。多人评分、榜单、周报发布和数学建模参考尚未实现。
+
+## 可维护评分规则与执行交付评价
+
+沿用 `evaluation-v1` 结果结构，以 `ruleSnapshot.id/version/hash` 独立记录规则版本。默认内容权重仍为40/40/20，新运行使用生效规则中的权重，图文不适用时其他维度按比例归一化。
+
+`migrations/004_evaluation_scoring_rules.sql` 新建规则、当前生效指针和操作记录三张表，只允许 `science_admin`，必须审核并在授权数据库手工执行。应用不自动建表或迁移。未迁移时只读返回内置规则，写入不可用；本轮仅在专用临时数据库验证，未修改共享库。
+
+设置 `EVALUATION_RULES_WRITE_ENABLED=true` 才能维护，默认关闭。读取使用测评会话和 `team-services:read`，维护还需 `team-services:write`、同源 Origin 和非 cross-site。所有维护POST均要求JSON及UUID格式的 `Idempotency-Key`，最大96KiB。
+
+| 接口 | 请求与行为 |
+| --- | --- |
+| GET `/api/evaluation/rules` | 返回 `{items,active,template,stateRevision,storageReady,canWrite,events,document}`，最近50版及生效版 |
+| POST `/api/evaluation/rules` | `{name,changeNote,config}` 创建草稿；同创建键同请求恢复原记录，冲突409 |
+| POST `/api/evaluation/rules/:id/save` | `{revision,name,changeNote,config}`，仅草稿可编辑，冲突409并保留客户端输入 |
+| POST `/api/evaluation/rules/:id/publish` | `{revision}`，需已保存变更说明；发布后固定 |
+| POST `/api/evaluation/rules/:id/activate` | `{revision,stateRevision}`，仅已发布版可生效，并发切换检查生效指针版本 |
+| POST `/api/evaluation/rules/:id/archive` | `{revision}`，生效版禁止归档，历史保留 |
+
+`config` 包含 `weights:{readability,professionalism,visualAids}`（整数合计100，前两项合计大于0）、`passScore`、`markdownGate`、`contentInstructions`、`completionInstructions`、`experienceInstructions` 及 `efficiencyRules:[{serviceKey,phaseKey,label,warningSeconds,criticalSeconds}]`。三项说明各最多6000字符；最多20项阶段阈值，提醒大于0、严重大于提醒且不超过86400秒。`serviceKey=*` 表示通用，同阶段具体服务配置优先。
+
+新运行在创建时即持久化完整 `run.ruleSnapshot`，之后规则切换不影响该运行。重新评分沿用原快照及同规则下的冻结要求；无快照的旧记录保留旧评分方式，不自动回填。规则读取失败时不会先发起远端执行，客户端不能从运行请求覆盖服务端规则。
+
+两家评委新增 `deliveryReview` 和 `experienceReview`，检查实际交付、无关实现细节、准备替代交付、缺乏依据的完成声明和重复准备。问题须引用保存原文；明确开发或排障任务允许相关技术说明，不能按关键词硬扣分。`quality.qualification` 合并内容合格线、关键要求及可选Markdown门槛；效率独立展示，不因耗时修改专业性。缺少证据或截断不能认定完整合格。
+
+文献和材料适配器按接收时刻记录明确 `phase_start/phase_end/stage_start/stage_end`，或带阶段标识及 `started/running/completed` 状态的事件，不从自然语言或上游自报秒数推断。最多200个事件及50条过程文字，每条1000字符。明确起止用于时长；开始加明确运行中事件只证明已持续时间；孤立开始、重叠开始或缺失事件无法评估，不能用总耗时替代阶段耗时。`run.scoring.efficiency` 保存结论和计时证据，模型输入补充总耗时及最多12000字符脱敏过程文字，缺少过程时明确仅覆盖回答。
+
+内置团队查询阈值为60秒提醒、180秒严重，仅用于明确的 `team-discovery` 阶段，须按真实样本校准。配置 `mission-material` 等名称不会注册服务或接入协议；Mission阶段以实际适配器上报为准，本任务未重评截图中的历史任务。
+
+专项：`node --test test/scoring-rules.test.js`；`EVALUATION_RULES_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/scoring-rules-postgres.test.js`。端口55481，只能指向新建专用临时实例，不与其他测试共用数据库。规则模块本身不发送外部通知。
+
+### 评委证据与约束核验（source-v2）
+
+评分JSON只输出一个对象，包含内容、要求、交付与体验全部字段。待评文字按原始顺序提供带来源的 `passages`，证据优先引用真实片段编号，如 `["answer:0","P1:0"]`，由程序取回逐字原文；同时兼容 `[{source:"answer"|"structured"|"P1",quote:"连续原文"}]` 并逐段核对指定来源；返回结果继续保留字符串 `evidence`，并附 `evidenceRefs`。旧格式的单个 `answer: '原文'` 等包装只有在内部引用仍逐字匹配时才可兼容；不补齐省略号、不拼接为伪原文、不接纳改写。成果证据不接受过程消息。
+
+新冻结清单区分 `kind=deliverable|constraint`，约束核验范围为 `scope=output|all`。约束通过可以使用 `verification={method:"scope_review"}`（核验范围由冻结清单唯一决定，返回结果补全该范围），表示检查完整的保存来源而未发现违规，不要求引用不存在的文字；输入截断或所需过程未记录时不能据此通过，违反约束仍须引用真实违规内容。非关键约束保留逐项判断，不否认已交付的成果；关键约束不满足仍阻止合格。旧冻结清单不重写，没有类型时按成果项处理。
+
+评委证据不合规保留 `evaluationIssues`，无法确认的要求/交付显示 `unclear`，不据此把完整答案算为内容缺失。JSON解析、结构或必要证据共用一次修正额度，返回 `attempts` 和 `repairStatus`；若修正仍失败但首轮已有可审阅评分，保留其不确定结果和复核提示，不编造零分。两轮都没有可用评分则显示模型失败。读取历史不触发重评或数据回填。
+
+回归：`node --test test/scoring.test.js test/scoring-rules.test.js test/scoring-regressions.test.js`。真实模型样本与输出只保存到本地临时文件，不连接共享数据库或触发真实Mission任务。
+
+## Mission_ScienceMaterial 主服务与每日测评
+
+通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、`idea` 和 `has_context=false`；正文流式保存，只有收到 `[end]` 且正常关闭才算协议完成。需求确认自动 `continue`，普通补充输入及新版 `display.followup_request` 追问按 XIMUALPHA 自动确认默认回复“无”并标记自动答复；新版审批请求不会自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复，不自动重发请求。进度只记录服务实际发出的消息和明确阶段事件，不推断调用了哪个下游团队或虚构阶段耗时。
+
+每日计划默认关闭；配置地址、启用运行写入、审核并手工执行 `migrations/005_mission_daily_plans.sql` 后，显式设置 `EVALUATION_MISSION_DAILY_ENABLED=true` 才启动。计划在北京时间每天 22:00 从已入库、启用、无专属旧规则且适用于主服务的固定题、随机题和 Mission 题中确定性选取最多 10 道；不足 10 道时如实展示。题面、版本、目标地址和已生效规则在派发前固定；切换地址后尚未创建的任务暂停等待核对。
+
+每天仅有一份持久化计划，每道题使用独立幂等键及运行记录；中断后继续创建原清单中尚未创建的运行，不重新发起已创建或已派发的运行。上一轮仍有排队、运行或评分时，本轮跳过；错过 22:00 后的 10 分钟触发窗口记为跳过，不自动堆积补跑。页面「运行记录」展示计划状态、每题执行状态和两模型评分，并链接运行详情。`GET /api/evaluation/unified/mission-daily` 需要现有会话及 `team-services:read`。计划状态不等于健康探活，评分结果不等于科学验证。
+
+启用或生产切流前须先核对并停用旧后台对应 Mission 夜检，避免两套调度器同时发送；生产数据库迁移、配置及启动须另获确认。未知状态的旧运行可能使后续计划持续跳过，需核对上游；本版不自动判定远程取消，也没有通知推送。五并发尚未在真实 Mission 服务验证。
+
+专项：`node --test test/mission-evaluator.test.js test/mission-daily.test.js`；`EVALUATION_MISSION_DAILY_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/mission-daily-postgres.test.js` 必须使用新建的专用临时 PostgreSQL。

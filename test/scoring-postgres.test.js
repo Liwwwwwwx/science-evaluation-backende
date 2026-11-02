@@ -1,5 +1,6 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const crypto=require('node:crypto');const {Pool}=require('pg');
 const {createUnifiedEvaluationService}=require('../src/runs/unified-evaluation.service');const {createUnifiedEvaluationRepository}=require('../src/runs/unified-evaluation.repository');const {createScoringService}=require('../src/scoring/service');
+const {CHECKS}=require('../src/scoring/delivery-review');
 const socket=process.env.EVALUATION_SCORING_TEST_PG_SOCKET||'';
 test('隔离PG：五服务评分/SSE、重启读取、重评幂等与并发租约、题库版本隔离', {skip:!socket},async t=>{
  assert.match(socket,/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);const pool=new Pool({host:socket,port:55481,database:'science_admin'});t.after(()=>pool.end());await pool.query(fs.readFileSync(path.join(__dirname,'../migrations/003_evaluation_runs.sql'),'utf8'));
@@ -7,6 +8,7 @@ test('隔离PG：五服务评分/SSE、重启读取、重评幂等与并发租�
  const rubric={requirements:[{requirement:'给出热导率单位',critical:true}],visualAidsApplicable:true,visualAidsReason:'要求表格'};
  const value={dimensions:Object.fromEntries(['readability','professionalism','visualAids'].map(k=>[k,{score:80,note:'单位可读',evidence:'W/(m·K)'}])),requirements:[{id:'R1',status:'met',evidence:'W/(m·K)',note:'给出了单位'}],comment:'单位清楚，仍可补充数据条件',highlights:['单位'],gaps:['条件'],suggestions:['补充条件']};
  const clients=Object.fromEntries(['deepSeekScore','qwenScore'].map(k=>[k,{model:k,isConfigured:()=>true,callJson:async prompt=>{await new Promise(r=>setTimeout(r,8));if(prompt.includes('仅根据题目')){extracts++;return rubric;}judges++;return value;}}]));
+ value.deliveryReview={status:'delivered',evidence:'热导率单位 W/(m·K)。',note:'提供实际回答'};value.experienceChecks=Object.keys(CHECKS).map(id=>({id,status:'passed',note:'未发现此问题'}));
  const scoring=createScoringService({clients});const evaluators=Object.fromEntries(['literature','literature-aircraft','alloy','synthesis','new-material'].map(key=>[key,{scoreMode:'none',startQuestionRun:async(_,{onText})=>{executions++;onText('热导率单位 W/(m·K)。');return {run:{id:crypto.randomUUID()},completion:Promise.resolve({status:'done'})};}}]));
  const make=()=>createUnifiedEvaluationService({evaluators,repository:repo,scoring});const service=make();
  const wait=async(id,svc=service)=>{for(let i=0;i<300;i++){const v=await svc.get(id);if(v.status==='done'&&v.run?.scoring?.finishedAt)return v;await new Promise(r=>setTimeout(r,5));}throw Error('score timeout');};

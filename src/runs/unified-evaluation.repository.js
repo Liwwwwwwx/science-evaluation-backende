@@ -28,18 +28,18 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
   return {
     async create(job) {
       await (await adminPool()).query(`INSERT INTO public.unified_evaluation_runs
-        (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt]);
+        (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at, run)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, job.run]);
     },
     async createIdempotent(job, scope, key, hash) {
       const current = await adminPool();
       const result = await current.query(`INSERT INTO public.unified_evaluation_runs
         (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at,
-         idempotency_scope, idempotency_key, idempotency_hash)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         idempotency_scope, idempotency_key, idempotency_hash, run)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
-      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, scope, key, hash]);
+      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, scope, key, hash, job.run]);
       if (result.rowCount === 1) return { created: true, runId: job.runId };
       const existing = await current.query('SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope, key]);
       if (!existing.rows[0]) throw new Error('无法读取幂等运行');
@@ -48,6 +48,24 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
     async findIdempotent(scope, key) {
       const result = await (await adminPool()).query('SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope, key]);
       return result.rows[0] ? { runId: result.rows[0].id, hash: result.rows[0].idempotency_hash } : null;
+    },
+    async listRecoverableQueued(serviceKeys, limit = 300, addresses = {}) {
+      const result = await (await adminPool()).query(`SELECT * FROM public.unified_evaluation_runs
+        WHERE status='queued' AND native_run_id IS NULL AND idempotency_key IS NOT NULL
+          AND ((origin='manual' AND idempotency_scope LIKE 'evaluation-user:%')
+            OR (origin='automation' AND idempotency_scope='evaluation-automation:mission-material'))
+          AND run->'queuePayload'->>'version' = '1'
+          AND service_key=ANY($1::text[])
+          AND run->>'serviceAddress' IS NOT DISTINCT FROM ($3::jsonb->>service_key)
+        ORDER BY started_at, id LIMIT $2`, [serviceKeys, limit, JSON.stringify(addresses)]);
+      return result.rows.map(row => ({ ...map(row), ownerScope: row.idempotency_scope }));
+    },
+    async claimQueued(job) {
+      const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
+        SET status='running', run=$2, scores=$3, updated_at=now()
+        WHERE id=$1 AND status='queued' AND native_run_id IS NULL RETURNING id`,
+      [job.runId, job.run, job.scores]);
+      return result.rowCount === 1;
     },
     async save(job) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2, status=$3, answer=$4,

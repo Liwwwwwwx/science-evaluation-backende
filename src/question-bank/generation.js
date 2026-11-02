@@ -28,7 +28,7 @@ function generalComposition(count, domainKey) {
 数据解读题必须在题面提供足够的假设数据或观察，明确标为假设，不依赖未提供的图表、论文或实验结果；其他题也应给出完成核心任务所需条件。只输出最终题目，不输出规划、题型标签或答案。`;
 }
 
-const SERVICES = new Set(['alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
+const SERVICES = new Set(['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
 const FOCUSES = Object.freeze({
   general: '综合出题：覆盖当前领域的常见研究问题，各题考察不同方向',
   principles: '基础原理：考察关键概念、作用机制和理论依据',

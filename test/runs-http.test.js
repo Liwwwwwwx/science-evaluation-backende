@@ -88,7 +88,7 @@ test('服务可用性按各自适配器、写开关和用户权限确定，1108�
     if (!token) throw Object.assign(Error('请登录'), { status: 401 });
     return { id: token, permissions: token === 'reader' ? ['team-services:read'] : ['team-services:read', 'team-services:write'] };
   } };
-  for (const keys of [[], ['literature'], ['literature-aircraft'], ['literature', 'literature-aircraft'], ['alloy'], ['synthesis'], ['new-material'], ['literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material']]) {
+  for (const keys of [[], ['mission-material'], ['literature'], ['literature-aircraft'], ['literature', 'literature-aircraft'], ['alloy'], ['synthesis'], ['new-material'], ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material']]) {
     const evaluator = { startQuestionRun: () => { throw Error('不能触发被测服务'); } };
     const evaluations = createUnifiedEvaluationService({ evaluators: Object.fromEntries(keys.map(key => [key, evaluator])) });
     for (const write of [false, true]) {
@@ -103,7 +103,7 @@ test('服务可用性按各自适配器、写开关和用户权限确定，1108�
         assert.deepEqual(items.filter(item => item.enabled).map(item => item.key), write && user === 'writer' ? keys : []);
         assert.ok(items.every(item => item.scoring === 'absent'));
       }
-      for (const key of ['literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'].filter(key => !keys.includes(key))) {
+      for (const key of ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'].filter(key => !keys.includes(key))) {
         const response = await fetch(url.replace('/services', '/runs'), { method: 'POST',
           headers: { cookie: 'evaluation_session=writer', origin: 'http://localhost', 'content-type': 'application/json', 'Idempotency-Key': 'unconfigured' },
           body: JSON.stringify({ serviceKey: key, question: '请检索航空热防护材料相关文献。' }) });

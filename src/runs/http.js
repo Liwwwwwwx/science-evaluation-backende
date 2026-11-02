@@ -10,6 +10,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const configured = evaluations?.availableServices() || [];
     const writable = runWriteEnabled && user.permissions.includes('team-services:write');
     return reply(res, 200, { items: [
+      { key: 'mission-material', label: 'Mission_ScienceMaterial' },
       { key: 'literature', label: '文献检索' },
       { key: 'literature-aircraft', label: '航空文献' },
       { key: 'alloy', label: '合金材料' },
@@ -18,6 +19,10 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     ].map(item => ({ ...item, enabled: writable && configured.includes(item.key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent' })) });
   }
   if (!evaluations) throw new TeamServiceError(503, 'EVALUATION_UNAVAILABLE', '独立运行尚未配置');
+  if (url.pathname === `${base}/mission-daily` && req.method === 'GET') {
+    if (!evaluations.missionDailyStatus) throw new TeamServiceError(503, 'MISSION_DAILY_UNAVAILABLE', '每日测评状态尚未配置');
+    return reply(res, 200, await evaluations.missionDailyStatus());
+  }
   if (url.pathname === `${base}/question-scores` && req.method === 'GET') {
     let items; try { items = JSON.parse(url.searchParams.get('items') || '[]'); } catch { invalid('题目版本参数无效'); }
     return reply(res, 200, await evaluations.questionScores(items));

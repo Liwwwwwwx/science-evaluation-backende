@@ -1,4 +1,5 @@
 // 独立评分配置；不加载管理端环境或向浏览器暴露凭据。
+function invalidOutput() { return Object.assign(new Error('模型评分输出不是完整的JSON对象'), { code: 'INVALID_MODEL_OUTPUT' }); }
 function createJudgeClient({ apiKey = '', baseUrl, model, fetch: request = global.fetch, timeoutMs = 90000, qwen = false } = {}) {
   return { model,
     isConfigured: () => Boolean(apiKey && model && baseUrl && request),
@@ -14,9 +15,15 @@ function createJudgeClient({ apiKey = '', baseUrl, model, fetch: request = globa
       const reader = response.body.getReader(); const chunks = []; let length = 0;
       try { while (true) { const { done, value } = await reader.read(); if (done) break; length += value.length; if (length > 512 * 1024) throw new Error('模型响应超限'); chunks.push(Buffer.from(value)); } }
       finally { await reader.cancel().catch(() => {}); }
-      const data = JSON.parse(Buffer.concat(chunks).toString('utf8')); const choice = data.choices?.[0];
-      if (choice?.finish_reason !== 'stop' || typeof choice.message?.content !== 'string' || !choice.message.content.trim()) throw new Error('模型未返回完整评分');
-      return JSON.parse(choice.message.content);
+      let data;
+      try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw invalidOutput(); }
+      const choice = data?.choices?.[0];
+      if (choice?.finish_reason !== 'stop' || typeof choice.message?.content !== 'string' || !choice.message.content.trim()) throw invalidOutput();
+      try {
+        const value = JSON.parse(choice.message.content);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidOutput();
+        return value;
+      } catch { throw invalidOutput(); }
     },
   };
 }

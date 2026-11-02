@@ -1,6 +1,7 @@
 const { randomUUID } = require('node:crypto');
 const { publicServiceAddress } = require('./service-address');
 const { createAutomaticReview } = require('./automatic-review');
+const { createProcessRecorder } = require('../scoring/process-review');
 
 // 1106/1108 协议来源：旧管理端 material-service-cases.service.js 的文献运行器。
 // 只运行问答，不调用旧管理端的归档、评分、MinIO 或夜检。
@@ -16,6 +17,7 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
     async startQuestionRun({ question }, { onText, onState = () => {} }) {
       const id = `evaluation-${serviceKey}-${randomUUID()}`;
       const started = Date.now();
+      const process = createProcessRecorder(started);
       const review = [];
       const completion = new Promise(resolve => {
         let socket; let text = ''; let settled = false; let endTimer;
@@ -23,7 +25,7 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
           if (settled) return; settled = true;
           clearTimeout(timer); clearTimeout(endTimer);
           try { socket?.close(); } catch {}
-          resolve({ status: error ? 'error' : 'done', error: error || null, taskid: id, elapsedMs: Date.now() - started, ...(review.length ? { details: { review, pendingReview: null } } : {}) });
+          resolve({ status: error ? 'error' : 'done', error: error || null, taskid: id, elapsedMs: Date.now() - started, details: { process: process.data, review, pendingReview: null } });
         };
         const timer = setTimeout(() => finish(`${label}执行超时`), timeoutMs);
         const automaticReview = createAutomaticReview({ taskid: id, review, send: frame => socket.send(JSON.stringify(frame)), onRecord: () => onState({ review: structuredClone(review), pendingReview: null }), onError: finish });
@@ -39,6 +41,7 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
             const delta = event.data;
             let frame; try { frame = JSON.parse(delta); } catch {}
             if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
+              process.record(frame);
               if (['error', 'requirement_review_error'].includes(frame.type)) finish(frame.type === 'requirement_review_error' ? '服务拒绝自动继续，请查看本次确认记录' : `${label}返回执行错误`);
               if (frame.type === 'requirement_review_request') automaticReview(frame);
               if (frame.type === 'user_input_request') finish('该服务要求另一种交互协议，当前单题运行尚不支持');
