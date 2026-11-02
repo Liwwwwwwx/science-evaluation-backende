@@ -204,3 +204,28 @@ test('超出接收上限仍明确失败并记录大小，不将不完整输出�
   assert.equal(result.details.transport.rejectedFrameBytes, bytes);
   assert.equal(result.details.transport.maxFrameBytes, 8 * 1024 * 1024);
 });
+
+test('最终总结超过归档预算仍必须收到同一总结的结束帧', async () => {
+  for (const ending of ['missing', 'other', 'matching']) {
+    const { evaluator, sockets } = fixture();
+    const started = await evaluator.startQuestionRun({ question: '检查归档超限后的总结完成条件' }, { onText() {} });
+    await flush();
+    sockets[0].message({ type: 'display.final_answer', event_id: 'large', phase: 'delta', delta: 'x'.repeat(2 * 1024 * 1024) });
+    if (ending !== 'missing') sockets[0].message({ type: 'display.final_answer', event_id: ending === 'matching' ? 'large' : 'other', phase: 'end', content: '总结结束' });
+    sockets[0].emit('close', { code: 1000 });
+    const result = await started.completion;
+    assert.equal(result.details.truncated, true);
+    assert.equal(result.status, ending === 'matching' ? 'done' : 'error');
+    if (ending !== 'matching') assert.match(result.error, /未收到结束帧/);
+  }
+});
+
+test('已结束总结的迟到增量不能重新打开生命周期', async () => {
+  const { evaluator, sockets } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '检查总结迟到增量的完成状态' }, { onText() {} });
+  await flush();
+  sockets[0].message({ type: 'display.final_answer', event_id: 'f', phase: 'end', seq: 2, content: '完整总结' });
+  sockets[0].message({ type: 'display.final_answer', event_id: 'f', phase: 'delta', seq: 1, delta: '旧草稿' });
+  sockets[0].emit('close', { code: 1000 });
+  assert.equal((await started.completion).status, 'done');
+});
