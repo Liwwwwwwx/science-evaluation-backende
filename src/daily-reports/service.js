@@ -34,9 +34,9 @@ function createDailyReportService({repository,clients=createScoringClients(),pre
     if(running.has(day))return {accepted:false,reason:'generating'};
     const work=(async()=>{
       const source=await repository.source(day);
-      if(!source.runs.length&&!source.plan)return {accepted:false,reason:'empty'};
+      if(!source.runs.length&&!source.plan&&!source.trialPlan)return {accepted:false,reason:'empty'};
       const snapshot=snapshotOf(day,source,now());
-      if(!snapshot.deadlineReached&&(snapshot.inProgress||now().getTime()-snapshot.lastSourceUpdate<quietMs))return {accepted:false,reason:'waiting'};
+      if((source.trialPlan&&snapshot.inProgress)||(!snapshot.deadlineReached&&(snapshot.inProgress||now().getTime()-snapshot.lastSourceUpdate<quietMs)))return {accepted:false,reason:'waiting'};
       const token=randomUUID();
       if(!await repository.claim(day,snapshot,token,force)){if(automatic){const current=await repository.get(day);if(current)await notify(current);}return {accepted:false,reason:'unchanged'};}
       let result;
@@ -56,9 +56,9 @@ function createDailyReportService({repository,clients=createScoringClients(),pre
     // Verify storage before accepting a request; reading never starts model work.
     await repository.get(day);
     const source=await repository.source(day);
-    if(!source.runs.length&&!source.plan)invalid(404,'REPORT_NO_DATA','该日期没有已保存的自动测评记录');
+    if(!source.runs.length&&!source.plan&&!source.trialPlan)invalid(404,'REPORT_NO_DATA','该日期没有已保存的自动测评记录');
     const snapshot=snapshotOf(day,source,now());
-    if(!snapshot.deadlineReached&&(snapshot.inProgress||now().getTime()-snapshot.lastSourceUpdate<quietMs))invalid(409,'REPORT_WAITING','本轮任务或评分尚未结束，请稍后生成');
+    if((source.trialPlan&&snapshot.inProgress)||(!snapshot.deadlineReached&&(snapshot.inProgress||now().getTime()-snapshot.lastSourceUpdate<quietMs)))invalid(409,'REPORT_WAITING','本轮任务或评分尚未结束，请稍后生成');
     void generate(day,{force:true}).catch(onError);
     return {state:'generating'};
   }

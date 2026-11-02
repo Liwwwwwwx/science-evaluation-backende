@@ -20,6 +20,11 @@ const { createMissionDailyReportService } = require('./notifications/mission-dai
 const { createQuestionBankService } = require('./question-bank/service');
 const { createDailyReportRepository } = require('./daily-reports/repository');
 const { createDailyReportService } = require('./daily-reports/service');
+const { validDate } = require('./daily-reports/summary');
+const { createQuestionBankGenerationService } = require('./question-bank/generation');
+const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
+const { createTrialBatchService, TARGETS } = require('./runs/trial-batch.service');
+const { createTrialBatchScheduler } = require('./runs/trial-batch.scheduler');
 const { httpSettings } = require('./runtime-config');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
@@ -34,6 +39,7 @@ let missionDaily;
 let missionDailyReport;
 let dailyReports;
 let rules;
+let trialScheduler;
 if (databaseUrl) {
   ({ publicOrigin, secureCookies } = httpSettings());
   const pool = new Pool({ connectionString: databaseUrl });
@@ -48,16 +54,26 @@ if (databaseUrl) {
   for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {
     if (process.env[name]) evaluators[serviceKey] = createMaterialEvaluator({ serviceKey, url: process.env[name] });
   }
+  const trialDate = process.env.EVALUATION_TRIAL_DATE || '';
+  if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
+  const serviceAddresses = Object.fromEntries(Object.keys(TARGETS).map(key => [key, evaluators[key]?.serviceAddress || null]));
+  if (trialDate && (process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true' || Object.values(serviceAddresses).some(value => !value))) throw new Error('试运行需要启用运行写入和全部六个服务');
   const scoring = createScoringService({ rules });
-  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository) });
+  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate ? 26 : 25, serviceLimits: trialDate ? { 'literature-aircraft': 1 } : {} });
   const plans = createMissionDailyRepository({ pgPool: pool });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
     serviceAddress: evaluators['mission-material']?.serviceAddress || null,
-    enabled: process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'],
+    enabled: process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'], skipDate: day => day === trialDate,
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
+  if (trialDate) {
+    const repository = createTrialBatchRepository({ pgPool: pool });
+    const service = createTrialBatchService({ repository, evaluations, scoring, serviceAddresses, generator: createQuestionBankGenerationService() });
+    trialScheduler = createTrialBatchScheduler({ date: trialDate, service, repository, missionRepository: plans,
+      onError: () => console.error('单日试运行尚未准备或派发完成，请检查试运行计划') });
+  }
   const notifier = createFeishuTestNotifier();
   const dailyReportEnabled = process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
-  dailyReports = createDailyReportService({ repository:createDailyReportRepository(pool), preferred:process.env.EVALUATION_DAILY_REPORT_MODEL || 'deepseek',
+  dailyReports = createDailyReportService({ repository:createDailyReportRepository(pool, { trialEnabled: 'auto' }), preferred:process.env.EVALUATION_DAILY_REPORT_MODEL || 'deepseek',
     enabled:dailyReportEnabled && process.env.EVALUATION_RUN_WRITE_ENABLED === 'true',
     notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier,publicOrigin,
     onError:()=>console.error('每日测评报告暂不可用，请查看报告状态') });
@@ -80,6 +96,7 @@ createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBa
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();
+  trialScheduler?.start();
   missionDailyReport?.start();
   dailyReports?.start();
 });

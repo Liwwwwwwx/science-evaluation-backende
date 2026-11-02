@@ -34,17 +34,20 @@ function metrics(runs) {
 }
 function snapshotOf(day, source, now = new Date()) {
   const runs=source.runs;
+  const trialItems=source.trialPlan?.items && typeof source.trialPlan.items==='object' ? source.trialPlan.items : {};
   const services=[...new Set([...Object.keys(SERVICES),...runs.map(run=>run.serviceKey)])].map(serviceKey=>{
     const rows=runs.filter(run=>run.serviceKey===serviceKey);
-    return { serviceKey,label:SERVICES[serviceKey]||serviceKey,expected:serviceKey==='mission-material' && source.plan ? source.plan.items.length:null,...metrics(rows) };
+    return { serviceKey,label:SERVICES[serviceKey]||serviceKey,expected:Array.isArray(trialItems[serviceKey]) ? trialItems[serviceKey].length : serviceKey==='mission-material' && source.plan ? source.plan.items.length:null,...metrics(rows) };
   }).filter(item=>item.total || item.expected !== null);
   const domains=[...new Set(runs.map(run=>run.domainKey||'unclassified'))].map(key=>({key,label:DOMAINS[key]||'未分类',...metrics(runs.filter(run=>(run.domainKey||'unclassified')===key))}));
-  const latest=Math.max(0,...runs.map(run=>Date.parse(run.updatedAt)||0),Date.parse(source.plan?.updatedAt)||0);
+  const latest=Math.max(0,...runs.map(run=>Date.parse(run.updatedAt)||0),Date.parse(source.plan?.updatedAt)||0,Date.parse(source.trialPlan?.updatedAt)||0);
   const missionIds=new Set(runs.filter(run=>run.batchId===source.plan?.id).map(run=>`${run.questionId}\0${run.datasetVersion}`));
-  const missing=source.plan?.state==='submitted' ? source.plan.items.filter(item=>!missionIds.has(`${item.questionId}\0${item.datasetVersion}`)).length:0;
-  const inProgress=runs.some(pending) || source.plan?.state==='dispatching' || missing>0;
-  const sourceHash=createHash('sha256').update(JSON.stringify({day,plan:source.plan,runs})).digest('hex');
-  return { date:day,sourceHash,generatedAt:now.toISOString(),...metrics(runs),services,domains,missingPlanned:missing,planState:source.plan?.state||null,planReason:source.plan?.reason||null,inProgress,deadlineReached:now>=deadline(day),lastSourceUpdate:latest,coverage:'已持久化自动测评；未入库的脚本运行不在统计范围内。' };
+  const missionMissing=source.plan?.state==='submitted' ? source.plan.items.filter(item=>!missionIds.has(`${item.questionId}\0${item.datasetVersion}`)).length:0;
+  const trialMissing=source.trialPlan?.state==='submitted' ? Object.entries(trialItems).reduce((sum,[key,items])=>sum+Math.max(0,items.length-runs.filter(run=>run.batchId===source.trialPlan.id&&run.serviceKey===key).length),0):0;
+  const missing=missionMissing+trialMissing;
+  const inProgress=runs.some(pending) || source.plan?.state==='dispatching' || ['generating','dispatching'].includes(source.trialPlan?.state) || missing>0;
+  const sourceHash=createHash('sha256').update(JSON.stringify({day,plan:source.plan,trialPlan:source.trialPlan,runs})).digest('hex');
+  return { date:day,sourceHash,generatedAt:now.toISOString(),...metrics(runs),services,domains,missingPlanned:missing,planState:source.trialPlan?.state||source.plan?.state||null,planReason:source.trialPlan?.error||source.plan?.reason||null,inProgress,deadlineReached:now>=deadline(day),lastSourceUpdate:latest,coverage:'已持久化自动测评；未入库的脚本运行不在统计范围内。' };
 }
 function analysisCases(runs, budget=55000) {
   const selected=[];

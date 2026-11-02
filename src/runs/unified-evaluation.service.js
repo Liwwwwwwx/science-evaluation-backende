@@ -38,10 +38,10 @@ function recoverScoringSnapshot(value) {
   return { ...value, scores, status: value.run.status === 'error' ? 'error' : 'done', run: { ...value.run, scoring: { ...attempt, expired: true } } };
 }
 
-function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED } = {}) {
+function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED, serviceLimits = {} } = {}) {
   const runs = new Map();
   const adapters = createUnifiedEvaluationAdapters(evaluators);
-  const concurrency = createConcurrency({ maxActive, maxPerKey: maxPerService, maxQueued });
+  const concurrency = createConcurrency({ maxActive, maxPerKey: maxPerService, maxQueued, limitsByKey: serviceLimits });
   const scoreConcurrency = createConcurrency({ maxActive: 4, maxPerKey: 4, maxQueued });
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -282,6 +282,13 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
     return start(safe, { idempotency: { scope: 'evaluation-automation:mission-material', key, hash }, caseDef: null, scoreMode: evaluators?.['mission-material']?.scoreMode, ruleSnapshot });
   }
+  async function createBatchRun(input, { key, ruleSnapshot } = {}) {
+    if (!input || typeof input.batchId !== 'string' || !input.batchId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '批次测评任务参数无效');
+    const safe = { serviceKey: input.serviceKey, question: input.question, origin: 'automation', questionId: input.questionId || null,
+      datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null, batchId: input.batchId };
+    const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
+    return start(safe, { idempotency: { scope: 'evaluation-automation:batch', key, hash }, caseDef: null, scoreMode: evaluators?.[safe.serviceKey]?.scoreMode, ruleSnapshot });
+  }
   let recoveryTimer = null;
   let recoveryRunning = false;
   async function recoverQueued() {
@@ -487,6 +494,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, createMissionDailyRun, observe, get, list, reply, rescore, questionScores, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, createMissionDailyRun, createBatchRun, observe, get, list, reply, rescore, questionScores, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

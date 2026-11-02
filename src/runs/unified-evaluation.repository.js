@@ -53,7 +53,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const result = await (await adminPool()).query(`SELECT * FROM public.unified_evaluation_runs
         WHERE status='queued' AND native_run_id IS NULL AND idempotency_key IS NOT NULL
           AND ((origin='manual' AND idempotency_scope LIKE 'evaluation-user:%')
-            OR (origin='automation' AND idempotency_scope='evaluation-automation:mission-material'))
+            OR (origin='automation' AND idempotency_scope IN ('evaluation-automation:mission-material','evaluation-automation:batch')))
           AND run->'queuePayload'->>'version' = '1'
           AND service_key=ANY($1::text[])
           AND run->>'serviceAddress' IS NOT DISTINCT FROM ($3::jsonb->>service_key)

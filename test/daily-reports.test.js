@@ -33,6 +33,16 @@ test('等待执行、评分及安静窗口；GET不触发生成；模型不可�
   source.runs[0]=score(80);await service.list(1);assert.equal(await repo.get(),null);
   await service.generate('2026-11-02');const report=await repo.get();assert.equal(report.analysisState,'unavailable');assert.match(report.markdown,/暂无|未配置/);assert.equal(calls,0);
 });
+test('试运行超过原截止时间仍等待全部计划完成，再发送汇总',async()=>{
+  const source={plan:null,trialPlan:{id:'trial',state:'submitted',items:{alloy:['题一','题二']},updatedAt:'2026-11-02T14:00:00Z'},runs:[{...score(80),serviceKey:'alloy',batchId:'trial'}]};
+  const repo=memoryRepo(source);let notifications=0;
+  const service=createDailyReportService({repository:repo,clients:{},notifyEnabled:true,notifier:{configured:true,async sendText(){notifications++;return{sent:true};}},now:()=>new Date('2026-11-03T07:00:00+08:00')});
+  assert.equal((await service.generate('2026-11-02',{automatic:true})).reason,'waiting');
+  assert.equal(notifications,0);
+  source.runs.push({...score(90),serviceKey:'alloy',batchId:'trial'});
+  assert.equal((await service.generate('2026-11-02',{automatic:true})).accepted,true);
+  assert.equal(notifications,1);
+});
 test('优先千问、失败回退DeepSeek；多实例抢占一次且通知未知不重发，迟到结果更新',async()=>{
   const source={plan:null,runs:[score(80)]};let modelCalls=0,notifications=0;
   const repo=memoryRepo(source);const clients={qwenScore:{model:'qwen',isConfigured:()=>true,callJson:async()=>{throw Error('failed');}},deepSeekScore:{model:'deepseek',isConfigured:()=>true,callJson:async prompt=>{modelCalls++;assert.doesNotMatch(prompt,/secret-value/);return {overview:'交付基本完成',issues:[],highlights:[{text:'表述清楚',runIds:[source.runs[0].runId]}],recommendations:[]};}}};
