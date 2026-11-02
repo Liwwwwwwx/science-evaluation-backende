@@ -111,7 +111,7 @@ test('五个任务各自独立标识与连接，输出不会串到其他任务',
 test('异常关闭和超时不会冒充完成，保留已有回答', async () => {
   const { evaluator, sockets } = fixture(); const chunks = [];
   const started = await evaluator.startQuestionRun({ question: '请测试异常关闭行为' }, { onText: text => chunks.push(text) });
-  await flush(); sockets[0].message('[start]部分输出[end]'); sockets[0].emit('close', { code: 1001 });
+  await flush(); sockets[0].message('[start]部分输出[end]'); sockets[0].emit('close', { code: 1006 });
   const result = await started.completion;
   assert.equal(result.status, 'error'); assert.equal(chunks.join(''), '[start]部分输出[end]');
   const timeout = createMissionEvaluator({ url: 'ws://127.0.0.1/start', timeoutMs: 15, createSocket: () => new Socket() });

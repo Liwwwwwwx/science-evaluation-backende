@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 const { publicServiceAddress } = require('./service-address');
 const { createAutomaticReview } = require('./automatic-review');
 const { createProcessRecorder } = require('../scoring/process-review');
+const { createConversationEvents } = require('./conversation-events');
 
 // 1106/1108 协议来源：旧管理端 material-service-cases.service.js 的文献运行器。
 // 只运行问答，不调用旧管理端的归档、评分、MinIO 或夜检。
@@ -19,16 +20,19 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
       const started = Date.now();
       const process = createProcessRecorder(started);
       const review = [];
+      const httpUrl = new URL(target); httpUrl.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
+      const conversation = createConversationEvents({ baseUrl: httpUrl.origin });
       const completion = new Promise(resolve => {
-        let socket; let text = ''; let settled = false; let endTimer;
+        let socket; let text = ''; let settled = false; let endTimer; let emitTimer; let summaryActive = false;
+        const emit = () => { clearTimeout(emitTimer); emitTimer = null; onState({ process: structuredClone(process.data), review: structuredClone(review), pendingReview: null, ...structuredClone(conversation.data) }); };
         const finish = error => {
           if (settled) return; settled = true;
-          clearTimeout(timer); clearTimeout(endTimer);
+          clearTimeout(timer); clearTimeout(endTimer); clearTimeout(emitTimer); emit();
           try { socket?.close(); } catch {}
-          resolve({ status: error ? 'error' : 'done', error: error || null, taskid: id, elapsedMs: Date.now() - started, details: { process: process.data, review, pendingReview: null } });
+          resolve({ status: error ? 'error' : 'done', error: error || null, taskid: id, elapsedMs: Date.now() - started, details: { process: process.data, review, pendingReview: null, ...structuredClone(conversation.data) } });
         };
         const timer = setTimeout(() => finish(`${label}执行超时`), timeoutMs);
-        const automaticReview = createAutomaticReview({ taskid: id, review, send: frame => socket.send(JSON.stringify(frame)), onRecord: () => onState({ review: structuredClone(review), pendingReview: null }), onError: finish });
+        const automaticReview = createAutomaticReview({ taskid: id, review, send: frame => socket.send(JSON.stringify(frame)), onRecord: emit, onError: finish });
         try {
           socket = createSocket(target.href);
           socket.addEventListener('open', () => {
@@ -41,12 +45,16 @@ function createLiteratureEvaluator({ url, serviceKey = 'literature', timeoutMs, 
             const delta = event.data;
             let frame; try { frame = JSON.parse(delta); } catch {}
             if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
+              if (frame.type === 'timeline.event' && frame.event && typeof frame.event === 'object') frame = frame.event;
               process.record(frame);
+              if (frame.type === 'display.final_answer') summaryActive = ['start', 'delta'].includes(frame.phase);
+              if (conversation.record(frame, text.length)) { if (frame.phase === 'delta') { if (!emitTimer) emitTimer = setTimeout(emit, 32); } else emit(); }
               if (['error', 'requirement_review_error'].includes(frame.type)) finish(frame.type === 'requirement_review_error' ? '服务拒绝自动继续，请查看本次确认记录' : `${label}返回执行错误`);
               if (frame.type === 'requirement_review_request') automaticReview(frame);
               if (frame.type === 'user_input_request') finish('该服务要求另一种交互协议，当前单题运行尚不支持');
               return;
             }
+            if (summaryActive) return;
             if (text.length + delta.length > 1024 * 1024) { finish(`${label}回答超过保存上限`); return; }
             text += delta;
             onText(delta);

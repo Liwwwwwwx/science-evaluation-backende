@@ -10,7 +10,7 @@ function map(row) {
 function createRuleRepository(pool) {
   let checked;
   async function db() {
-    if (!checked) checked = pool.query('SELECT current_database() AS name').then(r => { if (r.rows[0]?.name !== 'science_admin') throw new Error('规则仅允许使用science_admin数据库'); return pool; }).catch(e => { checked = null; throw e; });
+    if (!checked) checked = pool.query('SELECT current_database() AS name').then(r => { if (!['science_admin', 'science_evaluation'].includes(r.rows[0]?.name)) throw new Error('规则仅允许使用 science_admin 或 science_evaluation 数据库'); return pool; }).catch(e => { checked = null; throw e; });
     return checked;
   }
   async function transaction(fn) {

@@ -144,7 +144,7 @@ function createEvalQuestionBankRepository({ pool } = {}) {
   let checked;
   async function ensureDatabase() {
     if (!checked) checked = pool.query('SELECT current_database() AS name').then((r) => {
-      if (r.rows[0]?.name !== 'science_admin') throw new Error('题库只能使用 science_admin 数据库');
+      if (!['science_admin', 'science_evaluation'].includes(r.rows[0]?.name)) throw new Error('题库只能使用 science_admin 或 science_evaluation 数据库');
     }).catch((e) => { checked = null; throw e; });
     return checked;
   }

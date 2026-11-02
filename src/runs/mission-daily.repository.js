@@ -3,7 +3,7 @@ function createMissionDailyRepository({ pgPool } = {}) {
   let verified;
   async function database() {
     if (!verified) verified = pgPool.query('SELECT current_database() AS name').then(result => {
-      if (result.rows[0]?.name !== 'science_admin') throw new Error('每日测评只能使用 science_admin 数据库');
+      if (!['science_admin', 'science_evaluation'].includes(result.rows[0]?.name)) throw new Error('每日测评只能使用 science_admin 或 science_evaluation 数据库');
       return pgPool;
     }).catch(error => { verified = null; throw error; });
     return verified;

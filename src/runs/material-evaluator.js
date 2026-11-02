@@ -3,6 +3,7 @@ const { TeamServiceError } = require('../errors');
 const { publicServiceAddress } = require('./service-address');
 const { createAutomaticReview } = require('./automatic-review');
 const { createProcessRecorder } = require('../scoring/process-review');
+const { createConversationEvents } = require('./conversation-events');
 
 // 协议来源：旧管理端 material-service-cases / material-case-evidence；不调用归档或评分。
 const MATERIAL_SERVICES = {
@@ -53,9 +54,10 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
     async startQuestionRun({ question }, { onText, onState = () => {} }) {
       const id = `evaluation-${serviceKey}-${randomUUID()}`; const startedAt = Date.now();
       const process = createProcessRecorder(startedAt);
-      const details = { process: process.data, progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
-      let socket; let settled = false; let ending = false; let text = ''; let endTimer; let pendingRaw = null; let stateBytes = 0;
-      const emit = () => onState(structuredClone(details));
+      const conversation = createConversationEvents({ baseUrl: httpUrl.origin });
+      const details = { displayEvents: conversation.data.displayEvents, process: process.data, progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
+      let socket; let settled = false; let ending = false; let text = ''; let endTimer; let pendingRaw = null; let stateBytes = 0; let displayTimer; let summaryActive = false;
+      const emit = () => { clearTimeout(displayTimer); displayTimer = null; details.truncated ||= conversation.data.truncated; onState(structuredClone(details)); };
       const accept = value => {
         const size = Buffer.byteLength(JSON.stringify(value));
         if (stateBytes + size > MAX_STATE_BYTES) { details.truncated = true; return false; }
@@ -65,7 +67,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
       const completion = new Promise(resolve => { resolveCompletion = resolve; });
       const finish = async error => {
         if (settled || ending) return; ending = true;
-        clearTimeout(timer); clearTimeout(endTimer); pendingRaw = null; details.pendingReview = null;
+        clearTimeout(timer); clearTimeout(endTimer); clearTimeout(displayTimer); emit(); pendingRaw = null; details.pendingReview = null;
         try { socket?.close(); } catch {}
         let completionError = error;
         try {
@@ -89,7 +91,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
             const assetUrl = new URL(httpUrl); assetUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}/assets/${encodedName}`); assetUrl.search = '';
             return [{ name: asset.name || name, url: assetUrl.href }];
           }) : [];
-          details.artifacts = collectArtifacts({ result: details.result, snapshot: details.snapshot, frames: details.protocolFrames, files: details.generatedFiles, textAssets, declaredAssets }, httpUrl);
+          details.artifacts = collectArtifacts({ result: details.result, snapshot: details.snapshot, frames: details.protocolFrames, files: details.generatedFiles, displayArtifacts: conversation.data.artifacts, textAssets, declaredAssets }, httpUrl);
         } catch {
           // 服务返回的数据不能让异步收尾拒绝或悬挂，必须保留已有输出并结束当前运行。
           completionError ||= '服务成果整理失败，已保留回答及结构化结果';
@@ -139,6 +141,13 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
           if (Buffer.byteLength(event.data) > MAX_STATE_BYTES) { void finish('服务数据帧超过保存上限'); return; }
           let frame; try { frame = JSON.parse(event.data); } catch {}
           if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
+            if (frame.type === 'timeline.event' && frame.event && typeof frame.event === 'object') frame = frame.event;
+            if (frame.ignore === true || ['heartbeat.ping', 'heartbeat', 'ping', 'pong'].includes(frame.type)) return;
+            if (typeof frame.type === 'string' && frame.type.startsWith('display.')) {
+              if (frame.type === 'display.final_answer') summaryActive = ['start', 'delta'].includes(frame.phase);
+              if (conversation.record(frame, text.length)) { details.artifacts = [...conversation.data.artifacts]; if (frame.phase === 'delta') { if (!displayTimer) displayTimer = setTimeout(emit, 32); } else emit(); }
+              return;
+            }
             if (!frame.taskid || frame.taskid === id) process.record(frame);
             if (['error', 'requirement_review_error'].includes(frame.type)) { void finish(frame.type === 'requirement_review_error' && autoContinueReview ? '服务拒绝自动继续，请查看本次确认记录' : `${config.label}返回执行错误`); return; }
             if (frame.type === 'user_input_request') { void finish('该服务返回了尚不支持的交互协议'); return; }
@@ -160,9 +169,10 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
             else if (!frame.type && serviceKey === 'synthesis' && accept(frame)) {
               if (details.protocolFrames.length < 100) details.protocolFrames.push(frame); else details.truncated = true;
               if (frame.stage_id) { details.progress.push({ stage: frame.stage_id, text: frame.title || frame.name || frame.stage_id }); if (details.progress.length > 50) details.progress.shift(); }
-            } else return;
+            } else { if (!accept(frame)) return; if (details.protocolFrames.length < 100) details.protocolFrames.push(frame); else details.truncated = true; }
             emit(); return;
           }
+          if (summaryActive) return;
           if (text.length + event.data.length > 1024 * 1024) { void finish('服务回答超过保存上限'); return; }
           text += event.data; onText(event.data);
           if (text.includes('[end]') && !endTimer) endTimer = setTimeout(() => void finish(text.includes('[start]') ? null : '服务缺少起始标识'), endSettleMs ?? config.endSettleMs);

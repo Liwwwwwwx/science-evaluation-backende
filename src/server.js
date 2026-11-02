@@ -14,7 +14,12 @@ const { createMaterialEvaluator } = require('./runs/material-evaluator');
 const { createMissionEvaluator } = require('./runs/mission-evaluator');
 const { createMissionDailyRepository } = require('./runs/mission-daily.repository');
 const { createMissionDailyService } = require('./runs/mission-daily.service');
+const { createFeishuTestNotifier } = require('./notifications/feishu-test');
+const { createMissionDailyReportRepository } = require('./notifications/mission-daily-report.repository');
+const { createMissionDailyReportService } = require('./notifications/mission-daily-report.service');
 const { createQuestionBankService } = require('./question-bank/service');
+const { createDailyReportRepository } = require('./daily-reports/repository');
+const { createDailyReportService } = require('./daily-reports/service');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -24,6 +29,8 @@ let authService;
 let questionBank;
 let evaluations;
 let missionDaily;
+let missionDailyReport;
+let dailyReports;
 let rules;
 if (databaseUrl) {
   if (!publicOrigin) throw new Error('EVALUATION_PUBLIC_ORIGIN is required when authentication is enabled');
@@ -43,14 +50,36 @@ if (databaseUrl) {
   }
   const scoring = createScoringService({ rules });
   evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository) });
-  missionDaily = createMissionDailyService({ repository: createMissionDailyRepository({ pgPool: pool }), evaluations, scoring,
+  const plans = createMissionDailyRepository({ pgPool: pool });
+  missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
     serviceAddress: evaluators['mission-material']?.serviceAddress || null,
     enabled: process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'],
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
-  evaluations.missionDailyStatus = () => missionDaily.status();
+  const notifier = createFeishuTestNotifier();
+  const dailyReportEnabled = process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
+  dailyReports = createDailyReportService({ repository:createDailyReportRepository(pool), preferred:process.env.EVALUATION_DAILY_REPORT_MODEL || 'deepseek',
+    enabled:dailyReportEnabled && process.env.EVALUATION_RUN_WRITE_ENABLED === 'true',
+    notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier,publicOrigin,
+    onError:()=>console.error('每日测评报告暂不可用，请查看报告状态') });
+  const reportRepository = createMissionDailyReportRepository({ pgPool: pool });
+  missionDailyReport = createMissionDailyReportService({ repository: reportRepository, notifier,
+    enabled: !dailyReportEnabled && process.env.EVALUATION_MISSION_DAILY_NOTIFY_ENABLED === 'true' && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true',
+    ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'],
+    onError: () => console.error('Mission 每日测试通知暂不可用') });
+  evaluations.missionDailyStatus = async () => {
+    const info = await missionDaily.status();
+    const notification = { enabled: missionDailyReport.enabled, configured: notifier.configured, last: null };
+    if (notification.enabled && info.last?.id) {
+      try { notification.last = await reportRepository.status(info.last.id); }
+      catch { notification.last = { state: 'unavailable', reason: '通知存储暂不可用' }; }
+    }
+    return { ...info, notification };
+  };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, rules, rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies: process.env.NODE_ENV === 'production' || publicOrigin?.startsWith('https:') }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, rules, dailyReports, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies: process.env.NODE_ENV === 'production' || publicOrigin?.startsWith('https:') }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();
+  missionDailyReport?.start();
+  dailyReports?.start();
 });

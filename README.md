@@ -1,5 +1,21 @@
 # Science 测评后端
 
+## 每日测评分析报告
+
+新增 `/api/evaluation/unified/daily-reports` 列表、`/:date` 详情、`/:date/markdown` 下载和 `POST /:date/generate` 仅生成报告接口；使用现有会话与读写权限，POST 还校验同源、JSON、幂等键及报告写开关。GET 不调用模型。前端侧栏提供“每日总结”。
+
+手工审核后执行 `migrations/007_daily_evaluation_reports.sql`：仅新增一张报告表，不更改题库或运行记录；应用不会自动执行迁移。当前生产数据库、进程和开关不会因代码修改自动更新。
+
+报告覆盖已保存的 `origin=automation` 记录，包含上游和下游全部服务；夜间日期按北京时间当日22:00至次日22:00归属，已有Mission计划以其日期为准。尚未实现的新每日300次出题/调度不会由报告功能启动，未入库的并发脚本也不会自动进入报告。计划数仅在确有计划记录时使用，不把目标300次写成实际执行数。
+
+设置 `EVALUATION_DAILY_REPORT_ENABLED=true` 且启用运行写入后启动自动汇总。已知计划派发完成、各任务与评分结束且源记录安静5分钟后生成；次日06:00仍未结束时先生成不完整快照，之后记录变化会自动更新。仅检查最近48小时的自动运行或计划。模型默认优先DeepSeek，`EVALUATION_DAILY_REPORT_MODEL=qwen` 可改为千问；优先模型未配置或失败时尝试另一家，两家都不可用则仍保存统计。复用现有模型凭据，不再配置新密钥。最多提供55000字符的跨服务案例摘要，报告明确模型阅读覆盖数量；数量和均分由程序计算，不由模型输出。规则/模型版本不同分别统计，缺失或截断参考分不当作零分。未做独立科学核验，不据跨服务均分排名。
+
+`EVALUATION_DAILY_REPORT_WRITE_ENABLED=true` 开放手动生成或重试总结，不重新发题和评分。报告按日期、源摘要、数据库租约原子抢占，进程中断后租约到期可恢复，旧抢占者不能覆盖新结果。自动恢复同一摘要最多3次；模型汇总失败不会无限重试，可在页面手动重试。迟到数据更新报告时保留既有通知状态。
+
+设置 `EVALUATION_DAILY_REPORT_NOTIFY_ENABLED=true` 后，在自动汇总完成时通过现有测试机器人发送简报及平台链接。同一日期至多尝试发送一次；结果未知时不重发。新自动汇总启用后，旧Mission简报调度停用，避免两套通知重复。单独手动生成报告不发送飞书。启用调度、执行生产迁移和真实通知均需用户授权。
+
+验证：`node --test test/daily-reports.test.js`。隔离PG使用独立新建实例及 `EVALUATION_DAILY_REPORT_TEST_PG_SOCKET=/tmp/evaluation-report-pg.XXXXXX`，端口55791、临时数据库`science_evaluation`，执行 `node --test test/daily-reports-postgres.test.js`；不得指向共享或远端生产库。
+
 独立进程，提供登录、题库及受开关控制的单题测评接口。主服务 Mission_ScienceMaterial 和文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）、新材料（1115）五类下游服务已接入独立运行与评分；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
 
 ## 架构与当前状态
@@ -19,17 +35,19 @@
 
 需要 Node.js 22。通过部署环境提供至少 32 字节的 `EVALUATION_SERVICE_TOKEN`，以及模型的 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`）。默认监听 `127.0.0.1:7714`，可使用 `EVALUATION_HOST` 和 `PORT` 配置。不要把令牌或模型密钥提交到仓库。
 
-启动：`npm start`；隔离测试：`npm test`。Mission 每日计划默认关闭，需显式配置；本进程不自动发送通知或运行数据库迁移。
+启动：`npm start`；隔离测试：`npm test`。启动时可从 Git 忽略的 `.env.local` 读取本地环境变量，已有进程环境变量优先。Mission 每日计划和测试机器人通知默认关闭，需显式配置；本进程不自动运行数据库迁移。
 
 `GET /health` 返回存活状态。`POST /api/admin/team-services/evaluations/question-bank/generate` 需服务端 Bearer 令牌，接收 `{ "serviceKey": "alloy", "topic": "合金性能", "count": 2 }`，返回 `{ "items": [{ "serviceKey": "alloy", "question": "..." }], "model": "..." }`，错误格式为 `{ "error": { "code": "...", "message": "..." } }`。该接口只返回候选，不写数据库。浏览器不得直接使用该令牌：管理端代理必须先验证用户身份及 `team-services:write` 权限。当前代理尚未切换。
 
-运行记录仓储已迁入，必须由调用方显式注入 PostgreSQL 连接池，并检查数据库名为 `science_admin`；运行核心可以接收该仓储。服务入口已为登录与题库创建连接池，运行记录仓储已接入单题运行接口，写入默认关闭。现有表依赖旧后端迁移 041、042，不能自动执行迁移或擅自迁移生产数据。
+运行记录仓储已迁入，必须由调用方显式注入 PostgreSQL 连接池，并检查数据库名为 `science_admin` 或独立测评库 `science_evaluation`；运行核心可以接收该仓储。服务入口已为登录与题库创建连接池，运行记录仓储已接入单题运行接口，写入默认关闭。现有表依赖旧后端迁移 041、042，不能自动执行迁移或擅自迁移生产数据。
 
 ## 独立登录
 
-配置 `EVALUATION_DATABASE_URL` 后启用，必须同时设置 `EVALUATION_PUBLIC_ORIGIN` 为浏览器实际访问的 HTTPS origin（非生产环境允许 localhost HTTP）。连接会先验证数据库名是 `science_admin`。首次使用前需审核并手工执行 `migrations/001_evaluation_sessions.sql`；进程不会自动建表或迁移。生产数据库、连接配置和部署均须另行确认。
+配置 `EVALUATION_DATABASE_URL` 后启用，必须同时设置 `EVALUATION_PUBLIC_ORIGIN` 为浏览器实际访问的 HTTPS origin（非生产环境允许 localhost HTTP）。连接会先验证数据库名是 `science_admin` 或 `science_evaluation`。首次使用前需审核并手工执行 `migrations/001_evaluation_sessions.sql`；进程不会自动建表或迁移。生产数据库、连接配置和部署均须另行确认。
 
-认证读取 `auth_users` 和管理端权限表；需要 `team-services:read` 或 `team-services:write`。支持现有 scrypt、Argon2 哈希、TOTP 与一次性备用码；备用码消费会更新共享用户表。账号创建、修改密码和权限分配仍由 Science Admin 管理。每次读取会话都校验密码哈希、token_version 和当前权限；旧数据库实现中的 `auth_users` 没有禁用状态字段，因此不能仅靠此表识别产品用户禁用状态，接入前需要核对账号禁用数据源。
+本机可选用 SSH 隧道连接远端独立库：设置 `EVALUATION_DB_TUNNEL_ENABLED=true`、`EVALUATION_DB_TUNNEL_HOST`、`EVALUATION_DB_TUNNEL_USER`，以及可选的 `EVALUATION_DB_TUNNEL_SSH_PORT`、`EVALUATION_DB_TUNNEL_LOCAL_PORT`、`EVALUATION_DB_TUNNEL_REMOTE_PORT`。启动器负责创建隧道并在退出时关闭，若本地端口已被占用则拒绝启动，不复用未知隧道；`EVALUATION_DATABASE_URL` 必须指向隧道本地端口和 `science_evaluation`。`.env.local` 包含凭据时须限制文件权限，不提交版本库。
+
+认证读取 `auth_users` 和管理端权限表；需要 `team-services:read` 或 `team-services:write`。支持现有 scrypt、Argon2 哈希、TOTP 与一次性备用码；备用码消费会更新所连接数据库的用户表。连接独立 `science_evaluation` 时，账号和权限是迁入时的副本，不会自动与原 Science Admin 数据库同步；账号创建、修改密码和权限分配尚需独立管理方式。每次读取会话都校验密码哈希、token_version 和当前权限；旧数据库实现中的 `auth_users` 没有禁用状态字段，因此不能仅靠此表识别产品用户禁用状态，接入前需要核对账号禁用数据源。
 
 - `POST /api/auth/login`：JSON `{username,password,rememberMe,totpCode}`；成功设置 HttpOnly、SameSite=Lax Cookie。未勾选记住时为浏览器会话 Cookie，服务端最长 12 小时；勾选后最长 30 天。需要二次验证时返回 `2FA_REQUIRED`。
 - `GET /api/auth/me`：返回当前用户和权限；会话无效 401，权限不足 403。
@@ -49,7 +67,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 新题按领域创建，不绑定服务；九个领域供手动录入、Excel 导入和 AI 生成使用。历史题默认未分类，可在详情指定领域。原按服务生成和保存接口保留。领域作为独立分类信息，固定题和随机题均可纠错；新建领域题使用与领域及题面无关的稳定 ID，历史 ID 原样保留。领域题可从题库带入新建测评，运行时选择服务；带专属评分规则的旧题首版明确拒绝，不静默丢弃规则。
 
-启用前须审核并手工执行 `migrations/002_question_domains.sql`，只新增 `eval_questions.domain_key` 可空列及索引，不自动改写旧题；迁移须在 `science_admin` 上进行。应用不会自动执行迁移。由于本机服务连接共享数据库，对该数据库执行迁移须先获得用户确认。
+启用前须审核并手工执行 `migrations/002_question_domains.sql`，只新增 `eval_questions.domain_key` 可空列及索引，不自动改写旧题；迁移仅允许 `science_admin` 或 `science_evaluation`。应用不会自动执行迁移。对共享或生产数据库执行迁移须先获得用户确认。
 
 ## 文献单题测评
 
@@ -64,7 +82,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 题目通过 `instruction` 字段提交，每次运行生成独立 taskid；正文逐帧转发，`[start]`/`[end]` 构成完整结束条件。连接中断或超时会保存失败状态及已有回答，不自动重试被测服务。不产生旧管理端报告/证据对象、不启动夜检；运行结束后接入下述独立评分。
 
-审核并手工执行 `migrations/003_evaluation_runs.sql` 可建立与管理端 041/042 兼容的运行记录及幂等键存储。仅允许 `science_admin`；现有运行表和记录保留，不自动执行生产迁移。启用共享库的写入或部署前另行确认。
+审核并手工执行 `migrations/003_evaluation_runs.sql` 可建立与管理端 041/042 兼容的运行记录及幂等键存储。仅允许 `science_admin` 或 `science_evaluation`；现有运行表和记录保留，不自动执行生产迁移。启用共享库的写入或部署前另行确认。
 
 - `GET /api/evaluation/unified/services`：返回主服务与五类下游服务及各自可用状态；只有对应适配器已配置、具备写权限且写入已启用时标为可用。
 - `POST /api/evaluation/unified/runs`：要求 `team-services:write`、同源 Origin 及 1–128 字符 `Idempotency-Key`。请求 `{serviceKey,question,questionId?,datasetVersion?,sourceType?}`；题库来源字段须完整，后端核验有效版本与原题，服务型旧题仍约束服务，领域题可选择被测服务。来源统一为人工运行。成功返回 `{runId,serviceKey,reused}`。
@@ -134,7 +152,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 沿用 `evaluation-v1` 结果结构，以 `ruleSnapshot.id/version/hash` 独立记录规则版本。默认内容权重仍为40/40/20，新运行使用生效规则中的权重，图文不适用时其他维度按比例归一化。
 
-`migrations/004_evaluation_scoring_rules.sql` 新建规则、当前生效指针和操作记录三张表，只允许 `science_admin`，必须审核并在授权数据库手工执行。应用不自动建表或迁移。未迁移时只读返回内置规则，写入不可用；本轮仅在专用临时数据库验证，未修改共享库。
+`migrations/004_evaluation_scoring_rules.sql` 新建规则、当前生效指针和操作记录三张表，只允许 `science_admin` 或 `science_evaluation`，必须审核并在授权数据库手工执行。应用不自动建表或迁移。未迁移时只读返回内置规则，写入不可用。
 
 设置 `EVALUATION_RULES_WRITE_ENABLED=true` 才能维护，默认关闭。读取使用测评会话和 `team-services:read`，维护还需 `team-services:write`、同源 Origin 和非 cross-site。所有维护POST均要求JSON及UUID格式的 `Idempotency-Key`，最大96KiB。
 
@@ -171,12 +189,24 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 ## Mission_ScienceMaterial 主服务与每日测评
 
-通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、`idea` 和 `has_context=false`；正文流式保存，只有收到 `[end]` 且正常关闭才算协议完成。需求确认自动 `continue`，普通补充输入及新版 `display.followup_request` 追问按 XIMUALPHA 自动确认默认回复“无”并标记自动答复；新版审批请求不会自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复，不自动重发请求。进度只记录服务实际发出的消息和明确阶段事件，不推断调用了哪个下游团队或虚构阶段耗时。
+通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、当前题面 `idea` 和 `has_context=false`，不发送上游路由 `type` 或历史上下文。正文立即转发；JSON 按返回的 `type` 分流。Mission 必须等连接正常关闭（1000/1001）并排空已收到的消息后才完成，子步骤、总结结束帧或正文中的 `[end]` 不单独结束整轮。需求确认自动 `continue`，普通补充输入及新版 `display.followup_request` 追问按 XIMUALPHA 自动确认默认回复“无”并标记自动答复；新版审批请求不会自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复，不自动重发请求。进度只记录服务实际发出的消息和明确阶段事件，不推断调用了哪个下游团队或虚构阶段耗时。
+
+方案确认沿用 XIMUALPHA-NEXT 的协议：`stack_planner_prompt_request` 的回复以 `request_id` 为 `taskid`，线性模式只回传 `confirm`（及显式键合方式），周期模式选择服务推荐方案和合法周期层数；非法默认值明确失败。`equations_request` 按自动确认回传 `formulaKey` 与空的人工选择集合，不编造公式；`temporarily_suspend_request` 回传继续动作。未知交互请求保存后立即报告缺项，不静默等待整轮超时。自动决定可在页面查看。
+
+兼容旧服务的 `stacking.stack_mode=null`：仅采用推荐配置或服务默认中明确提供的模式，不能把空值误判为周期模式；缺少明确默认时报告错误。`display.process.step.source=mission_list_teams` 对应团队查询阶段，可用于默认团队查询耗时规则，不从标题文字猜测阶段。
+
+`details.transport` 记录关闭码、是否正常关闭、收帧数量及最后事件；异常关闭和已开始但缺少结束帧的最终总结保留失败状态，不以已有正文冒充完成，不自动重新调用服务。评分输入保留实际交付和自动决定，排除交互候选、进度及与规范结果完全相同的重复帧；完整原始协议仍保留在运行记录中，真正超限时仍标记截断。
+
+团队输出、工具步骤、最终总结、追问和文件事件保存在 `details.displayEvents` / `protocolFrames` / `artifacts`，实时与历史共用展示；团队增量按事件编号和序号归并去重。普通文献、材料服务也保留 display 事件，继续遵循各自原有完成协议。未知业务 JSON 保留为可展开详情，心跳和明确忽略帧不进入正文。
+
+完整输出保存成功后才自动进行原文 Markdown 机检和 DeepSeek、千问评分；评分输入包含正文、团队输出、最终总结和成果元数据，机检保留各来源与原文行号。保存失败不提前调用评委，保留原运行供恢复与重评。正常查看、刷新和重连始终使用原运行 ID，不重新发题。
 
 每日计划默认关闭；配置地址、启用运行写入、审核并手工执行 `migrations/005_mission_daily_plans.sql` 后，显式设置 `EVALUATION_MISSION_DAILY_ENABLED=true` 才启动。计划在北京时间每天 22:00 从已入库、启用、无专属旧规则且适用于主服务的固定题、随机题和 Mission 题中确定性选取最多 10 道；不足 10 道时如实展示。题面、版本、目标地址和已生效规则在派发前固定；切换地址后尚未创建的任务暂停等待核对。
 
 每天仅有一份持久化计划，每道题使用独立幂等键及运行记录；中断后继续创建原清单中尚未创建的运行，不重新发起已创建或已派发的运行。上一轮仍有排队、运行或评分时，本轮跳过；错过 22:00 后的 10 分钟触发窗口记为跳过，不自动堆积补跑。页面「运行记录」展示计划状态、每题执行状态和两模型评分，并链接运行详情。`GET /api/evaluation/unified/mission-daily` 需要现有会话及 `team-services:read`。计划状态不等于健康探活，评分结果不等于科学验证。
 
-启用或生产切流前须先核对并停用旧后台对应 Mission 夜检，避免两套调度器同时发送；生产数据库迁移、配置及启动须另获确认。未知状态的旧运行可能使后续计划持续跳过，需核对上游；本版不自动判定远程取消，也没有通知推送。五并发尚未在真实 Mission 服务验证。
+启用或生产切流前须先核对并停用旧后台对应 Mission 夜检，避免两套调度器同时发送；生产数据库迁移、配置及启动须另获确认。未知状态的旧运行可能使后续计划持续跳过，需核对上游；本版不自动判定远程取消。五并发尚未在真实 Mission 服务验证。
+
+每日结束汇总可单独接入测试机器人：手工审核并执行 `migrations/006_mission_daily_notifications.sql`，配置 `MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL` 和 `EVALUATION_MISSION_DAILY_NOTIFY_ENABLED=true`；不回退到正式机器人。仅当每日计划、运行写入、主服务和通知开关均就绪时启用。整批执行和评分结束后发送一条包含数量和两模型均分的汇总；跳过或无题的计划发送原因。每轮先在数据库原子抢占，再调用飞书，结果记录为 `sent`、`failed` 或 `unknown`；发送不确定或进程中断时不会自动重发，须人工核对。仅处理创建于最近 48 小时的计划，避免启用时批量补发旧通知；状态接口返回配置和最近一次通知状态。模拟测试不会发送真实飞书消息。
 
 专项：`node --test test/mission-evaluator.test.js test/mission-daily.test.js`；`EVALUATION_MISSION_DAILY_TEST_PG_SOCKET=/tmp/evaluation-auth-pg.XXXXXXXX node --test test/mission-daily-postgres.test.js` 必须使用新建的专用临时 PostgreSQL。

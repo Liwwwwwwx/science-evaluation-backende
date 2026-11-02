@@ -1,8 +1,8 @@
 -- 与原管理端 041/042 的运行记录表兼容；手工审核执行，不在服务启动时迁移。
 BEGIN;
 DO $$ BEGIN
-  IF current_database() <> 'science_admin' THEN
-    RAISE EXCEPTION 'Evaluation runs require science_admin';
+  IF current_database() NOT IN ('science_admin', 'science_evaluation') THEN
+    RAISE EXCEPTION 'Evaluation runs require science_admin or science_evaluation';
   END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS public.unified_evaluation_runs (

@@ -5,7 +5,7 @@ function createAuthRepository(pool) {
   let checked;
   async function db() {
     if (!checked) checked = pool.query('SELECT current_database() AS name').then(r => {
-      if (r.rows[0]?.name !== 'science_admin') throw new Error('Authentication requires science_admin database');
+      if (!['science_admin', 'science_evaluation'].includes(r.rows[0]?.name)) throw new Error('Authentication requires science_admin or science_evaluation database');
       return pool;
     }).catch(e => { checked = null; throw e; });
     return checked;

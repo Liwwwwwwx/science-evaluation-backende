@@ -1,6 +1,6 @@
--- 仅在用户授权的 science_admin 数据库手工执行；应用不自动运行迁移。
+-- 仅在用户授权的 science_admin 或 science_evaluation 数据库手工执行；应用不自动运行迁移。
 BEGIN;
-DO $$ BEGIN IF current_database() <> 'science_admin' THEN RAISE EXCEPTION 'requires science_admin'; END IF; END $$;
+DO $$ BEGIN IF current_database() NOT IN ('science_admin', 'science_evaluation') THEN RAISE EXCEPTION 'requires science_admin or science_evaluation'; END IF; END $$;
 CREATE TABLE IF NOT EXISTS public.evaluation_scoring_rules (
   id uuid PRIMARY KEY,
   version_no bigint GENERATED ALWAYS AS IDENTITY UNIQUE,

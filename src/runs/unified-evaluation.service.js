@@ -104,7 +104,13 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         executionFinished = true;
         job.scores = scoring.pending();
         if (job.saveTimer) { clearTimeout(job.saveTimer); job.saveTimer = null; }
-        await save(job).catch(() => { job.persistenceError = true; });
+        try { await save(job); }
+        catch {
+          job.scores = Object.fromEntries(Object.entries(job.scores).map(([key, item]) => [key, { ...item, status: 'skipped', error: '完整输出保存失败，暂未评分' }]));
+          job.status = result.status === 'error' ? 'error' : 'done';
+          job.scoreError = '完整输出保存失败；请恢复原运行后重新评分';
+          throw new Error('output persistence failed');
+        }
         await runScoring(job);
         return;
       }

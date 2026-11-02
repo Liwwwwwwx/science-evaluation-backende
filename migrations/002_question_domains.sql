@@ -1,7 +1,7 @@
 -- Review and apply manually; existing questions remain unclassified.
 DO $$ BEGIN
-  IF current_database() <> 'science_admin' THEN
-    RAISE EXCEPTION 'Question domains require science_admin';
+  IF current_database() NOT IN ('science_admin', 'science_evaluation') THEN
+    RAISE EXCEPTION 'Question domains require science_admin or science_evaluation';
   END IF;
 END $$;
 ALTER TABLE eval_questions ADD COLUMN IF NOT EXISTS domain_key text;

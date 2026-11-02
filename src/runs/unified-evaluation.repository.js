@@ -20,7 +20,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
   async function adminPool() {
     const current = pool();
     if (!verified) verified = current.query('SELECT current_database() AS name').then((result) => {
-      if (result.rows[0]?.name !== 'science_admin') throw new Error('统一评测记录只能使用 science_admin 数据库');
+      if (!['science_admin', 'science_evaluation'].includes(result.rows[0]?.name)) throw new Error('统一评测记录只能使用 science_admin 或 science_evaluation 数据库');
       return current;
     }).catch((error) => { verified = null; throw error; });
     return verified;
@@ -105,18 +105,34 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items)]);
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
     },
-    async list({ origin = null, page = 1, pageSize = 20 } = {}) {
+    async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', from = '', to = '' } = {}) {
       const requestedPage = Number(page);
       const requestedSize = Number(pageSize);
       const safePage = Number.isInteger(requestedPage) && requestedPage > 0 ? Math.min(requestedPage, 100000) : 1;
       const safeSize = Number.isInteger(requestedSize) && requestedSize > 0 ? Math.min(requestedSize, 100) : 20;
-      const params = [origin];
+      const term = typeof q === 'string' ? q.trim().toLowerCase() || null : null;
+      const domainFilter = typeof domain === 'string' ? domain.trim() : '';
+      const fromDate = typeof from === 'string' ? from.trim() : '';
+      const toDate = typeof to === 'string' ? to.trim() : '';
+      const source = `FROM public.unified_evaluation_runs r
+        LEFT JOIN LATERAL (
+          SELECT domain_key FROM eval_questions
+          WHERE id = r.question_id AND dataset_version = r.dataset_version
+          LIMIT 1
+        ) q ON true`;
+      const where = []; const params = [];
+      if (origin) { params.push(origin); where.push(`r.origin=$${params.length}`); }
+      if (term) { params.push(term); const index = params.length; where.push(`(POSITION($${index} IN lower(r.question)) > 0 OR POSITION($${index} IN r.id::text) > 0)`); }
+      if (domainFilter) { if (domainFilter === 'unclassified') where.push('q.domain_key IS NULL'); else { params.push(domainFilter); where.push(`q.domain_key=$${params.length}`); } }
+      if (fromDate) { params.push(fromDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date >= $${params.length}::date`); }
+      if (toDate) { params.push(toDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date <= $${params.length}::date`); }
+      const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const current = await adminPool();
-      const count = await current.query('SELECT count(*)::int AS total FROM public.unified_evaluation_runs WHERE ($1::text IS NULL OR origin=$1)', params);
-      const result = await current.query(`SELECT id, service_key, origin, question, question_id, dataset_version, question_source_type,
-        batch_id, status, scores, started_at, finished_at FROM public.unified_evaluation_runs WHERE ($1::text IS NULL OR origin=$1)
-        ORDER BY started_at DESC, id DESC LIMIT $2 OFFSET $3`, [origin, safeSize, (safePage - 1) * safeSize]);
-      return { items: result.rows.map(row => ({ ...map(row), scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
+      const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
+      const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,
+        r.batch_id, r.status, r.scores, r.started_at, r.finished_at, q.domain_key ${source} ${filter}
+        ORDER BY r.started_at DESC, r.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, safeSize, (safePage - 1) * safeSize]);
+      return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },
   };
 }

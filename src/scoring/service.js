@@ -22,8 +22,20 @@ function redact(value) {
 }
 function packInput(job) {
   const details = job.run?.details || {};
-  const answer = redact(String(job.answer || '')).slice(0, 60000);
-  const structuredRaw = JSON.stringify(redact({ result: details.result, protocolFrames: details.protocolFrames, snapshot: details.snapshot, generatedFiles: details.generatedFiles, artifacts: details.artifacts }));
+  const displayEvents = Array.isArray(details.displayEvents) ? details.displayEvents : [];
+  const outputs = displayEvents.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(event => {
+    const body = event.phase === 'end' && typeof event.content === 'string' ? event.content : event.delta;
+    const title = event.type === 'display.final_answer' ? '最终总结' : `团队输出：${event.team?.name || '未命名团队'}`;
+    return typeof body === 'string' && body ? `\n\n【${title}】\n${body}` : '';
+  }).join('');
+  const fullAnswer = String(job.answer || '') + outputs;
+  const answer = redact(fullAnswer).slice(0, 60000);
+  // 交互候选与进度不是交付成果；实际自动选择单独入证据。原始协议仍完整保存在运行中。
+  const controlTypes = new Set(['progress', 'retrieval_progress', 'retrival_progress', 'stage', 'phase_start', 'phase_end', 'stage_start', 'stage_end', 'requirement_review_request', 'user_input_request', 'adaptive_refactor', 'stack_planner_prompt_request', 'equations_request', 'temporarily_suspend_request', 'checkpoint.request']);
+  const resultJson = details.result == null ? null : JSON.stringify(details.result);
+  const protocolFrames = (Array.isArray(details.protocolFrames) ? details.protocolFrames : []).filter(frame => !controlTypes.has(frame.type) && !(frame.type === 'result' && resultJson !== null && JSON.stringify(frame.data) === resultJson));
+  const decisions = (Array.isArray(details.review) ? details.review : []).map(item => ({ requestType: item.request?.type, action: item.action, source: item.source, delivery: item.delivery, summary: item.summary, reply: item.reply }));
+  const structuredRaw = JSON.stringify(redact({ result: details.result, protocolFrames, decisions, snapshot: details.snapshot, generatedFiles: details.generatedFiles, artifacts: details.artifacts, outputStates: displayEvents.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(({ type, event_id, phase, status }) => ({ type, event_id, phase, status })), displayEvents: displayEvents.filter(event => !['display.team_output', 'display.final_answer', 'display.process.step'].includes(event.type)) }));
   const structured = structuredRaw.slice(0, 30000);
   const process = redact(details.process || { events: [],messages: [] });
   const messages = []; let processChars = 0; let processTruncated = process.truncated === true;
@@ -35,7 +47,7 @@ function packInput(job) {
     if (text.length < message.text.length) processTruncated = true;
   }
   return { answer, structured, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
-    truncated: job.answerTruncated === true || answer.length < String(job.answer || '').length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
+    truncated: job.answerTruncated === true || answer.length < fullAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
 }
 function normalizeRubric(value, question, model) {
   if (!Array.isArray(value?.requirements) || !value.requirements.length || value.requirements.length > 15 || typeof value.visualAidsApplicable !== 'boolean' || !short(value.visualAidsReason)) throw new Error('题目要求清单无效');
@@ -101,9 +113,10 @@ function normalizeJudge(value, rubric, input, markdown, policy = null) {
 function hasOutput(job) {
   const body = String(job.answer || '').replace(/\[(?:start|end|done|completed|content_start|content_end)\]/gi, '').replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '').trim();
   if (body) return true;
+  if ((Array.isArray(job.run?.details?.displayEvents) ? job.run.details.displayEvents : []).some(event => ['display.team_output', 'display.final_answer'].includes(event.type) && String(event.content || event.delta || '').trim())) return true;
   const nonempty = value => value != null && (typeof value === 'object' ? Object.keys(value).length > 0 : typeof value === 'string' ? Boolean(value.trim()) : true);
   const details = job.run?.details || {};
-  return nonempty(details.result) || (Array.isArray(details.protocolFrames) && details.protocolFrames.some(nonempty)) || (details.snapshot?.ok === true && nonempty(details.snapshot.data)) || (Array.isArray(details.artifacts) && details.artifacts.length > 0) || (Array.isArray(details.generatedFiles) && details.generatedFiles.length > 0);
+  return nonempty(details.result) || (Array.isArray(details.protocolFrames) && details.protocolFrames.some(frame => nonempty(frame) && !['progress', 'retrieval_progress', 'stage', 'phase_start', 'phase_end', 'stage_start', 'stage_end', 'requirement_review_request', 'user_input_request', 'adaptive_refactor', 'step.done'].includes(frame.type))) || (details.snapshot?.ok === true && nonempty(details.snapshot.data)) || (Array.isArray(details.artifacts) && details.artifacts.length > 0) || (Array.isArray(details.generatedFiles) && details.generatedFiles.length > 0);
 }
 function rubricPrompt(question) {
   return [
@@ -161,7 +174,17 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
       Promise.resolve().then(() => client.callJson(prompt, { signal: controller.signal })).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', abort));
     });
     try {
-      markdown = await checkMarkdown(job.answer, { truncated: job.answerTruncated }); await emit();
+      const outputs = [{ id: 'answer', label: '正文', text: String(job.answer || '') }, ...(Array.isArray(job.run?.details?.displayEvents) ? job.run.details.displayEvents : []).filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(event => ({ id: event.event_id, label: event.type === 'display.final_answer' ? '最终总结' : `团队输出：${event.team?.name || '未命名团队'}`, text: event.phase === 'end' && typeof event.content === 'string' ? event.content : event.delta || '' }))];
+      const checks = []; let checkedChars = 0;
+      for (const source of outputs) {
+        if (!source.text.trim()) continue;
+        const text = source.text.slice(0, Math.max(0, 120000 - checkedChars)); checkedChars += text.length;
+        const check = await checkMarkdown(text, { truncated: job.answerTruncated || job.run?.details?.truncated || text.length < source.text.length });
+        checks.push({ ...check, source: source.id, label: source.label });
+      }
+      markdown = checks.length ? { ...checks[0], status: checks.some(check => check.status === 'failed') ? 'failed' : checks.some(check => check.status === 'not_evaluable') ? 'not_evaluable' : checks.some(check => check.status === 'observe') ? 'observe' : 'passed',
+        coverage: checks.some(check => check.coverage === 'partial') ? 'partial' : 'full', checkedChars: checks.reduce((total, check) => total + check.checkedChars, 0), sourceChars: checks.reduce((total, check) => total + check.sourceChars, 0), issues: checks.flatMap(check => check.issues.map(issue => ({ ...issue, source: check.source, sourceLabel: check.label }))).slice(0, 100), sources: checks.map(({ source, label, coverage }) => ({ source, label, coverage })) } : await checkMarkdown('', { truncated: job.answerTruncated });
+      await emit();
       const enabled = KEYS.filter(key => clients[key]?.isConfigured());
       if (busy) throw new Error('评分并发已满，请稍后重评');
       if (job.run?.status !== 'done' || !hasOutput(job)) {
@@ -209,4 +232,4 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
   }
   return { score, pending, version: VERSION, snapshotRule: () => rules ? rules.activeSnapshot() : Promise.resolve(builtinRule()) };
 }
-module.exports = { createScoringService, normalizeRubric, normalizeJudge, packInput, VERSION };
+module.exports = { createScoringService, normalizeRubric, normalizeJudge, packInput, redact, VERSION };

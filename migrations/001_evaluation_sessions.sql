@@ -1,4 +1,4 @@
--- Apply manually only after verifying the target is the intended science_admin database.
+-- Apply manually only after verifying the target is the intended science_admin or science_evaluation database.
 CREATE TABLE public.evaluation_auth_sessions (
   token_hash text PRIMARY KEY,
   user_id text NOT NULL REFERENCES public.auth_users(id) ON DELETE CASCADE,
