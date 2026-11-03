@@ -1,3 +1,4 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,6 +18,7 @@ test('隔离 PG：Mission 输出、明确阶段事件与冻结规则进入双模
   assert.match(socket, /^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);
   const pool = new Pool({ host: socket, port: 55481, database: 'science_admin' }); t.after(() => pool.end());
   for (const name of ['003_evaluation_runs.sql', '004_evaluation_scoring_rules.sql']) await pool.query(fs.readFileSync(path.join(__dirname, '../migrations', name), 'utf8'));
+ await setupRunOwnership(pool);
   const answer = '材料热导率单位 W/(m·K)，表示导热能力。';
   const clients = Object.fromEntries(['deepSeekScore', 'qwenScore'].map(key => [key, { model: key, isConfigured: () => true, async callJson(prompt) {
     if (prompt.includes('仅根据题目')) return { requirements: [{ requirement: '说明热导率单位', critical: true }], visualAidsApplicable: false, visualAidsReason: '简单问答' };

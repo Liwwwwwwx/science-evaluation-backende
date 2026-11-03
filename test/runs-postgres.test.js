@@ -1,3 +1,4 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,6 +17,7 @@ test('隔离 PostgreSQL：领域题执行/SSE断线重连/幂等/历史及重启
   if (!/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/.test(socket)) throw Error('仅允许临时数据库');
   const pool = new Pool({ host: socket, port: 55481, database: 'science_admin' }); t.after(() => pool.end());
   await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/003_evaluation_runs.sql'), 'utf8'));
+  await setupRunOwnership(pool);
   await pool.query(`CREATE TABLE eval_questions (id text, layer text, service_key text, source_type text, domain_key text, question text, dataset_version text, status text, criteria jsonb, created_at timestamptz DEFAULT now())`);
   const text = '请检索芯片封装导热界面材料相关文献。';
   await pool.query(`INSERT INTO eval_questions VALUES ('domain-question','base',NULL,'random','chip-packaging',$1,'gen-v1','active',NULL)`, [text]);

@@ -49,6 +49,31 @@ jobs:
           fi
           docker exec evaluation-rerun-test createdb -h /var/run/postgresql -p 55484 -U postgres science_admin
           PGUSER=postgres EVALUATION_RERUN_TEST_PG_SOCKET="$socket_dir" node --test test/rerun-postgres.test.js
+      - name: Verify run ownership with isolated PostgreSQL
+        run: |
+          set -eu
+          socket_dir=$(mktemp -d /tmp/evaluation-ownership-pg.XXXXXX)
+          chmod 777 "$socket_dir"
+          trap 'docker rm -f evaluation-ownership-test >/dev/null 2>&1 || true' EXIT
+          docker run --rm -d --name evaluation-ownership-test \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -v "$socket_dir:/var/run/postgresql" postgres:16 \
+            postgres -p 55487 -c listen_addresses=''
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker logs evaluation-ownership-test 2>&1 | grep -q 'PostgreSQL init process complete' && \
+              docker exec evaluation-ownership-test pg_isready -h /var/run/postgresql -p 55487 -U postgres >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            docker logs evaluation-ownership-test
+            exit 1
+          fi
+          docker exec evaluation-ownership-test createdb -h /var/run/postgresql -p 55487 -U postgres science_evaluation
+          PGUSER=postgres EVALUATION_OWNERSHIP_TEST_PG_SOCKET="$socket_dir" node --test test/run-ownership-postgres.test.js
       - run: bash -n ops/deploy.sh
       - name: Package release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

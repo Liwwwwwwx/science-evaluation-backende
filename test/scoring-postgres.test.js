@@ -1,9 +1,12 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const crypto=require('node:crypto');const {Pool}=require('pg');
 const {createUnifiedEvaluationService}=require('../src/runs/unified-evaluation.service');const {createUnifiedEvaluationRepository}=require('../src/runs/unified-evaluation.repository');const {createScoringService}=require('../src/scoring/service');
 const {CHECKS}=require('../src/scoring/delivery-review');
 const socket=process.env.EVALUATION_SCORING_TEST_PG_SOCKET||'';
 test('隔离PG：五服务评分/SSE、重启读取、重评幂等与并发租约、题库版本隔离', {skip:!socket},async t=>{
  assert.match(socket,/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);const pool=new Pool({host:socket,port:55481,database:'science_admin'});t.after(()=>pool.end());await pool.query(fs.readFileSync(path.join(__dirname,'../migrations/003_evaluation_runs.sql'),'utf8'));
+ await setupRunOwnership(pool);
+ await pool.query('CREATE TABLE eval_questions (id text, dataset_version text, domain_key text)');
  const repo=createUnifiedEvaluationRepository({pgPool:pool});let executions=0,judges=0,extracts=0;
  const rubric={requirements:[{requirement:'给出热导率单位',critical:true}],visualAidsApplicable:true,visualAidsReason:'要求表格'};
  const value={dimensions:Object.fromEntries(['readability','professionalism','visualAids'].map(k=>[k,{score:80,note:'单位可读',evidence:'W/(m·K)'}])),requirements:[{id:'R1',status:'met',evidence:'W/(m·K)',note:'给出了单位'}],comment:'单位清楚，仍可补充数据条件',highlights:['单位'],gaps:['条件'],suggestions:['补充条件']};
@@ -13,7 +16,7 @@ test('隔离PG：五服务评分/SSE、重启读取、重评幂等与并发租�
  const make=()=>createUnifiedEvaluationService({evaluators,repository:repo,scoring});const service=make();
  const wait=async(id,svc=service)=>{for(let i=0;i<300;i++){const v=await svc.get(id);if(v.status==='done'&&v.run?.scoring?.finishedAt)return v;await new Promise(r=>setTimeout(r,5));}throw Error('score timeout');};
  const ids=[];
- for(const serviceKey of Object.keys(evaluators)){const started=await service.start({serviceKey,question:'请给出热导率单位以及对比表格。',questionId:'same-id',datasetVersion:'v1'});ids.push(started.runId);const events=[];started.subscribe((event,data)=>events.push([event,data]));const done=await wait(started.runId);assert.equal(done.executionStatus,'succeeded');assert.equal(done.scores.deepSeekScore.quality.total,80);assert.equal(done.scores.qwenScore.quality.taskCompletion.status,'completed');assert.ok(events.some(([e])=>e==='score'));}
+ for(const serviceKey of Object.keys(evaluators)){const started=await service.start({origin:'automation',serviceKey,question:'请给出热导率单位以及对比表格。',questionId:'same-id',datasetVersion:'v1'});ids.push(started.runId);const events=[];started.subscribe((event,data)=>events.push([event,data]));const done=await wait(started.runId);assert.equal(done.executionStatus,'succeeded');assert.equal(done.scores.deepSeekScore.quality.total,80);assert.equal(done.scores.qwenScore.quality.taskCompletion.status,'completed');assert.ok(events.some(([e])=>e==='score'));}
  assert.equal(executions,5);assert.equal(judges,10);assert.equal(extracts,5);
  const restarted=make(),id=ids[0],saved=await restarted.get(id);assert.equal(saved.recoveryState,'snapshot_only');assert.equal(saved.scores.deepSeekScore.status,'ready');assert.equal(judges,10);
  assert.equal((await restarted.list()).items[0].scores.qwenScore.total,80);assert.equal((await restarted.questionScores([{id:'same-id',datasetVersion:'v1'}])).items.length,5);assert.equal((await restarted.questionScores([{id:'same-id',datasetVersion:'v2'}])).items.length,0);

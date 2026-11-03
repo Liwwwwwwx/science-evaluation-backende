@@ -1,3 +1,4 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -18,6 +19,7 @@ test('隔离 PostgreSQL：进程退出后恢复未派发任务，竞争和不确
   const pool = new Pool({ host: socket, port: 55481, database: 'science_admin' });
   t.after(() => pool.end());
   await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/003_evaluation_runs.sql'), 'utf8'));
+  await setupRunOwnership(pool);
 
   // 子进程直接退出，模拟服务在五个运行已派发、第六个仍在排队时崩溃。
   const script = `
@@ -34,7 +36,7 @@ test('隔离 PostgreSQL：进程退出后恢复未派发任务，竞争和不确
       for (let i=0;i<6;i++) last = await service.createRun({serviceKey:'literature',question:'重启恢复并发测试题 '+i},{scope:'evaluation-user:test',key:'crash-'+i});
       process.exit(0);
     })().catch(error => { console.error(error.message); process.exit(1); });`;
-  const child = spawnSync(process.execPath, ['-e', script], { cwd: path.join(__dirname, '..'), env: { PATH: process.env.PATH, PGUSER: require('node:os').userInfo().username, TEST_SOCKET: socket }, encoding: 'utf8', timeout: 15000 });
+  const child = spawnSync(process.execPath, ['-e', script], { cwd: path.join(__dirname, '..'), env: { PATH: process.env.PATH, PGUSER: process.env.PGUSER || require('node:os').userInfo().username, TEST_SOCKET: socket }, encoding: 'utf8', timeout: 15000 });
   assert.equal(child.status, 0, child.stderr);
   const repository = createUnifiedEvaluationRepository({ pgPool: pool });
   const rows = await pool.query('SELECT id,status,question FROM unified_evaluation_runs ORDER BY question');

@@ -29,7 +29,7 @@ test('HTTP产物读取保留会话与读权限校验，无产物404，非法ID40
   const server = createApp({ token: 'x'.repeat(32), publicOrigin: 'http://localhost', authService: { authenticate: async token => {
     if (!token) throw Object.assign(Error('请登录'), { status: 401 });
     return { id: token, permissions: token === 'reader' ? ['team-services:read'] : [] };
-  } }, evaluations: { get: async () => run() } });
+  } }, evaluations: { assertRunAccess: async () => ({ owned: true }), get: async () => run() } });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
   const root = `http://127.0.0.1:${server.address().port}/api/evaluation/unified/runs`;
   const url = `${root}/11111111-1111-4111-8111-111111111111/artifacts/1`;
@@ -54,7 +54,7 @@ test('源码代理响应禁止嗅探和脚本执行', async t => {
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve)); t.after(() => upstream.close());
   const origin = `http://127.0.0.1:${upstream.address().port}`;
   const sample = run(`${origin}/files/a.html`); sample.run.serviceAddress = `${origin}/start`;
-  const server = createApp({ token: 'x'.repeat(32), publicOrigin: 'http://localhost', authService: { authenticate: async () => ({ id: 'reader', permissions: ['team-services:read'] }) }, evaluations: { get: async () => sample } });
+  const server = createApp({ token: 'x'.repeat(32), publicOrigin: 'http://localhost', authService: { authenticate: async () => ({ id: 'reader', permissions: ['team-services:read'] }) }, evaluations: { assertRunAccess: async () => ({ owned: true }), get: async () => sample } });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/evaluation/unified/runs/11111111-1111-4111-8111-111111111111/artifacts/0`, { headers: { cookie: 'evaluation_session=reader' } });
   assert.equal(response.status, 200);
