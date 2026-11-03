@@ -24,7 +24,7 @@ test('隔离 PostgreSQL：重新测评原子清理输出、去重并阻止旧结
     const created = await service.createRun({ serviceKey: 'literature', question: '用于重新测评的隔离测试题目' }, { scope: 'user', key });
     for (let i = 0; i < 100; i++) {
       const run = await service.get(created.runId);
-      if (run.finishedAt) { await new Promise(resolve => setImmediate(resolve)); return run; }
+      if (run.finishedAt && run.recoveryState === 'snapshot_only') return run;
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     throw Error('测试运行未完成');
