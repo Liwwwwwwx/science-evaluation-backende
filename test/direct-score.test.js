@@ -130,3 +130,22 @@ test('接口要求登录、写权限和同源；关联标准必须属于当前�
   assert.match(result.input.standard, /比较导热和重量/);
   assert.equal(result.input.answer, answer);
 });
+
+test('受信服务端可用 Bearer 服务令牌直接评分，错误令牌仍按未登录处理', async t => {
+  let called = 0;
+  const directScore = { async score(input) { called++; return { input }; } };
+  const authService = { async authenticate() { throw Object.assign(Error('请先登录'), { status: 401 }); } };
+  const server = createApp({ token: 'y'.repeat(40), directScore, authService, publicOrigin: 'http://localhost' });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/api/evaluation/direct-score`;
+  const body = JSON.stringify({ question, answer, standard: { type: 'text', text: standard } });
+  // 错误令牌：回落会话路径，未登录返回 401。
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-token' }, body })).status, 401);
+  // 正确令牌：无需会话与 Origin，直接评分。
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${'y'.repeat(40)}` }, body });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).input.answer, answer);
+  assert.equal(called, 1);
+  // 令牌调用方输入缺失标准时走正常参数校验，不依赖登录服务。
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${'y'.repeat(40)}` }, body: JSON.stringify({ question, answer }) })).status, 400);
+});

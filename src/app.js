@@ -108,15 +108,23 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
     if (url.pathname === '/api/evaluation/direct-score') {
       try {
         if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
-        if (!authService || !directScore) return fail(res, 503, 'DIRECT_SCORE_UNAVAILABLE', '直接评分尚未配置');
-        const user = await authService.authenticate(session(req));
-        if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有评分权限');
-        if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        if (!directScore) return fail(res, 503, 'DIRECT_SCORE_UNAVAILABLE', '直接评分尚未配置');
+        // 与标准生成一致的双模式鉴权：受信服务端用 Bearer 服务令牌直连；浏览器走登录会话与同源校验，不得使用令牌。
+        const bearer = req.headers.authorization || '';
+        const candidate = crypto.createHash('sha256').update(bearer.startsWith('Bearer ') ? bearer.slice(7) : '').digest();
+        const viaToken = crypto.timingSafeEqual(candidate, expected);
+        let user = null;
+        if (!viaToken) {
+          if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
+          user = await authService.authenticate(session(req));
+          if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有评分权限');
+          if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        }
         const input = await readBody(req, 384 * 1024);
         let standard;
         if (input.standard?.type === 'text') standard = input.standard.text;
         else if (input.standard?.type === 'saved') {
-          if (!user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+          if (user && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
           if (!standardsRepository || !questionBank) return fail(res, 503, 'STANDARDS_UNAVAILABLE', '标准存储尚未配置');
           const { questionId, datasetVersion, id } = input.standard;
           if (typeof id !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)) return fail(res, 400, 'INVALID_STANDARD', '请选择有效的评分标准');

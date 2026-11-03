@@ -17,7 +17,7 @@ test('代理拒绝缺失索引、任意URL、其他任务、凭据、重编码�
   const never = async () => { throw Error('不应联网'); };
   for (const index of [-1, 1, 0.5, NaN]) await assert.rejects(readRunArtifact(run(), index, { fetchImpl: never }), { status: 404 });
   for (const url of ['http://evil.invalid/a.png', 'http://127.0.0.1:1115/new-material/tasks/other/assets/a.png', 'http://u:p@127.0.0.1:1115/files/a.png', 'http://127.0.0.1:1115/files/%252e.png', 'file:///tmp/a.png', 'http://127.0.0.1:1115/files/%2fetc.png']) await assert.rejects(readRunArtifact(run(url), 0, { fetchImpl: never }), { status: 403 });
-  for (const extension of ['svg', 'html', 'js', 'exe']) await assert.rejects(readRunArtifact(run(`http://127.0.0.1:1115/files/a.${extension}`), 0, { fetchImpl: never }), { status: 415 });
+  for (const extension of ['svg', 'exe']) await assert.rejects(readRunArtifact(run(`http://127.0.0.1:1115/files/a.${extension}`), 0, { fetchImpl: never }), { status: 415 });
 });
 test('代理允许固定公开产物源，对上游失败与大小超限给出可恢复错误', async () => {
   assert.equal((await readRunArtifact(run('https://www.science42.tech/alpha/materials/modelfiles/a.png'), 0, { fetchImpl: async () => new Response('png') })).contentType, 'image/png');
@@ -38,4 +38,27 @@ test('HTTP产物读取保留会话与读权限校验，无产物404，非法ID40
   assert.equal((await fetch(url, { headers: { cookie: 'evaluation_session=reader' } })).status, 404);
   assert.equal((await fetch(`${root}/bad-id/artifacts/0`, { headers: { cookie: 'evaluation_session=reader' } })).status, 400);
   assert.equal((await fetch(url, { method: 'POST', headers: { cookie: 'evaluation_session=reader' } })).status, 405);
+});
+
+
+test('源码和表格扩展以不可执行的文本类型读取，同时保留来源校验', async () => {
+  for (const extension of ['js', 'html', 'ts', 'py', 'markdown', 'tsv', 'jsonl']) {
+    const result = await readRunArtifact(run(`http://127.0.0.1:1115/files/a.${extension}`), 0, { fetchImpl: async () => new Response('<script>alert(1)</script>') });
+    assert.match(result.contentType, /^text\//);
+  }
+});
+
+test('源码代理响应禁止嗅探和脚本执行', async t => {
+  const http = require('node:http');
+  const upstream = http.createServer((_req, res) => res.end('<script>alert(1)</script>'));
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve)); t.after(() => upstream.close());
+  const origin = `http://127.0.0.1:${upstream.address().port}`;
+  const sample = run(`${origin}/files/a.html`); sample.run.serviceAddress = `${origin}/start`;
+  const server = createApp({ token: 'x'.repeat(32), publicOrigin: 'http://localhost', authService: { authenticate: async () => ({ id: 'reader', permissions: ['team-services:read'] }) }, evaluations: { get: async () => sample } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/evaluation/unified/runs/11111111-1111-4111-8111-111111111111/artifacts/0`, { headers: { cookie: 'evaluation_session=reader' } });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /^text\/plain/);
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(response.headers.get('content-security-policy'), /sandbox; default-src 'none'/);
 });
