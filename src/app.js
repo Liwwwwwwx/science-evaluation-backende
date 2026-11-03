@@ -135,6 +135,8 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
           if (!selected) return fail(res, 404, 'STANDARD_NOT_FOUND', '该题目版本下没有找到所选标准');
           standard = JSON.stringify(selected.content);
         } else return fail(res, 400, 'INVALID_STANDARD', '请选择或输入评分标准');
+        const caller = viaToken ? 'service-token' : `user:${user.id}`;
+        if (!rateLimit(`direct-score:${caller}`, 20)) return fail(res, 429, 'DIRECT_SCORE_RATE_LIMITED', '直接评分次数过多，请 15 分钟后再试');
         return reply(res, 200, await directScore.score({ question: input.question, answer: input.answer, standard }));
       } catch (error) {
         if (error.code === '42P01') return fail(res, 503, 'STANDARDS_STORAGE_UNAVAILABLE', '标准存储尚未迁移');

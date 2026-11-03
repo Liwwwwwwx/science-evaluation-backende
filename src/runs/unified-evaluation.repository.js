@@ -62,7 +62,8 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
           throw new TeamServiceError(409, 'RUN_ALREADY_RERUN', '此记录的输出已清除，请查看新一轮运行');
         }
         const lease = previous.run?.scoring;
-        if (previous.origin !== 'manual' || previous.batch_id || !['done', 'error'].includes(previous.status) || !['done', 'error'].includes(previous.run?.status) || (lease && !lease.finishedAt && Date.parse(lease.expiresAt) > Date.now())) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行，请等待执行和评分结束');
+        const expired = lease && !lease.finishedAt && Date.parse(lease.expiresAt) <= Date.now();
+        if (previous.origin !== 'manual' || previous.batch_id || (!['done', 'error'].includes(previous.status) && !(previous.status === 'scoring' && expired)) || !['done', 'error'].includes(previous.run?.status) || (lease && !lease.finishedAt && !expired)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行，请等待执行和评分结束');
         const created = await client.query(`INSERT INTO public.unified_evaluation_runs
           (id,service_key,origin,question,question_id,dataset_version,question_source_type,batch_id,status,started_at,idempotency_scope,idempotency_key,idempotency_hash,run)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -75,7 +76,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         }
         const cleared = { status: previous.run.status, serviceAddress: previous.run.serviceAddress || null, serviceAddressSource: previous.run.serviceAddressSource || null,
           outputClearedAt: new Date().toISOString(), replacementRunId: job.runId, rerunRequestHash: requestHash };
-        await client.query(`UPDATE public.unified_evaluation_runs SET answer='',answer_truncated=false,scores=NULL,score_error=NULL,error=NULL,run=$2,updated_at=now() WHERE id=$1`, [previousId,cleared]);
+        await client.query(`UPDATE public.unified_evaluation_runs SET answer='',answer_truncated=false,scores=NULL,score_error=NULL,error=NULL,run=$2,status=$3,updated_at=now() WHERE id=$1`, [previousId,cleared,previous.run.status]);
         await client.query('COMMIT');
         return { created: true, runId: job.runId };
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }

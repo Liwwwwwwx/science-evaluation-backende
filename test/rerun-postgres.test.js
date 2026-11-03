@@ -56,4 +56,19 @@ test('隔离 PostgreSQL：重新测评原子清理输出、去重并阻止旧结
   assert.equal(await repository.get(next.runId), null);
   await pool.query("UPDATE unified_evaluation_runs SET status='running' WHERE id=$1", [rollback.runId]);
   await assert.rejects(service.rerun(rollback.runId, { scope: 'user', key: 'active' }), { code: 'RUN_NOT_RERUNNABLE' });
+
+  const expired = await create('expired-original');
+  await pool.query("UPDATE unified_evaluation_runs SET status='scoring',run=jsonb_set(run,'{scoring}',$2::jsonb) WHERE id=$1", [expired.runId, JSON.stringify({ attemptId: 'stale', expiresAt: '2000-01-01T00:00:00Z', finishedAt: null })]);
+  const restarted = createUnifiedEvaluationService({ repository, evaluators: { literature: evaluator } });
+  assert.equal((await restarted.get(expired.runId)).status, 'done');
+  const replacement = await restarted.rerun(expired.runId, { scope: 'user', key: 'expired-rerun' });
+  const clearedExpired = await repository.get(expired.runId);
+  assert.equal(clearedExpired.status, 'done');
+  assert.equal(clearedExpired.run.replacementRunId, replacement.runId);
+  assert.equal(clearedExpired.answer, '');
+
+  const leased = await create('leased-original');
+  await pool.query("UPDATE unified_evaluation_runs SET status='scoring',run=jsonb_set(run,'{scoring}',$2::jsonb) WHERE id=$1", [leased.runId, JSON.stringify({ attemptId: 'active', expiresAt: '2999-01-01T00:00:00Z', finishedAt: null })]);
+  await assert.rejects(restarted.rerun(leased.runId, { scope: 'user', key: 'leased-rerun' }), { code: 'RUN_NOT_RERUNNABLE' });
+  assert.equal((await repository.get(leased.runId)).answer, 'old-output-marker');
 });

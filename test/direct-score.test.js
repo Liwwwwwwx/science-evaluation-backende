@@ -106,6 +106,40 @@ test('凭据脱敏、无模型、并发上限及超时均明确处理', async ()
   assert.equal((await first).scores.deepSeekScore.status, 'failed');
 });
 
+test('跨分片凭据先整体脱敏，编号证据还原为原文', async () => {
+  const original = `${'甲'.repeat(285)} PASSWORD=temporary-example-password 后续说明😀`;
+  let prompt;
+  const judge = { ...response, criteria: [{ ...response.criteria[0], evidence: ['A1', 'A2'] }] };
+  const service = createDirectScoreService({ clients: { deepSeekScore: client(async p => { prompt = p; return judge; }) } });
+  const result = await service.score({ question, standard, answer: original });
+  assert.equal(result.redacted, true);
+  assert.ok(!prompt.includes('temporary-example-password'));
+  assert.ok(!prompt.includes('example-password'));
+  assert.equal(result.scores.deepSeekScore.criteria[0].evidence, segmentsOf(original).map(segment => segment.text).join('\n'));
+  assert.equal(result.scores.deepSeekScore.provisional, false);
+});
+
+test('直接评分对登录用户和服务令牌分别限制每 15 分钟调用次数', async t => {
+  let calls = 0;
+  const directScore = { async score() { calls++; return {}; } };
+  const authService = { async authenticate(value) { return { id: value, permissions: ['team-services:write'] }; } };
+  const server = createApp({ token: 'z'.repeat(32), directScore, authService, publicOrigin: 'http://localhost' });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/api/evaluation/direct-score`;
+  const body = JSON.stringify({ question, answer, standard: { type: 'text', text: standard } });
+  const send = headers => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+  const user = { cookie: 'evaluation_session=alice', origin: 'http://localhost' };
+  for (let i = 0; i < 20; i++) assert.equal((await send(user)).status, 200);
+  const limited = await send(user);
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json()).error.code, 'DIRECT_SCORE_RATE_LIMITED');
+  assert.equal((await send({ cookie: 'evaluation_session=bob', origin: 'http://localhost' })).status, 200);
+  const token = { authorization: `Bearer ${'z'.repeat(32)}` };
+  for (let i = 0; i < 20; i++) assert.equal((await send(token)).status, 200);
+  assert.equal((await send(token)).status, 429);
+  assert.equal(calls, 41);
+});
+
 test('接口要求登录、写权限和同源；关联标准必须属于当前题目版本', async t => {
   const authService = { async authenticate(value) { if (!value) throw Object.assign(Error('请登录'), { status: 401 }); return { id: 'u', permissions: value === 'reader' ? ['team-services:read'] : value === 'write-only' ? ['team-services:write'] : ['team-services:read', 'team-services:write'] }; } };
   const standardId = '11111111-1111-4111-8111-111111111111';

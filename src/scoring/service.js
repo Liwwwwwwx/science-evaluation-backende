@@ -12,12 +12,16 @@ const short = (v, max = 1200) => typeof v === 'string' ? v.slice(0, max) : '';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const strings = value => Array.isArray(value) ? value.slice(0, 8).map(v => short(v)).filter(Boolean) : [];
 const privateField = /(?:api[_-]?key|(?:access|refresh|auth)[_-]?token|password|secret|authorization|cookie|private[_-]?key)/i;
-function redact(value) {
-  if (Array.isArray(value)) return value.map(redact);
+function redact(value, { preserveLength = false } = {}) {
+  if (Array.isArray(value)) return value.map(item => redact(item));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, privateField.test(key) ? '[已隐藏]' : redact(v)]));
-  if (typeof value === 'string') return value.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已隐藏]@').replace(/([?&](?:token|api_key|access_token|secret|password)=)[^&#\s]+/gi, '$1[已隐藏]')
-    .replace(/\b((?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN)|TOKEN|PASSWORD|SECRET|AUTHORIZATION)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer|Basic)\s+[^\s,;]+|[^\s,;]+)/gi, '$1[已隐藏]')
-    .replace(/\b((?:set-)?cookie\s*:\s*)[^\r\n]*/gi, '$1[已隐藏]');
+  if (typeof value === 'string') {
+    const hide = (match, prefix) => prefix + (preserveLength ? '*'.repeat(match.length - prefix.length) : '[已隐藏]');
+    return value.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, (match, prefix) => preserveLength ? hide(match, prefix) : `${prefix}[已隐藏]@`)
+      .replace(/([?&](?:token|api_key|access_token|secret|password)=)[^&#\s]+/gi, hide)
+      .replace(/\b((?:[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN)|TOKEN|PASSWORD|SECRET|AUTHORIZATION)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer|Basic)\s+[^\s,;]+|[^\s,;]+)/gi, hide)
+      .replace(/\b((?:set-)?cookie\s*:\s*)[^\r\n]*/gi, hide);
+  }
   return value;
 }
 function packInput(job) {

@@ -48,11 +48,11 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
 
   function send(job, event, data) { job.events.send(event, data); }
   function releaseJob(job) {
-    if (job.released) return;
+    if (job.released || typeof job.release !== 'function') return;
     job.released = true;
     const release = job.release;
     job.release = null;
-    if (typeof release === 'function') release();
+    release();
   }
   function prune() {
     const finished = [...runs.values()].filter((job) => job.settled);
@@ -183,7 +183,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       ...(ruleSnapshot ? { ruleSnapshot } : {}),
       ...(internal?.rerun ? { previousRunId: internal.rerun.runId } : {}),
       ...(idempotency ? { queuePayload: { version: 1, caseDef: internal.caseDef || null, scoreMode: internal.scoreMode || null } } : {}) };
-    const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null };
+    const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null, reservation };
     const onText = (delta) => {
       if (job.cancelRequested || typeof delta !== 'string') return;
       const remaining = Math.max(0, MAX_ANSWER_CHARS - job.answer.length);
@@ -223,6 +223,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     runs.set(job.runId, job);
     async function launch() {
       const release = await reservation.ready;
+      job.reservation = null;
+      if (!release && job.cancelRequested) return { runId: job.runId, serviceKey, reused: true };
       if (!release) throw new Error('运行预约已取消');
       try {
         job.release = release;
@@ -312,7 +314,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       if (current.run.rerunRequestHash === requestHash && current.run.replacementRunId) return { runId: current.run.replacementRunId, reused: true };
       throw new TeamServiceError(409, 'RUN_ALREADY_RERUN', '此记录的输出已清除，请查看新一轮运行');
     }
-    if (current.origin !== 'manual' || current.batchId || !['done','error'].includes(current.status) || !['done','error'].includes(current.run?.status)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行');
+    const recoveredCurrent = recoverScoringSnapshot(current);
+    if (current.origin !== 'manual' || current.batchId || !['done','error'].includes(recoveredCurrent.status) || !['done','error'].includes(current.run?.status)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行');
     const evaluator = evaluators?.[current.serviceKey];
     if (!evaluator || current.serviceKey === 'alpha-rsi') throw new TeamServiceError(409, 'RERUN_SERVICE_UNAVAILABLE', '原测评服务暂不可用');
     if (!current.run?.serviceAddress || current.run.serviceAddress !== evaluator.serviceAddress) throw new TeamServiceError(409, 'RERUN_SERVICE_CHANGED', '原服务地址已变化，请新建测评并核对服务');
@@ -449,6 +452,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (job.status === 'scoring') throw new TeamServiceError(409, 'END_UNAVAILABLE', '评分已经启动，无法结束本次测评');
     if (job.settled) return { ok: true, runId, status: job.status };
     job.cancelRequested = true;
+    job.reservation?.cancel();
     job.status = 'cancelled';
     job.error = '用户结束了本次测评';
     job.scoreError = '用户结束了本次测评，未继续评分';
