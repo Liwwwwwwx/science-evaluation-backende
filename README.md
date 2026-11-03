@@ -16,6 +16,8 @@
 
 `EVALUATION_AUTOMATION_ENABLED` 统一控制试跑批次、Mission 每日计划和每日自动汇总：显式 `true` 开启，显式 `false` 关闭；未设置时仅 `NODE_ENV=development/test` 默认关闭，其他环境默认开启。各调度器仍要求自己的开关和运行写入条件同时满足。
 
+连接共享数据库的本地后端可以设置 `EVALUATION_QUEUE_RECOVERY_ENABLED=false`，避免自动恢复其他进程留下的排队任务；未设置时保留原有恢复行为。
+
 本地 `.env.local` 显式设置 `EVALUATION_AUTOMATION_ENABLED=false`，即使 shell 里残留 `EVALUATION_TRIAL_DATE` 也不会启动调度器。生产 `shared/backend.env` 需要夜间自动化时设置 `EVALUATION_AUTOMATION_ENABLED=true`，并同步开启对应 `EVALUATION_MISSION_DAILY_ENABLED`、`EVALUATION_DAILY_REPORT_ENABLED` 等开关。该总开关不改变手工创建运行、手工生成报告或队列恢复的独立写开关。
 
 ## 单日随机题试运行
