@@ -5,6 +5,7 @@ const { createApp } = require('./app');
 const { Pool } = require('pg');
 const { createAuthRepository } = require('./auth/repository');
 const { createAuthService } = require('./auth/service');
+const { createAccountService, createAccountRepository } = require('./auth/accounts');
 const { createEvalQuestionBankRepository } = require('./question-bank/repository');
 const { createUnifiedEvaluationService } = require('./runs/unified-evaluation.service');
 const { createUnifiedEvaluationRepository } = require('./runs/unified-evaluation.repository');
@@ -36,6 +37,7 @@ const databaseUrl = process.env.EVALUATION_DATABASE_URL;
 let publicOrigin = process.env.EVALUATION_PUBLIC_ORIGIN;
 let secureCookies = true;
 let authService;
+let accounts;
 let questionBank;
 let evaluations;
 let batches;
@@ -51,6 +53,7 @@ if (databaseUrl) {
   pool.on('error', () => console.error('数据库空闲连接断开，后续请求将重新连接'));
   rules = createRuleService(createRuleRepository(pool));
   authService = createAuthService(createAuthRepository(pool));
+  accounts = createAccountService(createAccountRepository(pool));
   const questionRepository = createEvalQuestionBankRepository({ pool });
   standardsRepository = createStandardsRepository({ pool, questions: questionRepository });
   questionBank = createQuestionBankService(questionRepository);
@@ -101,7 +104,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, batches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();

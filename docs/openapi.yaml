@@ -159,6 +159,126 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /api/evaluation/accounts:
+    get:
+      tags: [认证]
+      summary: 搜索并分页查看评测账号
+      description: 仅登录名为 admin 且同时具有评测读写权限的用户可访问。
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 10000, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: search, in: query, schema: { type: string, maxLength: 100 }, description: 按用户名或显示名称匹配 }
+      responses:
+        '200':
+          description: 账号列表，不含密码
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, page, pageSize]
+                properties:
+                  total: { type: integer }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, username, displayName, createdAt, manageable]
+                      properties:
+                        id: { type: string }
+                        username: { type: string }
+                        displayName: { type: string, nullable: true }
+                        createdAt: { type: string, format: date-time }
+                        manageable: { type: boolean, description: 是否可在此管理账号 }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [认证]
+      summary: 创建普通评测账号
+      description: 仅 admin 会话可创建；限制为独立评测数据库和仅含评测读写权限的 evaluation-local 角色，密码不返回。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, displayName, password]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32, pattern: '^[A-Za-z0-9_]+$' }
+                displayName: { type: string, maxLength: 50, description: 空值时使用用户名 }
+                password: { type: string, format: password, minLength: 4, maxLength: 12 }
+      responses:
+        '201':
+          description: 创建成功，不返回密码
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 用户名已存在
+        '503':
+          description: 评测账号角色不可用或权限不符合要求
+
+  /api/evaluation/accounts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+    patch:
+      tags: [认证]
+      summary: 修改普通评测用户的显示名称
+      description: 仅 admin 会话可操作，不允许修改管理员、其他角色用户或用户名。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 50 }
+      responses:
+        '200': { description: 用户信息已更新 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [认证]
+      summary: 移除普通用户的评测访问权限
+      description: 撤销评测角色并使会话失效，保留账号标识和历史记录；用户名暂不可复用。
+      responses:
+        '200': { description: 用户已移除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/evaluation/accounts/{id}/reset-password:
+    post:
+      tags: [认证]
+      summary: 重置普通评测用户密码
+      description: 仅 admin 会话可操作；重置后既有登录会话失效，密码不会返回。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password, minLength: 4, maxLength: 12 }
+      responses:
+        '200': { description: 密码已重置 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/auth/logout:
     post:
       tags: [认证]
@@ -2492,10 +2612,10 @@ components:
 
     User:
       type: object
-      required: [id, username, name, permissions]
+      required: [id, username, name, permissions, canManageAccounts]
       properties:
         id:
-          type: integer
+          type: string
         username:
           type: string
         name:
@@ -2505,6 +2625,9 @@ components:
           items:
             type: string
             description: 如 team-services:read、team-services:write
+        canManageAccounts:
+          type: boolean
+          description: 是否为具备评测读写权限的内置 admin
 
     Question:
       type: object
