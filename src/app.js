@@ -6,11 +6,12 @@ const { handleDailyReports } = require('./daily-reports/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createStandardsService } = require('./standards/service');
+const { createDirectScoreService } = require('./scoring/direct-score');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -48,6 +49,35 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/evaluation/direct-score') {
+      try {
+        if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+        if (!authService || !directScore) return fail(res, 503, 'DIRECT_SCORE_UNAVAILABLE', '直接评分尚未配置');
+        const user = await authService.authenticate(session(req));
+        if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有评分权限');
+        if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        const input = await readBody(req, 384 * 1024);
+        let standard;
+        if (input.standard?.type === 'text') standard = input.standard.text;
+        else if (input.standard?.type === 'saved') {
+          if (!user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+          if (!standardsRepository || !questionBank) return fail(res, 503, 'STANDARDS_UNAVAILABLE', '标准存储尚未配置');
+          const { questionId, datasetVersion, id } = input.standard;
+          if (typeof id !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)) return fail(res, 400, 'INVALID_STANDARD', '请选择有效的评分标准');
+          const question = await questionBank.get(questionId, datasetVersion);
+          if (question.status !== 'active' || typeof input.question !== 'string' || question.question.trim() !== input.question.trim()) return fail(res, 409, 'QUESTION_CHANGED', '题目已变化或停用，请重新选择');
+          const saved = await standardsRepository.list(questionId, datasetVersion);
+          const selected = saved.items.find(item => item.id === id && item.question.trim() === question.question.trim());
+          if (!selected) return fail(res, 404, 'STANDARD_NOT_FOUND', '该题目版本下没有找到所选标准');
+          standard = JSON.stringify(selected.content);
+        } else return fail(res, 400, 'INVALID_STANDARD', '请选择或输入评分标准');
+        return reply(res, 200, await directScore.score({ question: input.question, answer: input.answer, standard }));
+      } catch (error) {
+        if (error.code === '42P01') return fail(res, 503, 'STANDARDS_STORAGE_UNAVAILABLE', '标准存储尚未迁移');
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'DIRECT_SCORE_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '直接评分暂不可用，请稍后重试' : error.message);
+      }
+    }
     if (url.pathname === '/api/evaluation/question-standards' || /^\/api\/evaluation\/question-standards\/[^/]+\/confirm$/.test(url.pathname)) {
       try {
         if (!authService || !standardsRepository) return fail(res,503,'STANDARDS_UNAVAILABLE','标准存储尚未配置');
