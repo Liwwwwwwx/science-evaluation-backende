@@ -3,6 +3,9 @@ function scoreSummary(scores) {
   return Object.fromEntries(Object.entries(scores || {}).filter(([key]) => ['deepSeekScore','qwenScore','quality'].includes(key)).map(([key, value]) => [key, { status: value?.status, model: value?.model, total: value?.quality?.total ?? null, taskStatus: value?.quality?.taskCompletion?.status || null, provisional: value?.quality?.source?.truncated === true }]));
 }
 function date(value) { return value ? new Date(value).toISOString() : null; }
+function ownerFromScope(scope) {
+  return typeof scope === 'string' && scope.startsWith('evaluation-user:') ? scope.slice('evaluation-user:'.length) || null : null;
+}
 function map(row) {
   if (!row) return null;
   return {
@@ -38,17 +41,17 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const current = await adminPool();
       const result = await current.query(`INSERT INTO public.unified_evaluation_runs
         (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at,
-         idempotency_scope, idempotency_key, idempotency_hash, run)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         idempotency_scope, idempotency_key, idempotency_hash, run, owner_user_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         ON CONFLICT (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
-      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, scope, key, hash, job.run]);
+      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, scope, key, hash, job.run, ownerFromScope(scope)]);
       if (result.rowCount === 1) return { created: true, runId: job.runId };
-      const existing = await current.query('SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope, key]);
-      if (!existing.rows[0]) throw new Error('无法读取幂等运行');
+      const existing = await current.query("SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2 AND (origin='automation' OR owner_user_id=$3)", [scope, key, ownerFromScope(scope)]);
+      if (!existing.rows[0]) throw new TeamServiceError(409, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT', '该请求标识不可用，请使用新请求');
       return { created: false, runId: existing.rows[0].id, matches: existing.rows[0].idempotency_hash === hash };
     },
     async findIdempotent(scope, key) {
-      const result = await (await adminPool()).query('SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope, key]);
+      const result = await (await adminPool()).query("SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2 AND (origin='automation' OR owner_user_id=$3)", [scope, key, ownerFromScope(scope)]);
       return result.rows[0] ? { runId: result.rows[0].id, hash: result.rows[0].idempotency_hash } : null;
     },
     async createRerun(job, scope, key, hash, previousId, requestHash) {
@@ -57,6 +60,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         await client.query('BEGIN');
         const previous = (await client.query('SELECT * FROM public.unified_evaluation_runs WHERE id=$1 FOR UPDATE', [previousId])).rows[0];
         if (!previous) throw new TeamServiceError(404, 'NOT_FOUND', '原运行不存在');
+        if (!ownerFromScope(scope) || previous.owner_user_id !== ownerFromScope(scope)) throw new TeamServiceError(404, 'NOT_FOUND', '原运行不存在');
         if (previous.run?.outputClearedAt) {
           if (previous.run.rerunRequestHash === requestHash) { await client.query('COMMIT'); return { created: false, runId: previous.run.replacementRunId, matches: true }; }
           throw new TeamServiceError(409, 'RUN_ALREADY_RERUN', '此记录的输出已清除，请查看新一轮运行');
@@ -65,18 +69,15 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         const expired = lease && !lease.finishedAt && Date.parse(lease.expiresAt) <= Date.now();
         if (previous.origin !== 'manual' || previous.batch_id || (!['done', 'error'].includes(previous.status) && !(previous.status === 'scoring' && expired)) || !['done', 'error'].includes(previous.run?.status) || (lease && !lease.finishedAt && !expired)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行，请等待执行和评分结束');
         const created = await client.query(`INSERT INTO public.unified_evaluation_runs
-          (id,service_key,origin,question,question_id,dataset_version,question_source_type,batch_id,status,started_at,idempotency_scope,idempotency_key,idempotency_hash,run)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          (id,service_key,origin,question,question_id,dataset_version,question_source_type,batch_id,status,started_at,idempotency_scope,idempotency_key,idempotency_hash,run,owner_user_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (idempotency_scope,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
-        [job.runId,job.serviceKey,job.origin,job.question,job.questionId,job.datasetVersion,job.questionSourceType,job.batchId,job.status,job.startedAt,scope,key,hash,job.run]);
+        [job.runId,job.serviceKey,job.origin,job.question,job.questionId,job.datasetVersion,job.questionSourceType,job.batchId,job.status,job.startedAt,scope,key,hash,job.run,ownerFromScope(scope)]);
         if (!created.rowCount) {
-          const existing = (await client.query('SELECT id,idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope,key])).rows[0];
+          const existing = (await client.query('SELECT id,idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2 AND owner_user_id=$3', [scope,key,ownerFromScope(scope)])).rows[0];
           await client.query('ROLLBACK');
           return { created: false, runId: existing?.id, matches: existing?.idempotency_hash === hash };
         }
-        const cleared = { status: previous.run.status, serviceAddress: previous.run.serviceAddress || null, serviceAddressSource: previous.run.serviceAddressSource || null,
-          outputClearedAt: new Date().toISOString(), replacementRunId: job.runId, rerunRequestHash: requestHash };
-        await client.query(`UPDATE public.unified_evaluation_runs SET answer='',answer_truncated=false,scores=NULL,score_error=NULL,error=NULL,run=$2,status=$3,updated_at=now() WHERE id=$1`, [previousId,cleared,previous.run.status]);
         await client.query('COMMIT');
         return { created: true, runId: job.runId };
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
@@ -91,7 +92,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
           AND service_key=ANY($1::text[])
           AND run->>'serviceAddress' IS NOT DISTINCT FROM ($3::jsonb->>service_key)
         ORDER BY started_at, id LIMIT $2`, [serviceKeys, limit, JSON.stringify(addresses)]);
-      return result.rows.map(row => ({ ...map(row), ownerScope: row.idempotency_scope }));
+      return result.rows.map(row => ({ ...map(row), ownerScope: row.owner_user_id ? `evaluation-user:${row.owner_user_id}` : row.idempotency_scope }));
     },
     async claimQueued(job) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
@@ -111,6 +112,10 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const result = await (await adminPool()).query('SELECT * FROM public.unified_evaluation_runs WHERE id=$1', [id]);
       return map(result.rows[0]);
     },
+    async getAccess(id) {
+      const result = await (await adminPool()).query('SELECT origin, owner_user_id FROM public.unified_evaluation_runs WHERE id=$1', [id]);
+      return result.rows[0] || null;
+    },
     async refreshScores(id, scores, scoreError, status) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
         SET scores=$2, score_error=$3, status=$4, updated_at=now()
@@ -129,33 +134,34 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         WHERE id=$1 AND run->'scoring'->>'attemptId'=$2 AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING id`, [id, attemptId, value.scoring, value.markdownSyntax, value.scores, value.status]);
       return result.rowCount === 1;
     },
-    async questionScores(items) {
+    async questionScores(items, userId) {
       if (!items.length) return [];
       const result = await (await adminPool()).query(`SELECT DISTINCT ON (r.question_id,r.dataset_version,r.service_key)
         r.id,r.question_id,r.dataset_version,r.service_key,r.scores,r.started_at,r.status
         FROM public.unified_evaluation_runs r JOIN jsonb_to_recordset($1::jsonb) AS q(id text,"datasetVersion" text)
         ON r.question_id=q.id AND r.dataset_version=q."datasetVersion"
-        ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items)]);
+        WHERE r.origin='automation' OR r.owner_user_id=$2
+        ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items), userId]);
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
     },
     async listHistory(userId) {
       const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title
         FROM public.unified_evaluation_runs r
         LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
-        WHERE r.origin='manual' AND coalesce(h.hidden,false)=false
+        WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND coalesce(h.hidden,false)=false
         ORDER BY r.started_at DESC,r.id DESC LIMIT 50`, [userId]);
       return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at) }));
     },
     async updateHistory(userId, runId, action, title) {
       const result = await (await adminPool()).query(`INSERT INTO public.evaluation_user_run_history (user_id,run_id,title,hidden)
-        SELECT $1,r.id,$3,$4 FROM public.unified_evaluation_runs r WHERE r.id=$2 AND r.origin='manual'
+        SELECT $1,r.id,$3,$4 FROM public.unified_evaluation_runs r WHERE r.id=$2 AND r.origin IN ('manual','legacy') AND r.owner_user_id=$1
         ON CONFLICT (user_id,run_id) DO UPDATE SET
           title=CASE WHEN $4 THEN evaluation_user_run_history.title ELSE EXCLUDED.title END,
           hidden=CASE WHEN $4 THEN true ELSE evaluation_user_run_history.hidden END, updated_at=now()
         WHERE $4 OR NOT evaluation_user_run_history.hidden RETURNING run_id`, [userId, runId, title || null, action === 'remove']);
       return result.rowCount === 1;
     },
-    async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', questionId = '', datasetVersion = '', from = '', to = '' } = {}) {
+    async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', questionId = '', datasetVersion = '', from = '', to = '', userId = null } = {}) {
       const requestedPage = Number(page);
       const requestedSize = Number(pageSize);
       const safePage = Number.isInteger(requestedPage) && requestedPage > 0 ? Math.min(requestedPage, 100000) : 1;
@@ -170,7 +176,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
           WHERE id = r.question_id AND dataset_version = r.dataset_version
           LIMIT 1
         ) q ON true`;
-      const where = []; const params = [];
+      const where = ["(r.origin='automation' OR r.owner_user_id=$1)"]; const params = [userId];
       if (origin) { params.push(origin); where.push(`r.origin=$${params.length}`); }
       if (questionId) { params.push(questionId); where.push(`r.question_id=$${params.length}`); }
       if (datasetVersion) { params.push(datasetVersion); where.push(`r.dataset_version=$${params.length}`); }

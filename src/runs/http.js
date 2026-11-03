@@ -43,12 +43,13 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
   }
   if (url.pathname === `${base}/question-scores` && req.method === 'GET') {
     let items; try { items = JSON.parse(url.searchParams.get('items') || '[]'); } catch { invalid('题目版本参数无效'); }
-    return reply(res, 200, await evaluations.questionScores(items));
+    return reply(res, 200, await evaluations.questionScores(items, String(user.id)));
   }
   const artifact = /^\/api\/evaluation\/unified\/runs\/([^/]+)\/artifacts\/(\d{1,3})$/.exec(url.pathname);
   if (artifact) {
     if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
     if (!UUID.test(artifact[1])) invalid('运行 ID 无效');
+    await evaluations.assertRunAccess(artifact[1], String(user.id));
     const result = await readRunArtifact(await evaluations.get(artifact[1]), Number(artifact[2]));
     res.writeHead(200, { 'Content-Type': result.contentType, 'Content-Length': result.body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'", 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(result.filename)}` });
     res.end(result.body); return;
@@ -74,14 +75,16 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const validDate = value => { if (!datePattern.test(value)) return false; const date = new Date(`${value}T00:00:00Z`); return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value; };
     if ((origin && !['manual', 'automation', 'legacy'].includes(origin)) || q.length > 100 || questionId.length > 200 || datasetVersion.length > 100 || (domain && domain !== 'unclassified' && !/^[a-z0-9-]{1,64}$/.test(domain)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to) || !Number.isInteger(page) || page < 1 || page > 100000 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) invalid('运行列表参数无效');
-    const value = await evaluations.list({ origin, page, pageSize, q, domain, questionId, datasetVersion, from, to });
+    const value = await evaluations.list({ origin, page, pageSize, q, domain, questionId, datasetVersion, from, to, userId: String(user.id) });
     const canRescoreBase = !!(user.permissions.includes('team-services:write') && runWriteEnabled && evaluations.scoringEnabled);
-    return reply(res, 200, { ...value, items: value.items.map(item => ({ ...item, canRescore: canRescoreBase && !item.outputClearedAt && ['done', 'error'].includes(item.status) })) });
+    return reply(res, 200, { ...value, items: value.items.map(item => ({ ...item, canRescore: canRescoreBase && item.origin !== 'automation' && !item.outputClearedAt && ['done', 'error'].includes(item.status) })) });
   }
   const match = /^\/api\/evaluation\/unified\/runs\/([^/]+)(\/events|\/reply|\/score|\/rerun|\/end)?$/.exec(url.pathname);
   if (!match) throw new TeamServiceError(404, 'NOT_FOUND', 'Not found');
   if (!UUID.test(match[1])) invalid('运行 ID 无效');
   const scope = user.permissions.includes('team-services:write') ? `evaluation-user:${user.id}` : null;
+  if (!user.permissions.includes('team-services:read')) throw new TeamServiceError(403, 'FORBIDDEN', '没有运行查看权限');
+  const access = await evaluations.assertRunAccess(match[1], String(user.id), req.method === 'POST');
   if (['/reply', '/score', '/rerun', '/end'].includes(match[2]) && req.method === 'POST') {
     if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
     if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
@@ -110,9 +113,9 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const scoring = value.run?.scoring;
     const leased = scoring && !scoring.finishedAt && Date.parse(scoring.expiresAt) > Date.now();
     const ended = ['done','error','cancelled'].includes(value.status) && ['done','error','cancelled'].includes(value.run?.status) && !leased && !value.run?.outputClearedAt;
-    return reply(res, 200, { ...value,
-      canRescore: !!(scope && runWriteEnabled && evaluations.scoringEnabled && ended),
-      canRerun: !!(scope && runWriteEnabled && ended && value.origin === 'manual' && !value.batchId && value.serviceKey !== 'alpha-rsi' && (evaluations.availableServices?.() || []).includes(value.serviceKey)) });
+    return reply(res, 200, { ...value, rerunPreservesOutput: true,
+      canRescore: !!(scope && access.owned && runWriteEnabled && evaluations.scoringEnabled && ended),
+      canRerun: !!(scope && access.owned && runWriteEnabled && ended && value.origin === 'manual' && !value.batchId && value.serviceKey !== 'alpha-rsi' && (evaluations.availableServices?.() || []).includes(value.serviceKey)) });
   }
   // 先读取一次，保证不存在/不可读时返回 JSON 错误而不是半条 SSE。
   await evaluations.get(match[1]);

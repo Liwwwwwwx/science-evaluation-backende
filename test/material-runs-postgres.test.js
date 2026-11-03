@@ -1,3 +1,4 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,6 +17,7 @@ test('隔离 PostgreSQL：三类材料运行、实时状态、本人确认、幂
   assert.match(socketPath, /^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);
   const pool = new Pool({ host: socketPath, port: 55481, database: 'science_admin' }); t.after(() => pool.end());
   await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/003_evaluation_runs.sql'), 'utf8'));
+  await setupRunOwnership(pool);
   await pool.query("CREATE TABLE eval_questions(id text,layer text,service_key text,source_type text,domain_key text,question text,dataset_version text,status text,criteria jsonb,created_at timestamptz DEFAULT now())");
   const question = '请计算材料候选结构与性能，并说明结果局限。';
   await pool.query("INSERT INTO eval_questions VALUES('material-domain','base',NULL,'random','materials-rd',$1,'gen-v1','active',NULL)", [question]);
@@ -65,11 +67,11 @@ test('隔离 PostgreSQL：三类材料运行、实时状态、本人确认、幂
     if (serviceKey === 'new-material') {
       await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal((await get(`${base}/runs/${id}`)).canReply, true);
-      assert.equal((await get(`${base}/runs/${id}`, 'other')).canReply, false);
-      assert.equal((await get(`${base}/runs/${id}`, 'reader')).canReply, false);
+      assert.equal((await fetch(`${base}/runs/${id}`, {headers:headers('other')})).status, 404);
+      assert.equal((await fetch(`${base}/runs/${id}`, {headers:headers('reader')})).status, 404);
       const reply = { requestId: 'review-1', action: 'apply', answers: [{ id: 'formula', answer: 'Al2O3' }] };
-      assert.equal((await post(`${base}/runs/${id}/reply`, reply, 'r', 'reader')).status, 403);
-      assert.equal((await post(`${base}/runs/${id}/reply`, reply, 'r', 'other')).status, 403);
+      assert.equal((await post(`${base}/runs/${id}/reply`, reply, 'r', 'reader')).status, 404);
+      assert.equal((await post(`${base}/runs/${id}/reply`, reply, 'r', 'other')).status, 404);
       assert.equal((await post(`${base}/runs/${id}/reply`, reply, 'r', 'owner', 'http://evil.invalid')).status, 403);
       assert.equal((await post(`${base}/runs/${id}/reply`, { ...reply, answers: [{ id: 'formula', answer: '' }] }, 'r')).status, 400);
       await new Promise(resolve => setTimeout(resolve, 1100));

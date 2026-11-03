@@ -209,7 +209,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
           if (!reservation.cancel()) (await reservation.ready)();
           return { runId: claim.runId, serviceKey, reused: true };
         }
-        if (internal?.rerun) runs.delete(internal.rerun.runId);
       } else if (repository && !recovered) await repository.create(snapshot(job));
     } catch (error) {
       if (!reservation.cancel()) (await reservation.ready)();
@@ -489,7 +488,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     try { return { items: (await repository.listHistory(userId)).map(withRecoveryState), storageReady: true }; }
     catch (error) {
       if (error.code !== '42P01') throw error;
-      const fallback = await repository.list({ origin: 'manual', page: 1, pageSize: 50 });
+      const fallback = await repository.list({ origin: 'manual', page: 1, pageSize: 50, userId });
       return { items: fallback.items.map(withRecoveryState), storageReady: false };
     }
   }
@@ -585,13 +584,21 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     void runScoring(job, options, release).finally(() => { job.settled = true; prune(); });
     return { runId, attemptId, reused: false };
   }
-  async function questionScores(items) {
+  async function questionScores(items, userId) {
     if (!repository?.questionScores) throw new TeamServiceError(503, 'SCORING_STORAGE_UNAVAILABLE', '评分记录尚未配置');
     if (!Array.isArray(items) || items.length > 50 || items.some(v => !v || typeof v.id !== 'string' || !v.id || v.id.length > 200 || typeof v.datasetVersion !== 'string' || !v.datasetVersion || v.datasetVersion.length > 200)) throw new TeamServiceError(400, 'INVALID_INPUT', '题目版本参数无效');
-    return { items: await repository.questionScores(items) };
+    return { items: await repository.questionScores(items, userId) };
+  }
+
+  async function assertRunAccess(runId, userId, write = false) {
+    if (!repository?.getAccess) throw new TeamServiceError(503, 'RUN_ACCESS_UNAVAILABLE', '运行权限存储尚未配置');
+    const access = await repository.getAccess(runId);
+    const owned = !!userId && access?.origin !== 'automation' && access?.owner_user_id === String(userId);
+    if (!access || (!owned && (write || access.origin !== 'automation'))) throw new TeamServiceError(404, 'NOT_FOUND', '运行不存在');
+    return { owned };
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

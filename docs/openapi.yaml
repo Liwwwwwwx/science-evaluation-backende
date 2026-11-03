@@ -1450,7 +1450,7 @@ paths:
     get:
       tags: [统一运行]
       summary: 读取当前账号的近期对话
-      description: 需要 team-services:read；只返回最近 50 条未被当前用户移除的人工运行。存储未迁移时返回原始历史且 storageReady 和 canManage 为 false。
+      description: 需要 team-services:read；只返回当前用户最近 50 条未隐藏的个人运行。侧栏存储未迁移时仍按归属过滤，并标记 storageReady 和 canManage 为 false。
       responses:
         '200':
           description: 最近对话、存储状态及管理权限
@@ -1504,7 +1504,7 @@ paths:
     get:
       tags: [统一运行]
       summary: 按题目查询各服务最近评分
-      description: 需要 `team-services:read`。题库修改版本后不沿用旧分。
+      description: 需要 `team-services:read`。仅返回本人运行和团队自动化运行的评分；题库修改版本后不沿用旧分。
       parameters:
         - name: items
           in: query
@@ -1564,7 +1564,7 @@ paths:
       summary: 创建统一运行
       description: |
         需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
-        以及 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。来源统一为人工运行（manual）。
+        以及 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。来源统一为人工运行（manual），归当前用户所有。
         题库来源字段（questionId/datasetVersion/sourceType）须完整，后端核验有效版本与原题。
         成功返回 201；排队执行时也立即返回，经 SSE 或详情接口获取进度。执行完成后自动独立评分。
         每服务最多 5 个并发、进程合计 25 个，队列上限 300，超出拒绝（429 UNIFIED_EVAL_BUSY）。
@@ -1711,7 +1711,7 @@ paths:
       tags: [统一运行]
       summary: 运行详情
       description: |
-        返回回答、题目版本快照、结构化结果与独立评分。非本进程的运行只返回已保存快照
+        仅可读取本人运行或团队自动化运行，返回回答、题目版本快照、结构化结果与独立评分。非本进程的运行只返回已保存快照
         （`recoveryState=snapshot_only`），不自动重跑。`canRescore` 只表示当前权限/开关/快照允许重评。
       parameters:
         - $ref: '#/components/parameters/RunId'
@@ -1830,11 +1830,10 @@ paths:
   /api/evaluation/unified/runs/{runId}/rerun:
     post:
       tags: [统一运行]
-      summary: 清除旧输出并重新测评
+      summary: 保留旧输出并重新测评
       description: |
-        需要读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持已结束的人工运行。
-        在同一事务内清除旧记录的输出、成果索引和评分并创建新运行，沿用原题、服务与规则快照。
-        保留原记录题目、时间和新运行入口；不删除被测服务上的外部文件。同键只创建一次。
+        需要读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持本人已结束的人工运行。
+        创建新运行并沿用原题、服务与规则快照，原记录及输出完整保留。同键只创建一次。
       parameters:
         - $ref: '#/components/parameters/RunId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -2977,6 +2976,9 @@ components:
           type: boolean
         canRerun:
           type: boolean
+        rerunPreservesOutput:
+          type: boolean
+          description: 此版本重新测评会保留旧运行输出。
 
     RunDetail:
       allOf:

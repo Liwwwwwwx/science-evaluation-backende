@@ -1,3 +1,4 @@
+const { setupRunOwnership } = require('./run-ownership-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -37,6 +38,7 @@ test('隔离数据库：完整270次批次持久化，失败后继续且重复�
   assert.match(socket, /^\/tmp\/evaluation-(trial|auth)-pg\.[A-Za-z0-9]+$/);
   const pool = new Pool({ host: socket, port: socket.includes('-auth-') ? 55481 : 55793, database: 'science_evaluation' }); t.after(() => pool.end());
   for (const file of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql']) await pool.query(fs.readFileSync(path.join(__dirname, '../migrations', file), 'utf8'));
+  await setupRunOwnership(pool);
   const keys = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'];
   const serviceAddresses = Object.fromEntries(keys.map(key => [key, `ws://${key}.example/start`]));
   const active = new Map(); const maxSeen = new Map(); let starts = 0; let generated = 0;

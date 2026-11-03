@@ -1,10 +1,16 @@
 # Science 测评后端
 
+## 运行记录归属和访问
+
+个人人工及旧记录按 `owner_user_id` 限制查看和操作，自动化运行、批次和日报按团队读取权限共享；详情、实时流、附件、题目评分及侧栏历史均执行相同边界。团队自动化运行不开放个人重跑或重评。用户需先有运行读权限，操作个人运行还需写权限和现有同源及写入开关。
+
+启用前须审核并手工执行 `migrations/011_run_ownership.sql`：先停止旧版写入并核实备份；迁移时已有的人工及 legacy 记录全部归属用户名 `admin`，自动化记录仍共享。若账号缺失或迁移已执行则整笔回滚。迁移要求旧版写入停止，因为旧版不会写入归属字段；不要将旧版与迁移后数据库混用。上线和生产迁移另行确认。未迁移时权限相关接口不可用，不回退为公开读取。
+
 ## 近期对话个人管理
 
-侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工运行；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。
+侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工及旧运行；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。
 
-使用前需审核并手工执行 `migrations/010_user_run_history.sql`；不会在启动时自动迁移。存储未迁移时侧栏仍显示原始历史，但不开放管理操作。对生产数据库执行迁移或部署前必须单独获得确认。
+使用前需审核并手工执行 `migrations/010_user_run_history.sql`；不会在启动时自动迁移。侧栏存储未迁移时仍按归属过滤显示历史，但不开放管理操作；归属存储未迁移时不会公开回退。对生产数据库执行迁移或部署前必须单独获得确认。
 
 ## 评判标准助手
 
@@ -193,7 +199,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 - `POST /api/evaluation/unified/runs`沿用原请求与幂等契约，创建执行后自动评分；GET详情或SSE获取结果。
 - `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：只对保存的完整执行结果重评，202返回`{runId,attemptId,reused}`，不调用被测服务。同轮进行中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
 - `GET /api/evaluation/unified/runs/:id`含`canRescore`，只表示当前权限/开关/快照允许，最终POST仍校验。重启后未过期评分只返回快照；过期pending在响应中标失败供显式重评，不回写原记录、不偷偷续跑。
-- `POST /api/evaluation/unified/runs/:id/rerun` 以空对象和 `Idempotency-Key` 重新测评已结束的人工记录，需要读写权限、同源和运行写入开关。事务内创建同题、同服务及原规则快照的新运行，并清除旧记录的回答、结构化输出、成果索引、评分及错误内容；保留原记录题目、时间与新运行入口。旧记录不再允许重评、旧结果回写或成果预览；外部被测服务实际文件不在此接口删除范围。自动批次、执行/评分中和原服务地址变化时拒绝，失败回滚；同键恢复同一新运行，原记录只允许清理一次。详情通过 `canRerun` 表示入口可用性，最终 POST 仍须校验。隔离数据库测试：`EVALUATION_RERUN_TEST_PG_SOCKET=/tmp/evaluation-rerun-pg.XXXXXX node --test test/rerun-postgres.test.js`，仅专用临时实例端口 55484。
+- `POST /api/evaluation/unified/runs/:id/rerun` 以空对象和 `Idempotency-Key` 重新测评本人已结束的人工记录，需要读写权限、同源和运行写入开关。事务内创建同题、同服务及原规则快照的新运行，保留原运行及其回答、成果和评分。同键恢复同一新运行；自动批次、执行/评分中和原服务地址变化时拒绝。详情通过 `canRerun` 和 `rerunPreservesOutput` 表示能力，最终 POST 仍须校验。隔离数据库测试：`EVALUATION_RERUN_TEST_PG_SOCKET=/tmp/evaluation-rerun-pg.XXXXXX node --test test/rerun-postgres.test.js`，仅专用临时实例端口 55484。
 - `GET /api/evaluation/unified/runs`含两模型轻量分数/状态摘要，不返回完整评语。
 - `GET /api/evaluation/unified/question-scores?items=<JSON>`，最多50个`{id,datasetVersion}`，返回同题同版本、各服务最近一次运行的`runId/serviceKey/scores`摘要。题库修改版本后不沿用旧分。
 
