@@ -51,6 +51,24 @@ test('运行 HTTP 校验会话、读写权限、来源、开关、幂等键及�
   assert.equal((await fetch(`http://127.0.0.1:${disabled.address().port}/api/evaluation/unified/runs`, { method: 'POST', headers: { cookie: 'evaluation_session=writer', origin: 'http://localhost' } })).status, 503);
 });
 
+test('重新测评接口要求读写权限、同源、写开关并禁止覆盖输入', async t => {
+  let calls = 0;
+  const id = '11111111-1111-4111-8111-111111111111';
+  const evaluations = { async rerun(runId, options) { calls++; assert.equal(runId, id); assert.equal(options.key, 'rerun-key'); return { runId: '22222222-2222-4222-8222-222222222222' }; } };
+  const authService = { async authenticate(token) { if (!token) throw Object.assign(Error('登录'), { status: 401 }); return { id: token, permissions: token === 'reader' ? ['team-services:read'] : ['team-services:read','team-services:write'] }; } };
+  for (const enabled of [true,false]) {
+    const app = createApp({ token: 'a'.repeat(32), authService, evaluations, runWriteEnabled: enabled, publicOrigin: 'http://localhost' });
+    await new Promise(resolve => app.listen(0,'127.0.0.1',resolve)); t.after(() => app.close());
+    const url = `http://127.0.0.1:${app.address().port}/api/evaluation/unified/runs/${id}/rerun`;
+    const post = (cookie='writer',origin='http://localhost',body='{}') => fetch(url,{method:'POST',headers:{cookie:`evaluation_session=${cookie}`,origin,'content-type':'application/json','Idempotency-Key':'rerun-key'},body});
+    assert.equal((await post('reader')).status,403);
+    assert.equal((await post('writer','http://other.test')).status,403);
+    if (enabled) { assert.equal((await post('writer','http://localhost','{"question":"覆盖"}')).status,400); assert.equal((await post()).status,201); }
+    else assert.equal((await post()).status,503);
+  }
+  assert.equal(calls,1);
+});
+
 test('航空文献复用 instruction 协议，隔离任务标识并保留部分回答和失败原因', async () => {
   const ids = new Set();
   for (const mode of ['done', 'close', 'timeout', 'error', 'interaction', 'binary', 'oversize']) {

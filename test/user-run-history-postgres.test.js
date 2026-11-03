@@ -1,0 +1,32 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const { Pool } = require('pg');
+const { createUnifiedEvaluationRepository } = require('../src/runs/unified-evaluation.repository');
+
+const socket = process.env.EVALUATION_HISTORY_TEST_PG_SOCKET || '';
+test('隔离 PostgreSQL：标题及移除按用户隔离，原运行与分页保留', { skip: !socket }, async t => {
+  assert.match(socket, /^\/tmp\/evaluation-history-pg\.[A-Za-z0-9]+$/);
+  const pool = new Pool({ host: socket, port: 55485, database: 'science_evaluation' });
+  t.after(() => pool.end());
+  await pool.query('CREATE TABLE auth_users (id text PRIMARY KEY)');
+  await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/003_evaluation_runs.sql'), 'utf8'));
+  await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/010_user_run_history.sql'), 'utf8'));
+  await pool.query("INSERT INTO auth_users(id) VALUES ('a'),('b')");
+  const id = randomUUID();
+  await pool.query("INSERT INTO unified_evaluation_runs(id,service_key,origin,question,status,started_at,answer) VALUES ($1,'literature','manual','原题目','done',now(),'原回答')", [id]);
+  const repository = createUnifiedEvaluationRepository({ pgPool: pool });
+  assert.equal(await repository.updateHistory('a', id, 'rename', '个人名称'), true);
+  assert.equal((await repository.listHistory('a'))[0].title, '个人名称');
+  assert.equal((await repository.listHistory('b'))[0].title, null);
+  assert.equal(await repository.updateHistory('a', id, 'remove', ''), true);
+  assert.equal((await repository.listHistory('a')).length, 0);
+  assert.equal((await repository.listHistory('b')).length, 1);
+  assert.equal(await repository.updateHistory('a', id, 'rename', '不可恢复'), false);
+  assert.equal(await repository.updateHistory('a', randomUUID(), 'remove', ''), false);
+  const original = await repository.get(id);
+  assert.equal(original.question, '原题目'); assert.equal(original.answer, '原回答');
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs')).rows[0].n, 1);
+});
