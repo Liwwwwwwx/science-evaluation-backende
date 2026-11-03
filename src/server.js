@@ -28,7 +28,7 @@ const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
 const { createTrialBatchService, TARGETS } = require('./runs/trial-batch.service');
 const { createTrialBatchScheduler } = require('./runs/trial-batch.scheduler');
 const { createStandardsRepository } = require('./standards/repository');
-const { automationEnabled, httpSettings } = require('./runtime-config');
+const { automationEnabled, httpSettings, missionTimeoutMs } = require('./runtime-config');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -55,7 +55,7 @@ if (databaseUrl) {
   standardsRepository = createStandardsRepository({ pool, questions: questionRepository });
   questionBank = createQuestionBankService(questionRepository);
   const evaluators = {};
-  if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL });
+  if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL, timeoutMs: missionTimeoutMs() });
   if (process.env.EVALUATION_LITERATURE_WS_URL) evaluators.literature = createLiteratureEvaluator({ url: process.env.EVALUATION_LITERATURE_WS_URL });
   if (process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL) evaluators['literature-aircraft'] = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL });
   for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {

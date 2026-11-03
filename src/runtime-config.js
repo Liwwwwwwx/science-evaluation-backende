@@ -13,4 +13,12 @@ function httpSettings(env = process.env) {
   if (origin.origin !== publicOrigin || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && (allowHttp || (env.NODE_ENV !== 'production' && local))))) throw new Error('EVALUATION_PUBLIC_ORIGIN must be HTTPS unless HTTP is explicitly enabled');
   return { publicOrigin, secureCookies: origin.protocol === 'https:' || (env.NODE_ENV === 'production' && !allowHttp) };
 }
-module.exports = { automationEnabled, httpSettings };
+
+// Mission 综合题可能远超 15 分钟（文献团队、网页检索、文件生成与图片核验）；默认放宽到 60 分钟。
+function missionTimeoutMs(env = process.env) {
+  if (env.EVALUATION_MISSION_TIMEOUT_MS == null || env.EVALUATION_MISSION_TIMEOUT_MS === '') return 60 * 60 * 1000;
+  const value = Number(env.EVALUATION_MISSION_TIMEOUT_MS);
+  if (!Number.isInteger(value) || value < 60 * 1000 || value > 24 * 60 * 60 * 1000) throw new Error('EVALUATION_MISSION_TIMEOUT_MS must be an integer between 60000 and 86400000 milliseconds');
+  return value;
+}
+module.exports = { automationEnabled, httpSettings, missionTimeoutMs };

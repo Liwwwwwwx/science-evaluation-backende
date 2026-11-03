@@ -13,7 +13,8 @@ const MAX_FRAMES = 100000;
 const MAX_CHECKPOINTS = 200;
 
 // Mission 的确认卡可能携带下游 taskid；只能在收到该卡的连接内答复。
-function createMissionEvaluator({ url, timeoutMs = 15 * 60 * 1000, createSocket = target => new WebSocket(target) } = {}) {
+// 默认 60 分钟，可由 EVALUATION_MISSION_TIMEOUT_MS 覆盖；服务端启动时校验并注入。
+function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket = target => new WebSocket(target) } = {}) {
   const target = new URL(url);
   if (!['ws:', 'wss:'].includes(target.protocol)) throw new Error('Mission 主服务必须配置 WebSocket 地址');
   return {
