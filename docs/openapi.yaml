@@ -337,7 +337,8 @@ paths:
       description: |
         需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
-        服务维度的 `serviceKey + focus=custom 时必填 topic` 与领域维度的 `domainKey` 二选一。
+        领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
+        旧服务维度请求（未传 generationMode）仍需提供非空 topic。两种维度互斥。
       requestBody:
         required: true
         content:
@@ -2554,10 +2555,14 @@ components:
       type: object
       required: [count]
       properties:
+        generationMode:
+          type: string
+          enum: [service]
+          description: 按被测服务出题时指定；仅使用 general 方向，topic 可选
         serviceKey:
           type: string
           enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
-          description: 服务维度出题（与 domainKey 互斥）；focus=custom 时必须提供 topic
+          description: 与 domainKey 互斥；service 模式支持除 alpha-rsi 外的已列服务，旧请求须提供 topic
         domainKey:
           type: string
           description: 领域维度出题（与 serviceKey 互斥）

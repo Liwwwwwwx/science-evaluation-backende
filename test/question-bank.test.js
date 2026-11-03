@@ -4,6 +4,7 @@ const { createApp } = require('../src/app');
 const { createQuestionBankService } = require('../src/question-bank/service');
 const { createEvalQuestionBankRepository } = require('../src/question-bank/repository');
 const { createQuestionBankGenerationService } = require('../src/question-bank/generation');
+const { createRunQuestionResolver } = require('../src/runs/question-resolver');
 const { DOMAINS } = require('../src/question-bank/domains');
 
 test('领域出题主题可省略，支持预设方向与自定义，旧服务请求仍要求主题', async () => {
@@ -48,6 +49,56 @@ test('按领域生成候选，不绑定服务且拒绝未知领域', async () =>
   }
   await assert.rejects(() => service.generate({ domainKey: 'unknown', topic: '测试', count: 1 }), e => e.code === 'QUESTION_GENERATION_INVALID');
   await assert.rejects(() => service.generate({ domainKey: 'chip-packaging', serviceKey: 'alloy', topic: '测试', count: 1 }), e => e.code === 'QUESTION_GENERATION_INVALID');
+});
+
+test('按被测服务出题使用对应提示、支持选填主题并绑定目标服务', async () => {
+  let prompt = ''; let calls = 0;
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { calls++; prompt = value; return { questions: ['请检索并归纳航空发动机高温合金相关研究文献。'] }; } } });
+  const labels = { 'mission-material': 'Mission 主服务', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
+  for (const [serviceKey, label] of Object.entries(labels)) {
+    const result = await generator.generate({ generationMode: 'service', serviceKey, count: 1 });
+    assert.equal(result.items[0].serviceKey, serviceKey);
+    assert.equal(result.items[0].domainKey, undefined);
+    assert.ok(prompt.includes(label));
+    assert.ok(!prompt.includes('本批题型安排'));
+  }
+  await generator.generate({ generationMode: 'service', serviceKey: 'literature-aircraft', topic: '发动机合金', count: 1 });
+  assert.ok(prompt.includes('发动机合金'));
+  const previousCalls = calls;
+  for (const input of [
+    { generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 },
+    { generationMode: 'service', serviceKey: 'literature', domainKey: 'materials-rd', count: 1 },
+    { generationMode: 'service', serviceKey: 'literature', focus: 'design', count: 1 },
+    { generationMode: 'other', serviceKey: 'literature', topic: '测试', count: 1 },
+    { generationMode: 'service', serviceKey: 'literature', topic: null, count: 1 },
+  ]) await assert.rejects(() => generator.generate(input), e => e.code === 'QUESTION_GENERATION_INVALID');
+  assert.equal(calls, previousCalls);
+});
+
+test('服务题确认保存后保留绑定，其他服务不能使用该题', async () => {
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async () => ({ questions: ['请检索航空发动机高温合金研究文献并归纳结果。'] }) } });
+  const generated = await generator.generate({ generationMode: 'service', serviceKey: 'literature-aircraft', count: 1 });
+  const bank = createQuestionBankService({
+    insertRandomQuestionsAtomic: async items => ({ items, created: items.length, reused: 0 }),
+    insertFixedQuestionsAtomic: async items => items,
+  });
+  for (const result of [await bank.saveRandom(generated), await bank.import(generated)]) {
+    const item = result.items[0];
+    assert.equal(item.serviceKey, 'literature-aircraft');
+    const resolve = createRunQuestionResolver({ getQuestion: async () => ({ ...item, layer: 'base', status: 'active', sourceType: 'random' }) });
+    const input = { question: item.question, questionId: item.id, datasetVersion: item.datasetVersion, sourceType: 'random', serviceKey: 'literature-aircraft' };
+    assert.equal(await resolve(input), null);
+    await assert.rejects(() => resolve({ ...input, serviceKey: 'literature' }), e => e.code === 'QUESTION_NOT_RUNNABLE');
+  }
+});
+
+test('服务题过滤无效、重复及超长候选，模型无有效结果时返回错误', async () => {
+  let candidates = ['请说明适合该材料的制备条件和验证方法。', '请说明适合该材料的制备条件和验证方法。', '太短', '过'.repeat(201)];
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async () => ({ questions: candidates }) } });
+  const result = await generator.generate({ generationMode: 'service', serviceKey: 'synthesis', count: 4 });
+  assert.deepEqual(result.items, [{ serviceKey: 'synthesis', question: candidates[0] }]);
+  candidates = ['太短'];
+  await assert.rejects(() => generator.generate({ generationMode: 'service', serviceKey: 'synthesis', count: 1 }), e => e.code === 'QUESTION_GENERATION_EMPTY');
 });
 
 test('题库只接受 science_admin 连接', async () => {
