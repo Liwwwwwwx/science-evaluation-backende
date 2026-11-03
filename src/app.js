@@ -1,4 +1,6 @@
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { handleRuns } = require('./runs/http');
 const { handleBatches } = require('./runs/batch-http');
 const { handleRules } = require('./scoring/rule-http');
@@ -10,6 +12,38 @@ const { createDirectScoreService } = require('./scoring/direct-score');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
+const OPENAPI_SPEC = path.join(__dirname, '..', 'docs', 'openapi.yaml');
+// Swagger 静态资源按白名单只读提供；未列出的文件一律 404，避免目录遍历。
+const SWAGGER_ASSETS = new Map([
+  ['swagger-ui-bundle.js', 'application/javascript; charset=utf-8'],
+  ['swagger-ui.css', 'text/css; charset=utf-8'],
+  ['favicon-32x32.png', 'image/png'],
+  ['favicon-16x16.png', 'image/png'],
+]);
+const DOCS_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Science 测评后端 API</title>
+<link rel="icon" href="/docs/assets/favicon-32x32.png">
+<link rel="stylesheet" href="/docs/assets/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="/docs/assets/swagger-ui-bundle.js"></script>
+<script>
+  window.ui = SwaggerUIBundle({
+    url: '/openapi.yaml',
+    dom_id: '#swagger-ui',
+    deepLinking: true,
+    docExpansion: 'list',
+    tryItOutEnabled: false,
+    supportedSubmitMethods: ['get'],
+  });
+</script>
+</body>
+</html>`;
 
 function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
@@ -46,8 +80,30 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
     entry.count++;
     return entry.count <= max;
   }
+  function sendStatic(res, status, type, body) {
+    res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+    res.end(body);
+  }
+  const swaggerAssetCache = new Map();
+  function readSwaggerAsset(name) {
+    if (!swaggerAssetCache.has(name)) swaggerAssetCache.set(name, fs.readFileSync(require.resolve(`swagger-ui-dist/${name}`)));
+    return swaggerAssetCache.get(name);
+  }
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
+    // 接口文档预览是纯静态页面，不涉及数据与凭据，与 /health 一样免登录。
+    if (req.method === 'GET' && (req.url === '/docs' || req.url === '/openapi.yaml' || req.url.startsWith('/docs/assets/'))) {
+      try {
+        if (req.url === '/docs') return sendStatic(res, 200, 'text/html; charset=utf-8', DOCS_HTML);
+        if (req.url === '/openapi.yaml') return sendStatic(res, 200, 'text/yaml; charset=utf-8', fs.readFileSync(OPENAPI_SPEC));
+        const name = decodeURIComponent(req.url.slice('/docs/assets/'.length));
+        const type = SWAGGER_ASSETS.get(name);
+        if (!type) return fail(res, 404, 'NOT_FOUND', 'Not found');
+        return sendStatic(res, 200, type, readSwaggerAsset(name));
+      } catch {
+        return fail(res, 500, 'DOCS_UNAVAILABLE', '接口文档暂不可用');
+      }
+    }
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/api/evaluation/direct-score') {
       try {
