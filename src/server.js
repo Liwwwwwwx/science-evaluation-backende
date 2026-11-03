@@ -28,7 +28,7 @@ const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
 const { createTrialBatchService, TARGETS } = require('./runs/trial-batch.service');
 const { createTrialBatchScheduler } = require('./runs/trial-batch.scheduler');
 const { createStandardsRepository } = require('./standards/repository');
-const { automationEnabled, httpSettings } = require('./runtime-config');
+const { automationEnabled, httpSettings, missionTimeoutMs } = require('./runtime-config');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -48,13 +48,14 @@ let standardsRepository;
 if (databaseUrl) {
   ({ publicOrigin, secureCookies } = httpSettings());
   const pool = new Pool({ connectionString: databaseUrl });
+  pool.on('error', () => console.error('数据库空闲连接断开，后续请求将重新连接'));
   rules = createRuleService(createRuleRepository(pool));
   authService = createAuthService(createAuthRepository(pool));
   const questionRepository = createEvalQuestionBankRepository({ pool });
   standardsRepository = createStandardsRepository({ pool, questions: questionRepository });
   questionBank = createQuestionBankService(questionRepository);
   const evaluators = {};
-  if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL });
+  if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL, timeoutMs: missionTimeoutMs() });
   if (process.env.EVALUATION_LITERATURE_WS_URL) evaluators.literature = createLiteratureEvaluator({ url: process.env.EVALUATION_LITERATURE_WS_URL });
   if (process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL) evaluators['literature-aircraft'] = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL });
   for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {
@@ -102,7 +103,7 @@ if (databaseUrl) {
 }
 createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, questionBank, evaluations, batches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
-  if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
+  if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   missionDaily?.start();
   trialScheduler?.start();
   missionDailyReport?.start();

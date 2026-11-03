@@ -1,16 +1,28 @@
 # Science 测评后端
 
+## 近期对话个人管理
+
+侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工运行；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。
+
+使用前需审核并手工执行 `migrations/010_user_run_history.sql`；不会在启动时自动迁移。存储未迁移时侧栏仍显示原始历史，但不开放管理操作。对生产数据库执行迁移或部署前必须单独获得确认。
+
 ## 评判标准助手
 
-`POST /api/evaluation/standards` 接收 `{ "question": "问题原文" }`，生成题目明确要求、评判项及待补充信息。题目长度为 8–4000 个字符；每条要求和必需项都须引用输入中存在的原文。评判项分为 `required`（题目要求）、`recommended`（专业建议）和 `needs_verification`（待核验）。接口不保存数据、不修改题库或评分规则，不自动联网查证，也不宣称模型输出经过专业验证。
+`POST /api/evaluation/standards` 接收 `{ "question": "问题原文" }`，生成题目明确要求、评判项及待补充信息。题目长度为 8–4000 个字符；每条要求和必需项都须引用输入中存在的原文。评判项分为 `required`（题目要求）、`recommended`（专业建议）和 `needs_verification`（待核验）。模型结果的格式或引用校验失败时最多重新生成一次，重试仍须通过同样的原文校验；模型请求失败和超时分别返回提示，不自动重试。每次生成最多调用两次模型，重试会增加等待时间和模型费用。接口不保存数据、不修改题库或评分规则，不自动联网查证，也不宣称模型输出经过专业验证。
 
 选取题库题目后，可保存单题标准草稿并确认，按题目 ID 和版本隔离；确认新版本后旧确认版保留为历史。`GET /api/evaluation/question-standards?questionId=...&datasetVersion=...` 读取，`POST /api/evaluation/question-standards` 保存，`POST /api/evaluation/question-standards/:id/confirm` 确认。需要测评会话和相应读写权限，写入还需题库写入开关；生产启用前须审核并手工执行 `migrations/009_question_standards.sql`。该功能不自动用于实际评分。生成标准可在页面导出为 Markdown。
+
+## 直接评分已有输出
+
+`POST /api/evaluation/direct-score` 接收题目、已有输出和评分标准，仅调用配置的 DeepSeek 与千问评委，不调用被测服务，也不创建运行或保存结果。鉴权支持两种模式：受信服务端使用 `Authorization: Bearer <EVALUATION_SERVICE_TOKEN>` 直接调用（无需会话与同源校验，浏览器不得使用该令牌）；网页调用使用测评会话、`team-services:write` 和同源请求，选用题库关联标准还需 `team-services:read`。标准可为 `{type:"text",text}`，也可通过 `{type:"saved",id,questionId,datasetVersion}` 指定题库关联标准；关联标准按题目 ID、版本及题面重新核对。题目最长 4000 字符，标准最长 20000 字符，输出最长 60000 字符；超限拒绝，不静默截断。每个评委独立返回分数、逐项评价、原文依据和建议；未配置、失败、超时分开标识，不取平均。模型引用输出片段编号，服务端还原原文；依据无法核对或关联标准有缺项时保留模型分数并明确标记为待复核的参考分，不展示未经核验的引用。模型未返回有效分数或请求失败时最多重试一次；两次都失败时显示失败，不虚构分数。输入中的常见凭据信息会在发送前脱敏，脱敏时提示；模型评分不等于独立事实核验。结果只在当前页面保留，刷新后不恢复。进程内最多四次直接评分并发；每个登录用户及所有服务令牌调用分别限每 15 分钟 20 次，进入评分环节的失败请求也计数。模型调用可能产生费用；各实例不共享限额，进程重启后重置。
 
 服务端调用使用现有 `EVALUATION_SERVICE_TOKEN` 的 Bearer 认证；网页调用使用现有登录会话、`team-services:write` 权限和同源校验。依赖已配置的出题模型。模型不可用或结果格式不符合约束时返回错误，不返回不完整结果；示例：`curl -X POST "$BASE_URL/api/evaluation/standards" -H "Authorization: Bearer $EVALUATION_SERVICE_TOKEN" -H 'Content-Type: application/json' -d '{"question":"比较两种铝合金用于支架的适用性，并说明选择依据。"}'`。测试：`node --test test/standards.test.js`。
 
 ## 自动化总开关
 
 `EVALUATION_AUTOMATION_ENABLED` 统一控制试跑批次、Mission 每日计划和每日自动汇总：显式 `true` 开启，显式 `false` 关闭；未设置时仅 `NODE_ENV=development/test` 默认关闭，其他环境默认开启。各调度器仍要求自己的开关和运行写入条件同时满足。
+
+连接共享数据库的本地后端可以设置 `EVALUATION_QUEUE_RECOVERY_ENABLED=false`，避免自动恢复其他进程留下的排队任务；未设置时保留原有恢复行为。
 
 本地 `.env.local` 显式设置 `EVALUATION_AUTOMATION_ENABLED=false`，即使 shell 里残留 `EVALUATION_TRIAL_DATE` 也不会启动调度器。生产 `shared/backend.env` 需要夜间自动化时设置 `EVALUATION_AUTOMATION_ENABLED=true`，并同步开启对应 `EVALUATION_MISSION_DAILY_ENABLED`、`EVALUATION_DAILY_REPORT_ENABLED` 等开关。该总开关不改变手工创建运行、手工生成报告或队列恢复的独立写开关。
 
@@ -50,6 +62,10 @@
 
 独立进程，提供登录、题库及受开关控制的单题测评接口。主服务 Mission_ScienceMaterial 和文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）、新材料（1115）五类下游服务已接入独立运行与评分；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
 
+## 接口文档预览
+
+`GET /docs` 提供 Swagger UI 只读预览，`GET /openapi.yaml` 返回 OpenAPI 3.0 规范；两者是免登录的静态文件，不涉及数据与凭据，页面内仅开放 GET 试调。规范源文件为 `docs/openapi.yaml`，随代码一起维护并提交：部署包由 `git archive` 生成，未提交的规范不会随发布上服务器。Swagger 静态资源来自 `swagger-ui-dist` 依赖，按白名单只读提供，不接受其他路径。生产经反向代理访问时需把 `/docs` 与 `/openapi.yaml` 一并转发到本进程；规范与实现不一致时以代码为准。测试：`node --test test/api-docs.test.js`。
+
 ## 架构与当前状态
 
 ```text
@@ -68,6 +84,8 @@
 需要 Node.js 22。通过部署环境提供至少 32 字节的 `EVALUATION_SERVICE_TOKEN`，以及模型的 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`）。默认监听 `127.0.0.1:7714`，可使用 `EVALUATION_HOST` 和 `PORT` 配置。不要把令牌或模型密钥提交到仓库。
 
 启动：`npm start`；隔离测试：`npm test`。启动时可从 Git 忽略的 `.env.local` 读取本地环境变量，已有进程环境变量优先。Mission 每日计划和测试机器人通知默认关闭，需显式配置；本进程不自动运行数据库迁移。
+
+本地开发可用 `npm run dev`：启动器保留现有 SSH 隧道，并使用 Node.js 22 的监听模式在已加载的后端源码变化时重启服务；不用安装 nodemon。自动重启会中断进行中的请求、测评或评分，远端任务不一定随之停止，请勿用于生产和正在运行的重要任务。修改 `.env.local` 或启动脚本后仍需手动重启开发进程，运行配置及写入开关由现有环境决定。
 
 `GET /health` 返回存活状态。`POST /api/admin/team-services/evaluations/question-bank/generate` 需服务端 Bearer 令牌，接收 `{ "serviceKey": "alloy", "topic": "合金性能", "count": 2 }`，返回 `{ "items": [{ "serviceKey": "alloy", "question": "..." }], "model": "..." }`，错误格式为 `{ "error": { "code": "...", "message": "..." } }`。该接口只返回候选，不写数据库。浏览器不得直接使用该令牌：管理端代理必须先验证用户身份及 `team-services:write` 权限。当前代理尚未切换。
 
@@ -175,6 +193,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 - `POST /api/evaluation/unified/runs`沿用原请求与幂等契约，创建执行后自动评分；GET详情或SSE获取结果。
 - `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：只对保存的完整执行结果重评，202返回`{runId,attemptId,reused}`，不调用被测服务。同轮进行中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
 - `GET /api/evaluation/unified/runs/:id`含`canRescore`，只表示当前权限/开关/快照允许，最终POST仍校验。重启后未过期评分只返回快照；过期pending在响应中标失败供显式重评，不回写原记录、不偷偷续跑。
+- `POST /api/evaluation/unified/runs/:id/rerun` 以空对象和 `Idempotency-Key` 重新测评已结束的人工记录，需要读写权限、同源和运行写入开关。事务内创建同题、同服务及原规则快照的新运行，并清除旧记录的回答、结构化输出、成果索引、评分及错误内容；保留原记录题目、时间与新运行入口。旧记录不再允许重评、旧结果回写或成果预览；外部被测服务实际文件不在此接口删除范围。自动批次、执行/评分中和原服务地址变化时拒绝，失败回滚；同键恢复同一新运行，原记录只允许清理一次。详情通过 `canRerun` 表示入口可用性，最终 POST 仍须校验。隔离数据库测试：`EVALUATION_RERUN_TEST_PG_SOCKET=/tmp/evaluation-rerun-pg.XXXXXX node --test test/rerun-postgres.test.js`，仅专用临时实例端口 55484。
 - `GET /api/evaluation/unified/runs`含两模型轻量分数/状态摘要，不返回完整评语。
 - `GET /api/evaluation/unified/question-scores?items=<JSON>`，最多50个`{id,datasetVersion}`，返回同题同版本、各服务最近一次运行的`runId/serviceKey/scores`摘要。题库修改版本后不沿用旧分。
 
@@ -222,6 +241,8 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 ## Mission_ScienceMaterial 主服务与每日测评
 
 通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、当前题面 `idea` 和 `has_context=false`，不发送上游路由 `type` 或历史上下文。正文立即转发；JSON 按返回的 `type` 分流。Mission 必须等连接正常关闭（1000/1001）并排空已收到的消息后才完成，子步骤、总结结束帧或正文中的 `[end]` 不单独结束整轮。需求确认自动 `continue`，普通补充输入及新版 `display.followup_request` 追问按 XIMUALPHA 自动确认默认回复“无”并标记自动答复；新版审批请求不会自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复，不自动重发请求。进度只记录服务实际发出的消息和明确阶段事件，不推断调用了哪个下游团队或虚构阶段耗时。
+
+执行超时默认 60 分钟，可用 `EVALUATION_MISSION_TIMEOUT_MS` 调整（整数毫秒，允许 1 分钟至 24 小时，启动时校验，非法值拒绝启动）。超时保存失败状态与已有输出并停止等待；超时不中断也不代表远端任务已停止。文献等下游服务的执行超时仍为各服务固定值，不受此开关影响。
 
 方案确认沿用 XIMUALPHA-NEXT 的协议：`stack_planner_prompt_request` 的回复以 `request_id` 为 `taskid`，线性模式只回传 `confirm`（及显式键合方式），周期模式选择服务推荐方案和合法周期层数；非法默认值明确失败。`equations_request` 按自动确认回传 `formulaKey` 与空的人工选择集合，不编造公式；`temporarily_suspend_request` 回传继续动作。未知交互请求保存后立即报告缺项，不静默等待整轮超时。自动决定可在页面查看。
 

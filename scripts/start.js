@@ -43,7 +43,9 @@ async function main() {
     }
     if (!ready || stopping) { stop(); throw new Error('数据库隧道未就绪'); }
   }
-  backend = spawn(process.execPath, [path.join(__dirname, '../src/server.js')], { stdio: 'inherit', env: process.env });
+  const watch = process.argv.includes('--watch');
+  const args = [...(watch ? ['--watch', '--watch-preserve-output'] : []), path.join(__dirname, '../src/server.js')];
+  backend = spawn(process.execPath, args, { stdio: 'inherit', env: process.env });
   backend.once('error', () => { console.error('评测后端启动失败'); stop(); process.exitCode = 1; });
   backend.once('exit', code => { if (!stopping && code) process.exitCode = code; stop(); });
 }

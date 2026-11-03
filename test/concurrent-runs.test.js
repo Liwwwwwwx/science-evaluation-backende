@@ -26,6 +26,55 @@ function fixture() {
   return { rows, pending, repository, evaluators, service: createUnifiedEvaluationService({ repository, evaluators, maxActive: 6, maxPerService: 5 }) };
 }
 
+test('结束排队任务立即腾出等待队列且不会派发该任务', async () => {
+  const { repository, evaluators, pending } = fixture();
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 1, maxPerService: 1, maxQueued: 1 });
+  const create = n => service.createRun({ serviceKey: 'literature', question: `排队取消测试问题编号 ${n}` }, { scope: 'user', key: `cancel-${n}` });
+  const first = await create(1);
+  const cancelled = await create(2);
+  await assert.rejects(create(3), { code: 'UNIFIED_EVAL_BUSY' });
+  await service.end(cancelled.runId, { scope: 'user' });
+  const replacement = await create(3);
+  assert.equal((await service.get(cancelled.runId)).status, 'cancelled');
+  assert.equal((await service.get(replacement.runId)).status, 'queued');
+  pending.get((await service.get(first.runId)).question)({ status: 'done' });
+  await tick();
+  assert.equal(pending.has('排队取消测试问题编号 2'), false);
+  assert.equal((await service.get(replacement.runId)).status, 'running');
+  pending.get((await service.get(replacement.runId)).question)({ status: 'done' });
+  await tick();
+});
+
+test('结束已获槽位但仍在抢占记录的任务后，其他任务可以启动', async () => {
+  const { repository, evaluators, pending } = fixture();
+  let resumeClaim;
+  let claimStarted;
+  const claiming = new Promise(resolve => { claimStarted = resolve; });
+  repository.claimQueued = async job => {
+    if (job.question.endsWith('2')) {
+      claimStarted();
+      await new Promise(resolve => { resumeClaim = resolve; });
+    }
+    return true;
+  };
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 1, maxPerService: 1, maxQueued: 2 });
+  const create = n => service.createRun({ serviceKey: 'literature', question: `派发取消测试问题编号 ${n}` }, { scope: 'user', key: `claim-cancel-${n}` });
+  const first = await create(1);
+  const second = await create(2);
+  const third = await create(3);
+  pending.get((await service.get(first.runId)).question)({ status: 'done' });
+  await claiming;
+  await service.end(second.runId, { scope: 'user' });
+  await tick();
+  assert.equal((await service.get(third.runId)).status, 'running');
+  resumeClaim();
+  await tick();
+  assert.equal(pending.has('派发取消测试问题编号 2'), false);
+  assert.equal((await service.get(second.runId)).status, 'cancelled');
+  pending.get((await service.get(third.runId)).question)({ status: 'done' });
+  await tick();
+});
+
 test('统一运行可将航空服务限制为单并发，同时允许其他服务运行', async () => {
   const { repository, evaluators, pending } = fixture();
   evaluators['literature-aircraft'] = evaluators.literature;

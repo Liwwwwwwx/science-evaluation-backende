@@ -1,0 +1,3280 @@
+openapi: 3.0.3
+info:
+  title: Science 测评后端 API
+  version: 1.0.0
+  description: |
+    独立 Science 测评后端（默认监听 `127.0.0.1:7714`，Node.js 22）。
+
+    通用约定：
+
+    - 除 `/health` 与产物代理外，所有 JSON 响应均为 `application/json; charset=utf-8`，且带 `Cache-Control: no-store`。
+    - 错误统一为 `{"error":{"code":"...","message":"..."}}`；code 为稳定错误码，message 为中文可展示文案。
+    - 登录会话使用 HttpOnly Cookie `evaluation_session`（SameSite=Lax；HTTPS 下附加 Secure）。
+      每次请求都会重新校验密码哈希状态、token_version 与当前权限。
+    - 需要 `team-services:read` 的接口用于查看，需要 `team-services:write` 的接口用于写入；
+      两权限任一即可通过基础认证，具体接口另行标注。
+    - 所有写请求（POST/PUT/DELETE，除登录与令牌接口）校验 `Origin` 必须等于部署配置的
+      `EVALUATION_PUBLIC_ORIGIN`，且 `Sec-Fetch-Site` 不得为 `cross-site`。
+    - 请求体必须是 JSON 对象（`Content-Type: application/json`），超限返回 413 `REQUEST_TOO_LARGE`，
+      非法 JSON 返回 400 `INVALID_JSON`，类型不符返回 415 `INVALID_CONTENT_TYPE`。
+    - 多数写入功能由环境开关控制（题库写入、运行写入、规则写入、报告写入等），开关未开启时
+      返回 503 及对应 `*_DISABLED` / `*_UNAVAILABLE` 错误码。
+    - 模型评分均为参考分，不构成独立事实核验；接口不静默截断输入，超限直接拒绝。
+
+    本文件由 `src/app.js` 及各 handler 模块的实际实现整理而成；行为描述另见仓库根 `README.md`。
+servers:
+  - url: http://127.0.0.1:7714
+    description: 本地默认监听地址
+  - url: https://{public-origin}
+    description: 部署环境（EVALUATION_PUBLIC_ORIGIN，经 HTTPS 同源反向代理）
+    variables:
+      public-origin:
+        default: evaluation.example.com
+
+tags:
+  - name: 健康
+  - name: 认证
+  - name: 题库
+  - name: 题目生成
+  - name: 评判标准
+  - name: 直接评分
+  - name: 评分规则
+  - name: 统一运行
+  - name: 测评批次
+  - name: 每日报告
+
+security:
+  - SessionCookie: []
+
+paths:
+  /health:
+    get:
+      tags: [健康]
+      summary: 存活状态
+      description: 不需要鉴权。
+      security: []
+      responses:
+        '200':
+          description: 服务存活
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  service:
+                    type: string
+                    enum: [science-evaluation]
+
+  /api/auth/login:
+    post:
+      tags: [认证]
+      summary: 登录
+      description: |
+        成功后设置 HttpOnly Cookie `evaluation_session`：勾选记住时最长 30 天，否则为会话 Cookie、
+        服务端最长 12 小时。按连接 IP 15 分钟 30 次、按账号 15 分钟 10 次限流（单进程内存计数）。
+        开启双因素时未提供 `totpCode` 返回 401 `2FA_REQUIRED`；`totpCode` 可为 TOTP 动态码或一次性备用码。
+        `Origin` 必须与 `EVALUATION_PUBLIC_ORIGIN` 一致。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  maxLength: 100
+                password:
+                  type: string
+                  maxLength: 100
+                rememberMe:
+                  type: boolean
+                totpCode:
+                  type: string
+                  description: 双因素验证码或一次性备用码
+      responses:
+        '200':
+          description: 登录成功
+          headers:
+            Set-Cookie:
+              description: '`evaluation_session=...; HttpOnly; SameSite=Lax`（HTTPS 下含 Secure）'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, user]
+                properties:
+                  ok:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 凭据错误、需要或校验失败双因素（INVALID_CREDENTIALS / 2FA_REQUIRED / INVALID_2FA_CODE / UNAUTHORIZED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: 账号没有测评平台访问权限（FORBIDDEN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 尝试次数过多（TOO_MANY_ATTEMPTS）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/me:
+    get:
+      tags: [认证]
+      summary: 当前用户与会话
+      responses:
+        '200':
+          description: 当前登录用户
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, user]
+                properties:
+                  ok:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/auth/logout:
+    post:
+      tags: [认证]
+      summary: 退出当前会话
+      responses:
+        '200':
+          description: 已退出；同时清空会话 Cookie
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '403':
+          description: 请求来源无效（INVALID_ORIGIN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/logout-all:
+    post:
+      tags: [认证]
+      summary: 退出测评平台所有会话
+      responses:
+        '200':
+          description: 已退出该账号在测评平台的全部会话
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 请求来源无效（INVALID_ORIGIN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/access:
+    get:
+      tags: [题库]
+      summary: 当前用户题库权限
+      responses:
+        '200':
+          description: 权限列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access]
+                properties:
+                  access:
+                    type: object
+                    required: [permissions]
+                    properties:
+                      permissions:
+                        type: array
+                        items:
+                          type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/question-bank/questions:
+    get:
+      tags: [题库]
+      summary: 题目分页列表
+      description: 需要 `team-services:read`。默认仅返回 active 题目；同一题目 ID 多版本时按版本取有效一行。
+      parameters:
+        - name: service
+          in: query
+          schema: { type: string }
+          description: 按服务过滤（mission-material / alpha-rsi / alloy / literature / literature-aircraft / synthesis / new-material）
+        - name: source
+          in: query
+          schema: { type: string, enum: [fixed, random] }
+          description: 按来源过滤
+        - name: domain
+          in: query
+          schema: { type: string }
+          description: 领域 key；`unclassified` 表示未分类
+        - name: runnableFor
+          in: query
+          schema: { type: string }
+          description: 返回可被该服务执行的基础层题目（服务无关领域题 + 该服务题）
+        - name: status
+          in: query
+          schema: { type: string, enum: [active] }
+          description: 当前仅支持 active
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 500 }
+          description: 题面模糊搜索
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000000, default: 0 }
+      responses:
+        '200':
+          description: 题目分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Question'
+                  total:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 内置固定案例基线尚未登记（FIXED_CASE_BASELINE_MISSING）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/question:
+    get:
+      tags: [题库]
+      summary: 单个题目版本
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+        - name: datasetVersion
+          in: query
+          required: true
+          schema: { type: string, maxLength: 100 }
+      responses:
+        '200':
+          description: 题目详情
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question]
+                properties:
+                  question:
+                    $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 题目不存在（QUESTION_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/generate:
+    post:
+      tags: [题目生成]
+      summary: AI 生成候选题（不写库）
+      description: |
+        需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
+        用户在前端确认后另行调用 `random-save` / `import` 保存。
+        服务维度的 `serviceKey + focus=custom 时必填 topic` 与领域维度的 `domainKey` 二选一。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: 候选题列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          description: 生成失败或模型未返回有效题目（QUESTION_GENERATION_FAILED / QUESTION_GENERATION_EMPTY）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 出题模型未配置（QUESTION_GENERATION_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/team-services/evaluations/question-bank/generate:
+    post:
+      tags: [题目生成]
+      summary: AI 生成候选题（服务端令牌预览接口）
+      description: |
+        仅限可信服务端调用：`Authorization: Bearer <EVALUATION_SERVICE_TOKEN>`（至少 32 字节）。
+        浏览器不得直接使用该令牌；管理端代理必须先验证用户身份与 `team-services:write` 再转发。
+        请求/响应结构与 `/api/question-bank/generate` 相同，只返回候选、不写库。
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: 候选题列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: 生成失败（QUESTION_GENERATION_FAILED / QUESTION_GENERATION_EMPTY）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 出题模型未配置（QUESTION_GENERATION_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/import:
+    post:
+      tags: [题库]
+      summary: 导入固定题
+      description: 需要 `team-services:write`、同源校验，且题库写入开关 `EVALUATION_QUESTION_BANK_WRITE_ENABLED=true`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [question]
+                    properties:
+                      serviceKey:
+                        type: string
+                        description: 服务维度导入时必填；与 domainKey 互斥
+                      domainKey:
+                        type: string
+                        description: 领域维度导入时必填；与 serviceKey 互斥
+                      question:
+                        type: string
+                        description: 题面，8–500 字符（synthesis 服务 8–200）
+      responses:
+        '201':
+          description: 已导入
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 固定案例重复（FIXED_CASE_DUPLICATE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 题库写入尚未启用（QUESTION_BANK_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/random-save:
+    post:
+      tags: [题库]
+      summary: 保存确认后的随机题
+      description: |
+        需要 `team-services:write`、同源校验、题库写入开关。同服务同指纹优先复用已有活跃随机题；
+        返回新增和复用数量。一次最多 10 道。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [question]
+                    properties:
+                      serviceKey:
+                        type: string
+                        description: 与 domainKey 互斥
+                      domainKey:
+                        type: string
+                        description: 与 serviceKey 互斥
+                      question:
+                        type: string
+      responses:
+        '200':
+          description: 保存结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, created, reused]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Question'
+                  created:
+                    type: integer
+                  reused:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 本批题目重复（RANDOM_QUESTION_DUPLICATE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 题库写入尚未启用（QUESTION_BANK_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/update:
+    put:
+      tags: [题库]
+      summary: 编辑固定题/随机题题面
+      description: |
+        需要 `team-services:write`、同源校验、题库写入开关。随机题改题面以 `gen-edit-vN` 追加版本，
+        旧版本退休且历史引用保留；仅 base 层固定题/随机题可编辑。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, datasetVersion, question]
+              properties:
+                id:
+                  type: string
+                  maxLength: 200
+                datasetVersion:
+                  type: string
+                  maxLength: 100
+                question:
+                  type: string
+                  description: 新题面
+      responses:
+        '200':
+          description: 更新后的题目版本
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question]
+                properties:
+                  question:
+                    $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 题目不存在（QUESTION_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 题目版本已停用（FIXED_CASE_VERSION_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 题库写入尚未启用（QUESTION_BANK_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/delete:
+    delete:
+      tags: [题库]
+      summary: 软删除（退休）题目
+      description: 需要 `team-services:write`、同源校验、题库写入开关。仅退休记录，历史引用保留。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, datasetVersion]
+              properties:
+                id:
+                  type: string
+                  maxLength: 200
+                datasetVersion:
+                  type: string
+                  maxLength: 100
+      responses:
+        '200':
+          description: 退休后的题目
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question]
+                properties:
+                  question:
+                    $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 题目不存在（QUESTION_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 题库写入尚未启用（QUESTION_BANK_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/question-bank/domain:
+    put:
+      tags: [题库]
+      summary: 领域纠错
+      description: |
+        需要 `team-services:write`、同源校验、题库写入开关。不更换题目 ID；
+        目标领域已有相同指纹题目时拒绝。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, datasetVersion, domainKey]
+              properties:
+                id:
+                  type: string
+                  maxLength: 200
+                datasetVersion:
+                  type: string
+                  maxLength: 100
+                domainKey:
+                  type: string
+                  description: 九个领域之一的 key
+      responses:
+        '200':
+          description: 更新后的题目
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question]
+                properties:
+                  question:
+                    $ref: '#/components/schemas/Question'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 题目不存在（QUESTION_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 目标领域已有相同题目（FIXED_CASE_DUPLICATE / RANDOM_QUESTION_DUPLICATE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 题库写入尚未启用（QUESTION_BANK_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/standards:
+    post:
+      tags: [评判标准]
+      summary: 生成评判标准
+      description: |
+        支持两种鉴权：服务端 `Authorization: Bearer <EVALUATION_SERVICE_TOKEN>`，或登录会话 +
+        `team-services:write` + 同源校验。仅根据题面生成明确要求、评判项与待补充信息；
+        不保存数据、不修改题库或评分规则、不联网查证。每条要求和必需项都必须引用输入原文。
+      security:
+        - ServiceToken: []
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  minLength: 8
+                  maxLength: 4000
+                  description: 问题原文
+      responses:
+        '200':
+          description: 生成的评判标准
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardsDocument'
+        '400':
+          description: 题目长度无效（STANDARDS_INVALID / INVALID_JSON）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          description: 生成失败或结果格式无效（STANDARDS_GENERATION_FAILED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 标准生成模型未配置（STANDARDS_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/question-standards:
+    get:
+      tags: [评判标准]
+      summary: 读取题目已保存的评判标准
+      description: 需要 `team-services:read`。按题目 ID 和数据集版本隔离，最多返回 100 条。
+      parameters:
+        - name: questionId
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+        - name: datasetVersion
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: 标准列表（确认版在前，其余按创建时间倒序）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SavedStandard'
+        '400':
+          description: 题目版本参数无效（INVALID_QUESTION）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 标准存储尚未配置或未迁移（STANDARDS_UNAVAILABLE / STANDARDS_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [评判标准]
+      summary: 保存单题标准草稿
+      description: |
+        需要 `team-services:write`、同源校验、题库写入开关。会重新核对题库中该题目版本的题面；
+        题面不一致或已停用时返回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [questionId, datasetVersion, question, content]
+              properties:
+                questionId:
+                  type: string
+                  maxLength: 200
+                datasetVersion:
+                  type: string
+                  maxLength: 200
+                question:
+                  type: string
+                  description: 当前题面（须与题库一致）
+                content:
+                  $ref: '#/components/schemas/StandardsContent'
+                model:
+                  type: string
+                  maxLength: 120
+                  description: 生成该标准所用模型（可选）
+      responses:
+        '200':
+          description: 已保存为草稿
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, state]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  state:
+                    type: string
+                    enum: [draft]
+        '400':
+          description: 参数或标准格式无效（INVALID_QUESTION / INVALID_STANDARDS）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 题目已停用或题面已变化（QUESTION_CHANGED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 标准保存未启用或存储未迁移（STANDARDS_WRITE_DISABLED / STANDARDS_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/question-standards/{id}/confirm:
+    post:
+      tags: [评判标准]
+      summary: 确认标准版本
+      description: |
+        需要 `team-services:write`、同源校验、题库写入开关。确认新版本后旧的确认版转为
+        superseded 并保留为历史；重复确认同一版本为幂等成功。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 确认结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, state]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  state:
+                    type: string
+                    enum: [confirmed]
+        '400':
+          description: 标准标识无效（INVALID_STANDARD）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 标准不存在（STANDARD_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 状态已变化或题目已变化（STANDARD_CHANGED / QUESTION_CHANGED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 标准存储未启用/未迁移（STANDARDS_WRITE_DISABLED / STANDARDS_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/direct-score:
+    post:
+      tags: [直接评分]
+      summary: 对已有输出直接评分
+      description: |
+        鉴权两种模式：受信服务端用 Bearer 服务令牌（EVALUATION_SERVICE_TOKEN）直连，
+        无需会话与同源校验，浏览器不得使用令牌；网页调用用登录会话 +
+        `team-services:write` 与同源校验，选用题库关联标准还需 `team-services:read`。
+        仅调用配置的 DeepSeek 与千问评委，不调用被测服务，也不创建运行或保存结果；
+        结果只在当前页面保留。每个评委独立返回，未配置/失败/超时分开标识，不取平均。
+        输入中的常见凭据信息会在发送前脱敏，脱敏时返回 `redacted=true`。
+        进程内最多 4 个并发直接评分；每个登录用户及所有服务令牌调用分别限每 15 分钟 20 次，
+        超出返回 429。各实例的限额不共享，进程重启后重置。
+      security:
+        - ServiceToken: []
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question, answer, standard]
+              properties:
+                question:
+                  type: string
+                  minLength: 8
+                  maxLength: 4000
+                answer:
+                  type: string
+                  maxLength: 60000
+                standard:
+                  oneOf:
+                    - type: object
+                      required: [type, text]
+                      properties:
+                        type:
+                          type: string
+                          enum: [text]
+                        text:
+                          type: string
+                          maxLength: 20000
+                          description: 手写评分标准文本
+                    - type: object
+                      required: [type, id, questionId, datasetVersion]
+                      properties:
+                        type:
+                          type: string
+                          enum: [saved]
+                        id:
+                          type: string
+                          format: uuid
+                          description: 已保存标准的 ID
+                        questionId:
+                          type: string
+                        datasetVersion:
+                          type: string
+                          description: 服务端会按题目 ID、版本及题面重新核对
+      responses:
+        '200':
+          description: 双评委评分结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectScoreResponse'
+        '400':
+          description: 输入或标准无效（DIRECT_SCORE_INPUT_INVALID / INVALID_STANDARD）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 所选标准不存在（STANDARD_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 题目已变化或停用（QUESTION_CHANGED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 评分繁忙或调用次数超限（DIRECT_SCORE_BUSY / DIRECT_SCORE_RATE_LIMITED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 评分模型未配置或存储未就绪（DIRECT_SCORE_UNAVAILABLE / STANDARDS_UNAVAILABLE / STANDARDS_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/rules:
+    get:
+      tags: [评分规则]
+      summary: 规则目录与生效版
+      description: 需要 `team-services:read`。未迁移时只读返回内置规则并标记 `storageReady=false`。
+      responses:
+        '200':
+          description: 规则目录（最近 50 版）、生效版、内置模板、操作记录与规则文档
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, active, template, stateRevision, storageReady, canWrite, events, document]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RuleRecord'
+                  active:
+                    $ref: '#/components/schemas/RuleSnapshot'
+                  template:
+                    $ref: '#/components/schemas/RuleSnapshot'
+                  stateRevision:
+                    type: integer
+                  storageReady:
+                    type: boolean
+                  canWrite:
+                    type: boolean
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ruleId:
+                          type: string
+                          format: uuid
+                        action:
+                          type: string
+                        actor:
+                          type: string
+                        revision:
+                          type: integer
+                        createdAt:
+                          type: string
+                          format: date-time
+                  document:
+                    type: string
+                    description: 当前生效规则的 Markdown 说明
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 规则服务/存储未配置（RULES_UNAVAILABLE / 规则存储尚未迁移）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [评分规则]
+      summary: 创建规则草稿
+      description: |
+        需要 `team-services:write`、同源校验、规则写入开关 `EVALUATION_RULES_WRITE_ENABLED=true`。
+        `Idempotency-Key` 必须为 UUID；同创建键同请求恢复原记录，冲突返回 409。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, config]
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                changeNote:
+                  type: string
+                  maxLength: 1000
+                config:
+                  $ref: '#/components/schemas/RuleConfig'
+      responses:
+        '201':
+          description: 已创建草稿
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    $ref: '#/components/schemas/RuleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 幂等键冲突或规则冲突（RULE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 规则写入未启用/存储未配置（RULE_WRITE_DISABLED / RULES_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/rules/{id}/save:
+    post:
+      tags: [评分规则]
+      summary: 保存草稿修改
+      description: 仅草稿可编辑；revision 过期返回 409 并保留客户端输入。
+      parameters:
+        - $ref: '#/components/parameters/RuleId'
+        - $ref: '#/components/parameters/IdempotencyKeyUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, name, config]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+                name:
+                  type: string
+                  maxLength: 100
+                changeNote:
+                  type: string
+                  maxLength: 1000
+                config:
+                  $ref: '#/components/schemas/RuleConfig'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    $ref: '#/components/schemas/RuleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: revision 冲突（RULE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 规则写入未启用（RULE_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/rules/{id}/publish:
+    post:
+      tags: [评分规则]
+      summary: 发布规则版本
+      description: 需已保存变更说明；发布后版本内容固定。
+      parameters:
+        - $ref: '#/components/parameters/RuleId'
+        - $ref: '#/components/parameters/IdempotencyKeyUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: 已发布
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    $ref: '#/components/schemas/RuleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 状态冲突（RULE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 规则写入未启用（RULE_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/rules/{id}/activate:
+    post:
+      tags: [评分规则]
+      summary: 切换生效版本
+      description: 仅已发布版可生效；并发切换会检查生效指针版本（stateRevision）。
+      parameters:
+        - $ref: '#/components/parameters/RuleId'
+        - $ref: '#/components/parameters/IdempotencyKeyUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, stateRevision]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+                stateRevision:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: 已生效
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    $ref: '#/components/schemas/RuleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 生效指针已变化（RULE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 规则写入未启用（RULE_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/rules/{id}/archive:
+    post:
+      tags: [评分规则]
+      summary: 归档规则
+      description: 生效版禁止归档，历史保留。
+      parameters:
+        - $ref: '#/components/parameters/RuleId'
+        - $ref: '#/components/parameters/IdempotencyKeyUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: 已归档
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item:
+                    $ref: '#/components/schemas/RuleRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 生效版禁止归档（RULE_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 规则写入未启用（RULE_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/services:
+    get:
+      tags: [统一运行]
+      summary: 可用测评服务
+      description: 需要 `team-services:read`。`enabled` 表示适配器已配置、具备写权限且写入已启用；可用状态不代表实时探活成功。
+      responses:
+        '200':
+          description: 主服务与五类下游服务列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, label, enabled, scoring]
+                      properties:
+                        key:
+                          type: string
+                          enum: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material]
+                        label:
+                          type: string
+                        enabled:
+                          type: boolean
+                        scoring:
+                          type: string
+                          enum: [independent, absent]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/evaluation/unified/mission-daily:
+    get:
+      tags: [统一运行]
+      summary: Mission 每日计划状态
+      description: 需要 `team-services:read`。计划状态不等于健康探活。
+      responses:
+        '200':
+          description: 调度配置与最近一次计划
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, ready, time, timeZone, targetCount, last]
+                properties:
+                  enabled:
+                    type: boolean
+                  ready:
+                    type: boolean
+                  time:
+                    type: string
+                    description: 每日触发时间（北京时间）
+                  timeZone:
+                    type: string
+                  targetCount:
+                    type: integer
+                  last:
+                    type: object
+                    nullable: true
+                    properties:
+                      date:
+                        type: string
+                        format: date
+                      id:
+                        type: string
+                        format: uuid
+                      state:
+                        type: string
+                      reason:
+                        type: string
+                        nullable: true
+                      count:
+                        type: integer
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          description: 计划题目及对应运行状态（runId/status/scores）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 每日测评状态尚未配置（MISSION_DAILY_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/history:
+    get:
+      tags: [统一运行]
+      summary: 读取当前账号的近期对话
+      description: 需要 team-services:read；只返回最近 50 条未被当前用户移除的人工运行。存储未迁移时返回原始历史且 storageReady 和 canManage 为 false。
+      responses:
+        '200':
+          description: 最近对话、存储状态及管理权限
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/evaluation/unified/history/{runId}:
+    post:
+      tags: [统一运行]
+      summary: 重命名或从当前账号的侧栏移除对话
+      description: 需要读写权限、同源和运行写开关。只修改当前用户的侧栏状态，不修改原始运行或统计。
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [rename, remove]
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                  description: rename 时必填，remove 时不得提供。
+      responses:
+        '200':
+          description: 更新成功
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 人工运行不存在或已从侧栏移除
+        '503':
+          description: 写入未启用或对话管理存储未迁移
+
+  /api/evaluation/unified/question-scores:
+    get:
+      tags: [统一运行]
+      summary: 按题目查询各服务最近评分
+      description: 需要 `team-services:read`。题库修改版本后不沿用旧分。
+      parameters:
+        - name: items
+          in: query
+          required: true
+          description: URL 编码的 JSON 数组，最多 50 个 `{"id":"...","datasetVersion":"..."}`
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 每题每服务最近一次运行的评分摘要
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        runId:
+                          type: string
+                          format: uuid
+                        questionId:
+                          type: string
+                        datasetVersion:
+                          type: string
+                        serviceKey:
+                          type: string
+                        status:
+                          type: string
+                        startedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        scores:
+                          type: object
+                          additionalProperties: true
+                          description: 两模型轻量分数摘要（同 ScoreSummary）
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 评分记录尚未配置（SCORING_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs:
+    post:
+      tags: [统一运行]
+      summary: 创建统一运行
+      description: |
+        需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
+        以及 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。来源统一为人工运行（manual）。
+        题库来源字段（questionId/datasetVersion/sourceType）须完整，后端核验有效版本与原题。
+        成功返回 201；排队执行时也立即返回，经 SSE 或详情接口获取进度。执行完成后自动独立评分。
+        每服务最多 5 个并发、进程合计 25 个，队列上限 300，超出拒绝（429 UNIFIED_EVAL_BUSY）。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceKey, question]
+              properties:
+                serviceKey:
+                  type: string
+                  enum: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material]
+                question:
+                  type: string
+                  description: 题面；人工提问 8–500 字符（synthesis 8–200）
+                questionId:
+                  type: string
+                  description: 题库来源时必填
+                datasetVersion:
+                  type: string
+                  description: 题库来源时必填
+                sourceType:
+                  type: string
+                  enum: [fixed, random]
+                  description: 题库来源时必填
+      responses:
+        '201':
+          description: 已创建（或幂等恢复）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runId, serviceKey]
+                properties:
+                  runId:
+                    type: string
+                    format: uuid
+                  serviceKey:
+                    type: string
+                  reused:
+                    type: boolean
+                    description: 幂等键命中原请求时为 true；排队路径可能缺省
+        '400':
+          description: 服务/题目/来源/幂等键无效（UNIFIED_EVAL_* / QUESTION_SOURCE_INVALID）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 幂等键已用于不同请求（UNIFIED_EVAL_IDEMPOTENCY_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 等待队列已满（UNIFIED_EVAL_BUSY）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 运行写入未启用或存储未配置（EVALUATION_WRITE_DISABLED / UNIFIED_EVAL_IDEMPOTENCY_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      tags: [统一运行]
+      summary: 运行记录列表
+      description: 需要 `team-services:read`。沿用管理平台授权用户共享查看范围。
+      parameters:
+        - name: origin
+          in: query
+          schema: { type: string, enum: [manual, automation, legacy] }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: 题面或运行 ID 模糊搜索
+        - name: domain
+          in: query
+          schema: { type: string }
+          description: 领域 key 或 `unclassified`
+        - name: questionId
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: datasetVersion
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+          description: 按北京时间过滤开始日期（含）
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 运行分页（含两模型轻量分数摘要与 canRescore）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, page, pageSize]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunListItem'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 统一运行记录尚未配置（UNIFIED_EVAL_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/{runId}:
+    get:
+      tags: [统一运行]
+      summary: 运行详情
+      description: |
+        返回回答、题目版本快照、结构化结果与独立评分。非本进程的运行只返回已保存快照
+        （`recoveryState=snapshot_only`），不自动重跑。`canRescore` 只表示当前权限/开关/快照允许重评。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: 运行快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunDetail'
+        '400':
+          description: 运行 ID 无效（INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 运行不存在（UNIFIED_EVAL_RUN_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/{runId}/events:
+    get:
+      tags: [统一运行]
+      summary: 运行事件流（SSE）
+      description: |
+        `text/event-stream`：先发送 `snapshot` 事件（含 `live` 标记），随后按序发送
+        `execution` / `text` / `state` / `run` / `score` / `done` / `error` 事件。
+        客户端断线不会取消执行，可重新订阅；本进程无执行状态时只发送快照后关闭。
+        每 15 秒发送心跳注释行；慢连接缓冲上限 8MiB，超限断开。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: 事件流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: 运行 ID 无效（INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 运行不存在（UNIFIED_EVAL_RUN_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/{runId}/reply:
+    post:
+      tags: [统一运行]
+      summary: 人工答复运行中的交互请求
+      description: |
+        保留的兼容接口：仅本进程发起人可答复本人未结束的运行；重复/过期答复拒绝。
+        正常新运行的 `requirement_review_request` 已由平台自动答复，不再进入人工等待。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: 服务特定答复内容（如 checkpoint.reply）
+      responses:
+        '200':
+          description: 已答复
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  runId:
+                    type: string
+                    format: uuid
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 只能答复本人发起的运行（FORBIDDEN / INVALID_ORIGIN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 当前进程无法答复此运行（REVIEW_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 运行写入未启用（EVALUATION_WRITE_DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/{runId}/rerun:
+    post:
+      tags: [统一运行]
+      summary: 清除旧输出并重新测评
+      description: |
+        需要读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持已结束的人工运行。
+        在同一事务内清除旧记录的输出、成果索引和评分并创建新运行，沿用原题、服务与规则快照。
+        保留原记录题目、时间和新运行入口；不删除被测服务上的外部文件。同键只创建一次。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '201':
+          description: 新运行已创建或恢复，返回 runId 和 reused
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 原运行尚未结束、已重跑、服务变化或请求冲突
+        '503':
+          description: 运行写入或重新测评存储不可用
+
+  /api/evaluation/unified/runs/{runId}/score:
+    post:
+      tags: [统一运行]
+      summary: 重新评分
+      description: |
+        只对保存的完整执行结果重评，不调用被测服务。请求体必须为空对象 `{}`；
+        需要 `team-services:write`、同源校验、运行写入开关与 1–128 字符 `Idempotency-Key`。
+        同轮进行中返回 409；并发实例通过数据库轮次条件抢占；最多保留 20 轮评分历史。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: 重评已受理
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runId, attemptId, reused]
+                properties:
+                  runId:
+                    type: string
+                    format: uuid
+                  attemptId:
+                    type: string
+                    format: uuid
+                  reused:
+                    type: boolean
+        '400':
+          description: 幂等键无效或请求体非空（IDEMPOTENCY_INVALID / INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 仍在执行或评分/快照不完整/历史达到上限（SCORING_BUSY / RUN_INCOMPLETE / SCORING_HISTORY_LIMIT / SCORING_CONFLICT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 评分繁忙（SCORING_BUSY）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 评分尚未配置（SCORING_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/{runId}/artifacts/{index}:
+    get:
+      tags: [统一运行]
+      summary: 只读代理运行产物
+      description: |
+        使用现有会话与 `team-services:read`，按运行已保存的产物索引只读代理，不接受客户端 URL。
+        仅允许该运行服务的任务资产/文件路径；禁止凭据、重编码路径、重定向及 HTML/SVG 等主动内容。
+        15 秒超时、32MiB 上限，固定扩展名 MIME，附 nosniff/sandbox 响应头。
+        403/404/413/415/502 分别表达来源、缺失、大小、类型和上游错误。
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0, maximum: 999 }
+      responses:
+        '200':
+          description: 产物内容（图片/GIF/GLB/文本等白名单类型）
+          headers:
+            Content-Type:
+              schema: { type: string }
+            Content-Disposition:
+              schema: { type: string }
+            X-Content-Type-Options:
+              schema: { type: string, enum: [nosniff] }
+            Content-Security-Policy:
+              schema: { type: string }
+        '403':
+          description: 来源不允许
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 产物缺失
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: 超过 32MiB 上限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: 类型不允许
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: 上游错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/batches:
+    get:
+      tags: [测评批次]
+      summary: 批次列表
+      description: 试跑批次与 Mission 每日计划统一为批次。批次表未迁移时返回 `storageReady=false` 且列表为空。
+      parameters:
+        - name: source
+          in: query
+          schema: { type: string, enum: [all, trial, mission], default: all }
+        - name: state
+          in: query
+          schema: { type: string, enum: [preparing, dispatching, running, done, partial, failed] }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 批次分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, page, pageSize, storageReady]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BatchSummary'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+                  storageReady:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 批次读取尚未配置（BATCHES_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/batches/{batchId}:
+    get:
+      tags: [测评批次]
+      summary: 批次详情
+      description: 按服务展示计划数、汇总、低分题与失败题。批次表未迁移时返回 503。
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 批次详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchDetail'
+        '400':
+          description: 批次 ID 无效（INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: 批次存储尚未迁移（BATCH_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/batches/{batchId}/runs:
+    get:
+      tags: [测评批次]
+      summary: 批次运行列表
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: serviceKey
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [queued, running, scoring, done, error] }
+        - name: execution
+          in: query
+          schema: { type: string, enum: [completed, failed, timeout, unfinished] }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [scoreAsc, scoreDesc, startedAtAsc, startedAtDesc], default: scoreAsc }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 批次运行分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [batchId, items, total, page, pageSize]
+                properties:
+                  batchId:
+                    type: string
+                    format: uuid
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BatchRun'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: 批次存储尚未迁移（BATCH_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/batches/{batchId}/comparison:
+    get:
+      tags: [测评批次]
+      summary: 批次环比
+      description: |
+        Mission 每日计划可匹配 `question_id + dataset_version` 做逐题环比；试跑批次通常只能服务汇总环比。
+        两批次规则哈希或评分模型不同时标记不可比，不直接相减。
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: against
+          in: query
+          schema: { type: string, default: previous }
+          description: 目标批次 UUID，或 `previous`（上一同来源批次）
+      responses:
+        '200':
+          description: 环比结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [base, comparable, mode, matchedQuestions, thresholdPoints, services, questions]
+                properties:
+                  base:
+                    $ref: '#/components/schemas/BatchSummary'
+                  previous:
+                    allOf:
+                      - $ref: '#/components/schemas/BatchSummary'
+                      - nullable: true
+                  comparable:
+                    type: boolean
+                  mode:
+                    type: string
+                  reason:
+                    type: string
+                    nullable: true
+                  matchedQuestions:
+                    type: integer
+                  thresholdPoints:
+                    type: number
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  questions:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        '400':
+          description: 对比批次 ID 无效（INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: 批次存储尚未迁移（BATCH_STORAGE_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/daily-reports:
+    get:
+      tags: [每日报告]
+      summary: 每日报告列表
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 10000, default: 1 }
+          description: 每页 20 条
+      responses:
+        '200':
+          description: 报告分页与调度配置
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, enabled, preferred, configured, storageReady, canGenerate]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DailyReportListItem'
+                  total:
+                    type: integer
+                  enabled:
+                    type: boolean
+                  preferred:
+                    type: string
+                    enum: [deepseek, qwen]
+                  configured:
+                    type: boolean
+                  storageReady:
+                    type: boolean
+                  canGenerate:
+                    type: boolean
+        '400':
+          description: 页码无效（INVALID_PAGE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 每日报告尚未配置（REPORTS_UNAVAILABLE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/daily-reports/{date}:
+    get:
+      tags: [每日报告]
+      summary: 某日报告详情
+      parameters:
+        - name: date
+          in: path
+          required: true
+          schema: { type: string, format: date }
+          description: 测评日期（夜间按北京时间当日 22:00 至次日 22:00 归属）
+      responses:
+        '200':
+          description: 报告详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DailyReport'
+                  - type: object
+                    properties:
+                      canGenerate:
+                        type: boolean
+        '400':
+          description: 测评日期无效（INVALID_DATE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 尚无该日期的报告（REPORT_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 报告存储尚未迁移（REPORT_MIGRATION_REQUIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/daily-reports/{date}/markdown:
+    get:
+      tags: [每日报告]
+      summary: 下载报告 Markdown
+      parameters:
+        - name: date
+          in: path
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Markdown 附件（`daily-evaluation-<date>.md`）
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '400':
+          description: 测评日期无效（INVALID_DATE）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 尚无该日期的报告（REPORT_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 报告尚未生成完成（REPORT_NOT_READY）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 报告存储尚未迁移（REPORT_MIGRATION_REQUIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/daily-reports/{date}/generate:
+    post:
+      tags: [每日报告]
+      summary: 手动生成/重试报告
+      description: |
+        需要 `team-services:write`、同源校验、报告写开关 `EVALUATION_DAILY_REPORT_WRITE_ENABLED=true`
+        与 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。不重新发题和评分；
+        本轮任务或评分尚未结束时返回 409。
+      parameters:
+        - name: date
+          in: path
+          required: true
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: 已开始生成
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state]
+                properties:
+                  state:
+                    type: string
+                    enum: [generating]
+        '400':
+          description: 日期/幂等键/请求体无效（INVALID_DATE / INVALID_KEY / INVALID_INPUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 该日期没有已保存的自动测评记录（REPORT_NO_DATA）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: 本轮任务或评分尚未结束（REPORT_WAITING）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 报告生成未启用或存储未迁移（REPORT_WRITE_DISABLED / REPORT_MIGRATION_REQUIRED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: evaluation_session
+      description: 登录会话 Cookie（HttpOnly、SameSite=Lax；HTTPS 下含 Secure）
+    ServiceToken:
+      type: http
+      scheme: bearer
+      description: 部署环境提供的 EVALUATION_SERVICE_TOKEN（至少 32 字节），仅限可信服务端调用
+
+  parameters:
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RuleId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+      description: 1–128 个可打印 ASCII 字符（0x21–0x7e）的幂等键
+    IdempotencyKeyUuid:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+      description: 必须为 UUID 格式的幂等键
+
+  responses:
+    BadRequest:
+      description: 参数无效（INVALID_INPUT / INVALID_JSON / 各业务 400 错误码）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 未登录或会话失效（UNAUTHORIZED）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 权限不足或来源无效（FORBIDDEN / INVALID_ORIGIN）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 资源不存在（NOT_FOUND / *_NOT_FOUND）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    User:
+      type: object
+      required: [id, username, name, permissions]
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+            description: 如 team-services:read、team-services:write
+
+    Question:
+      type: object
+      required: [id, layer, sourceType, question, datasetVersion, status]
+      properties:
+        id:
+          type: string
+          description: 稳定题目 ID（固定题为 `服务:案例`，随机题为 `rnd:服务:指纹`，领域题为独立 UUID 族）
+        layer:
+          type: string
+          description: base / override 等
+        serviceKey:
+          type: string
+          nullable: true
+        domainKey:
+          type: string
+          nullable: true
+          description: 九个领域之一的 key；null 表示未分类
+        sourceType:
+          type: string
+          enum: [fixed, random]
+        question:
+          type: string
+        fingerprint:
+          type: string
+          nullable: true
+        criteria:
+          type: object
+          nullable: true
+          description: 专属评分规则（旧固定题覆盖）
+        criteriaVersion:
+          type: string
+          nullable: true
+        datasetVersion:
+          type: string
+        status:
+          type: string
+          description: active / retired 等
+        retiredReason:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    GenerateRequest:
+      type: object
+      required: [count]
+      properties:
+        serviceKey:
+          type: string
+          enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+          description: 服务维度出题（与 domainKey 互斥）；focus=custom 时必须提供 topic
+        domainKey:
+          type: string
+          description: 领域维度出题（与 serviceKey 互斥）
+        topic:
+          type: string
+          maxLength: 500
+          description: 自定义主题；focus=custom 时必填
+        focus:
+          type: string
+          enum: [general, principles, design, comparison, validation, diagnosis, custom]
+          default: general
+          description: 出题方向；general 为综合出题
+        count:
+          type: integer
+          minimum: 1
+          maximum: 10
+
+    GenerateResponse:
+      type: object
+      required: [items, model]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [question]
+            properties:
+              serviceKey:
+                type: string
+                description: 服务维度出题时返回
+              domainKey:
+                type: string
+                description: 领域维度出题时返回
+              question:
+                type: string
+        model:
+          type: string
+          nullable: true
+
+    StandardsContent:
+      type: object
+      required: [domain, taskType, explicitRequirements, evaluationCriteria, missingInformation]
+      properties:
+        domain:
+          type: string
+        taskType:
+          type: string
+        explicitRequirements:
+          type: array
+          maxItems: 15
+          items:
+            type: object
+            required: [requirement, critical, source]
+            properties:
+              requirement:
+                type: string
+                maxLength: 500
+              critical:
+                type: boolean
+              source:
+                type: string
+                maxLength: 500
+                description: 必须逐字摘自题目原文
+        evaluationCriteria:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [name, category, description, howToJudge]
+            properties:
+              name:
+                type: string
+                maxLength: 120
+              category:
+                type: string
+                enum: [required, recommended, needs_verification]
+              description:
+                type: string
+                maxLength: 600
+              howToJudge:
+                type: string
+                maxLength: 600
+              source:
+                type: string
+                maxLength: 500
+                nullable: true
+                description: required 类必须逐字摘自题目原文
+        missingInformation:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 500
+
+    StandardsDocument:
+      allOf:
+        - $ref: '#/components/schemas/StandardsContent'
+        - type: object
+          required: [verification, model]
+          properties:
+            verification:
+              type: object
+              required: [status, message]
+              properties:
+                status:
+                  type: string
+                  enum: [not_verified]
+                message:
+                  type: string
+                  description: 声明 AI 生成、未做外部核验
+            model:
+              type: string
+              nullable: true
+
+    SavedStandard:
+      type: object
+      required: [id, state, question, content]
+      properties:
+        id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [draft, confirmed, superseded]
+        question:
+          type: string
+        content:
+          $ref: '#/components/schemas/StandardsContent'
+        model:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        confirmedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    DirectScoreJudge:
+      type: object
+      required: [status, model]
+      properties:
+        status:
+          type: string
+          enum: [ready, failed, unavailable]
+        model:
+          type: string
+          nullable: true
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: status=ready 时必有，0–100 一位小数
+        summary:
+          type: string
+        criteria:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [criterion, status, reason, evidence]
+            properties:
+              id:
+                type: string
+                description: 关联标准项编号（如 C1）
+              criterion:
+                type: string
+              status:
+                type: string
+                enum: [met, partial, missing, unclear]
+              reason:
+                type: string
+              evidence:
+                type: string
+                nullable: true
+                description: 可核对的输出原文（多段以换行连接）
+              evidenceUnverified:
+                type: boolean
+                description: 依据未能在输出中核对时标记，状态降为 unclear
+              standardUnverified:
+                type: boolean
+                description: 该评价项未能与标准核对
+        suggestions:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+        attempts:
+          type: integer
+          description: 模型调用次数（1–2）
+        provisional:
+          type: boolean
+          description: 存在未核对依据、缺项等告警时为 true，分数为待复核参考分
+        evidenceWarning:
+          type: string
+          nullable: true
+        error:
+          type: string
+          description: status=failed/unavailable 时的原因说明
+
+    DirectScoreResponse:
+      type: object
+      required: [scores, redacted, note]
+      properties:
+        scores:
+          type: object
+          required: [deepSeekScore, qwenScore]
+          properties:
+            deepSeekScore:
+              $ref: '#/components/schemas/DirectScoreJudge'
+            qwenScore:
+              $ref: '#/components/schemas/DirectScoreJudge'
+        redacted:
+          type: boolean
+          description: 输入中的常见凭据信息已脱敏时为 true
+        note:
+          type: string
+          description: 模型评分仅供参考、未做独立核验的固定说明
+
+    RuleConfig:
+      type: object
+      required: [weights, passScore, markdownGate, contentInstructions, completionInstructions, experienceInstructions, efficiencyRules]
+      properties:
+        weights:
+          type: object
+          required: [readability, professionalism, visualAids]
+          properties:
+            readability:
+              type: integer
+              minimum: 0
+              maximum: 100
+            professionalism:
+              type: integer
+              minimum: 0
+              maximum: 100
+            visualAids:
+              type: integer
+              minimum: 0
+              maximum: 100
+          description: 三项整数合计须为 100，且可读性+专业性大于 0
+        passScore:
+          type: number
+          minimum: 0
+          maximum: 100
+        markdownGate:
+          type: boolean
+          description: Markdown 机检是否纳入合格门槛
+        contentInstructions:
+          type: string
+          maxLength: 6000
+        completionInstructions:
+          type: string
+          maxLength: 6000
+        experienceInstructions:
+          type: string
+          maxLength: 6000
+        efficiencyRules:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [serviceKey, phaseKey, label, warningSeconds, criticalSeconds]
+            properties:
+              serviceKey:
+                type: string
+                description: '`*` 表示通用；同阶段具体服务配置优先'
+              phaseKey:
+                type: string
+              label:
+                type: string
+                maxLength: 80
+              warningSeconds:
+                type: integer
+                minimum: 1
+              criticalSeconds:
+                type: integer
+                maximum: 86400
+                description: 须大于 warningSeconds 且不超过 86400
+
+    RuleSnapshot:
+      type: object
+      required: [id, version, name, hash, config]
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        name:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        hash:
+          type: string
+          description: 规则配置哈希
+        config:
+          $ref: '#/components/schemas/RuleConfig'
+
+    RuleRecord:
+      type: object
+      required: [id, version, revision, name, status, config]
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          description: 规则版本号（内置规则为 0）
+        revision:
+          type: integer
+          description: 草稿修订号，用于乐观并发控制
+        name:
+          type: string
+        status:
+          type: string
+          description: draft / published / archived
+        config:
+          $ref: '#/components/schemas/RuleConfig'
+        changeNote:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          nullable: true
+        updatedBy:
+          type: string
+          nullable: true
+        publishedBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ScoreSummary:
+      type: object
+      description: 列表/摘要中的单评委轻量分数
+      properties:
+        status:
+          type: string
+          description: pending / ready / provisional / failed / unavailable / absent / skipped 等
+        model:
+          type: string
+          nullable: true
+        total:
+          type: number
+          nullable: true
+          description: 0–100 总分（quality.total）
+        taskStatus:
+          type: string
+          nullable: true
+          description: 交付完成状态
+        provisional:
+          type: boolean
+          description: 评分输入被截断时为 true
+
+    RunListItem:
+      type: object
+      required: [runId, serviceKey, status, startedAt]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        serviceKey:
+          type: string
+        origin:
+          type: string
+          enum: [manual, automation, legacy]
+        question:
+          type: string
+        questionId:
+          type: string
+          nullable: true
+        datasetVersion:
+          type: string
+          nullable: true
+        questionSourceType:
+          type: string
+          nullable: true
+        batchId:
+          type: string
+          nullable: true
+        domainKey:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [queued, running, scoring, done, error]
+        answer:
+          type: string
+          description: 列表通常为空串，详情接口返回完整回答
+        answerTruncated:
+          type: boolean
+        scores:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ScoreSummary'
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        canRescore:
+          type: boolean
+        canRerun:
+          type: boolean
+
+    RunDetail:
+      allOf:
+        - $ref: '#/components/schemas/RunListItem'
+        - type: object
+          properties:
+            nativeRunId:
+              type: string
+              nullable: true
+              description: 被测服务的原生任务 ID
+            run:
+              type: object
+              nullable: true
+              description: |
+                原生执行快照：details（结构化状态/协议帧）、status、verdict、checks、markdownSyntax、
+                scoring（评分轮次/租约/历史）、ruleSnapshot（创建时固化的规则快照）、serviceAddress、
+                elapsedMs、error 等；字段随服务适配器而异。
+            scores:
+              type: object
+              nullable: true
+              description: 完整独立评分（含评语、亮点、不足、逐要求证据），按 deepSeekScore/qwenScore 键
+            scoreError:
+              type: string
+              nullable: true
+            persistenceError:
+              type: boolean
+            error:
+              type: string
+              nullable: true
+            canReply:
+              type: boolean
+            canRescore:
+              type: boolean
+            recoveryState:
+              type: string
+              enum: [snapshot_only]
+              description: 非本进程运行仅返回已保存快照
+            executionStatus:
+              type: string
+              enum: [queued, running, succeeded, failed]
+            scoringStatus:
+              type: string
+              description: pending / running / ready / partial / failed / unavailable / absent / unknown
+
+    BatchTotals:
+      type: object
+      properties:
+        planned:
+          type: integer
+        total:
+          type: integer
+        completed:
+          type: integer
+        failed:
+          type: integer
+        timeout:
+          type: integer
+        unfinished:
+          type: integer
+        queued:
+          type: integer
+        running:
+          type: integer
+        scoring:
+          type: integer
+
+    JudgeSummary:
+      type: object
+      properties:
+        mean:
+          type: number
+          nullable: true
+          description: 可用分数均分（一位小数）；无样本为 null
+        count:
+          type: integer
+        ready:
+          type: integer
+        provisional:
+          type: integer
+        pending:
+          type: integer
+        failed:
+          type: integer
+        unavailable:
+          type: integer
+        absent:
+          type: integer
+        invalid:
+          type: integer
+        model:
+          type: string
+          nullable: true
+
+    BatchSummary:
+      type: object
+      required: [batchId, date, source, state, planned]
+      properties:
+        batchId:
+          type: string
+          format: uuid
+        date:
+          type: string
+          format: date
+          nullable: true
+        source:
+          type: string
+          enum: [trial, mission]
+        state:
+          type: string
+          enum: [preparing, dispatching, running, done, partial, failed]
+        rawState:
+          type: string
+        planned:
+          type: integer
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              label:
+                type: string
+              expected:
+                type: integer
+        totals:
+          $ref: '#/components/schemas/BatchTotals'
+        scores:
+          type: object
+          properties:
+            deepSeek:
+              $ref: '#/components/schemas/JudgeSummary'
+            qwen:
+              $ref: '#/components/schemas/JudgeSummary'
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    BatchRun:
+      type: object
+      required: [runId, question, serviceKey, status, execution]
+      properties:
+        runId:
+          type: string
+          format: uuid
+        questionId:
+          type: string
+          nullable: true
+        datasetVersion:
+          type: string
+          nullable: true
+        question:
+          type: string
+        serviceKey:
+          type: string
+        status:
+          type: string
+        execution:
+          type: string
+          enum: [completed, failed, timeout, unfinished]
+        scores:
+          type: object
+          properties:
+            deepSeek:
+              type: number
+              nullable: true
+            qwen:
+              type: number
+              nullable: true
+        error:
+          type: string
+          nullable: true
+        startedAt:
+          type: string
+        elapsedMs:
+          type: integer
+          nullable: true
+
+    BatchDetail:
+      allOf:
+        - $ref: '#/components/schemas/BatchSummary'
+        - type: object
+          required: [services]
+          properties:
+            services:
+              type: array
+              description: 按服务展开的详情
+              items:
+                type: object
+                properties:
+                  serviceKey:
+                    type: string
+                  label:
+                    type: string
+                  expected:
+                    type: integer
+                  totals:
+                    $ref: '#/components/schemas/BatchTotals'
+                  scores:
+                    type: object
+                    properties:
+                      deepSeek:
+                        $ref: '#/components/schemas/JudgeSummary'
+                      qwen:
+                        $ref: '#/components/schemas/JudgeSummary'
+                  maxElapsedMs:
+                    type: integer
+                    nullable: true
+                  lowScores:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BatchRun'
+                  failures:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BatchRun'
+
+    DailyReportListItem:
+      type: object
+      required: [date, status]
+      properties:
+        date:
+          type: string
+          format: date
+        status:
+          type: string
+          description: generating / ready / failed
+        analysisState:
+          type: string
+          nullable: true
+          description: ready / failed / unavailable
+        provider:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        total:
+          type: integer
+        completed:
+          type: integer
+        unfinished:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+        notificationState:
+          type: string
+          nullable: true
+          description: sent / sending / unknown / failed / null
+
+    DailyReport:
+      type: object
+      required: [date, status]
+      properties:
+        date:
+          type: string
+          format: date
+        sourceHash:
+          type: string
+          nullable: true
+        status:
+          type: string
+        analysisState:
+          type: string
+          nullable: true
+        provider:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        snapshot:
+          type: object
+          nullable: true
+          description: 程序计算的统计快照（数量、完成/失败/超时、各服务均分等）
+        analysis:
+          type: object
+          nullable: true
+          description: 模型生成的跨服务案例总结（overview/issues/highlights/recommendations）
+        markdown:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        notificationState:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+        leaseUntil:
+          type: string
+          format: date-time
+          nullable: true

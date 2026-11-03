@@ -24,6 +24,31 @@ jobs:
           node-version: '22'
       - run: npm ci --no-audit --no-fund
       - run: node --test --test-concurrency=1 test/*.test.js
+      - name: Verify rerun transactions with isolated PostgreSQL
+        run: |
+          set -eu
+          socket_dir=$(mktemp -d /tmp/evaluation-rerun-pg.XXXXXX)
+          chmod 777 "$socket_dir"
+          trap 'docker rm -f evaluation-rerun-test >/dev/null 2>&1 || true' EXIT
+          docker run --rm -d --name evaluation-rerun-test \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -v "$socket_dir:/var/run/postgresql" postgres:16 \
+            postgres -p 55484 -c listen_addresses=''
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker logs evaluation-rerun-test 2>&1 | grep -q 'PostgreSQL init process complete' && \
+              docker exec evaluation-rerun-test pg_isready -h /var/run/postgresql -p 55484 -U postgres >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            docker logs evaluation-rerun-test
+            exit 1
+          fi
+          docker exec evaluation-rerun-test createdb -h /var/run/postgresql -p 55484 -U postgres science_admin
+          PGUSER=postgres EVALUATION_RERUN_TEST_PG_SOCKET="$socket_dir" node --test test/rerun-postgres.test.js
       - run: bash -n ops/deploy.sh
       - name: Package release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

@@ -1,3 +1,4 @@
+const { TeamServiceError } = require('../errors');
 function scoreSummary(scores) {
   return Object.fromEntries(Object.entries(scores || {}).filter(([key]) => ['deepSeekScore','qwenScore','quality'].includes(key)).map(([key, value]) => [key, { status: value?.status, model: value?.model, total: value?.quality?.total ?? null, taskStatus: value?.quality?.taskCompletion?.status || null, provisional: value?.quality?.source?.truncated === true }]));
 }
@@ -11,6 +12,7 @@ function map(row) {
     status: row.status, answer: row.answer, answerTruncated: row.answer_truncated === true,
     run: row.run, scores: row.scores, scoreError: row.score_error, error: row.error,
     startedAt: date(row.started_at), finishedAt: date(row.finished_at), updatedAt: date(row.updated_at),
+    outputClearedAt: row.output_cleared_at || row.run?.outputClearedAt || null,
   };
 }
 function createUnifiedEvaluationRepository({ pgPool } = {}) {
@@ -49,6 +51,37 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const result = await (await adminPool()).query('SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope, key]);
       return result.rows[0] ? { runId: result.rows[0].id, hash: result.rows[0].idempotency_hash } : null;
     },
+    async createRerun(job, scope, key, hash, previousId, requestHash) {
+      const client = await (await adminPool()).connect();
+      try {
+        await client.query('BEGIN');
+        const previous = (await client.query('SELECT * FROM public.unified_evaluation_runs WHERE id=$1 FOR UPDATE', [previousId])).rows[0];
+        if (!previous) throw new TeamServiceError(404, 'NOT_FOUND', '原运行不存在');
+        if (previous.run?.outputClearedAt) {
+          if (previous.run.rerunRequestHash === requestHash) { await client.query('COMMIT'); return { created: false, runId: previous.run.replacementRunId, matches: true }; }
+          throw new TeamServiceError(409, 'RUN_ALREADY_RERUN', '此记录的输出已清除，请查看新一轮运行');
+        }
+        const lease = previous.run?.scoring;
+        const expired = lease && !lease.finishedAt && Date.parse(lease.expiresAt) <= Date.now();
+        if (previous.origin !== 'manual' || previous.batch_id || (!['done', 'error'].includes(previous.status) && !(previous.status === 'scoring' && expired)) || !['done', 'error'].includes(previous.run?.status) || (lease && !lease.finishedAt && !expired)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行，请等待执行和评分结束');
+        const created = await client.query(`INSERT INTO public.unified_evaluation_runs
+          (id,service_key,origin,question,question_id,dataset_version,question_source_type,batch_id,status,started_at,idempotency_scope,idempotency_key,idempotency_hash,run)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          ON CONFLICT (idempotency_scope,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
+        [job.runId,job.serviceKey,job.origin,job.question,job.questionId,job.datasetVersion,job.questionSourceType,job.batchId,job.status,job.startedAt,scope,key,hash,job.run]);
+        if (!created.rowCount) {
+          const existing = (await client.query('SELECT id,idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2', [scope,key])).rows[0];
+          await client.query('ROLLBACK');
+          return { created: false, runId: existing?.id, matches: existing?.idempotency_hash === hash };
+        }
+        const cleared = { status: previous.run.status, serviceAddress: previous.run.serviceAddress || null, serviceAddressSource: previous.run.serviceAddressSource || null,
+          outputClearedAt: new Date().toISOString(), replacementRunId: job.runId, rerunRequestHash: requestHash };
+        await client.query(`UPDATE public.unified_evaluation_runs SET answer='',answer_truncated=false,scores=NULL,score_error=NULL,error=NULL,run=$2,status=$3,updated_at=now() WHERE id=$1`, [previousId,cleared,previous.run.status]);
+        await client.query('COMMIT');
+        return { created: true, runId: job.runId };
+      } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+      finally { client.release(); }
+    },
     async listRecoverableQueued(serviceKeys, limit = 300, addresses = {}) {
       const result = await (await adminPool()).query(`SELECT * FROM public.unified_evaluation_runs
         WHERE status='queued' AND native_run_id IS NULL AND idempotency_key IS NOT NULL
@@ -70,7 +103,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
     async save(job) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2, status=$3, answer=$4,
         answer_truncated=$5, run=$6, scores=$7, score_error=$8, error=$9, finished_at=$10, updated_at=now()
-        WHERE id=$1`, [job.runId, job.nativeRunId, job.status, job.answer, job.answerTruncated,
+        WHERE id=$1 AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt')`, [job.runId, job.nativeRunId, job.status, job.answer, job.answerTruncated,
         job.run, job.scores, job.scoreError, job.error, job.finishedAt]);
       if (result.rowCount !== 1) throw new Error('统一测评记录不存在');
     },
@@ -81,19 +114,19 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
     async refreshScores(id, scores, scoreError, status) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
         SET scores=$2, score_error=$3, status=$4, updated_at=now()
-        WHERE id=$1 AND status='scoring' RETURNING *`, [id, scores, scoreError, status]);
+        WHERE id=$1 AND status='scoring' AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING *`, [id, scores, scoreError, status]);
       return map(result.rows[0]);
     },
     async claimScoring(id, previousId, scoring, scores) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
         SET run=jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),scores=$4,score_error=NULL,status=CASE WHEN run->>'status'='error' THEN 'error' ELSE 'scoring' END,updated_at=now()
-        WHERE id=$1 AND run->'scoring'->>'attemptId' IS NOT DISTINCT FROM $2::text AND status IN ('done','error','scoring') RETURNING id`, [id, previousId, scoring, scores]);
+        WHERE id=$1 AND run->'scoring'->>'attemptId' IS NOT DISTINCT FROM $2::text AND status IN ('done','error','scoring') AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING id`, [id, previousId, scoring, scores]);
       return result.rowCount === 1;
     },
     async updateScoring(id, attemptId, value) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
         SET run=jsonb_set(jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),'{markdownSyntax}',$4::jsonb),scores=$5,score_error=NULL,status=$6,updated_at=now()
-        WHERE id=$1 AND run->'scoring'->>'attemptId'=$2 RETURNING id`, [id, attemptId, value.scoring, value.markdownSyntax, value.scores, value.status]);
+        WHERE id=$1 AND run->'scoring'->>'attemptId'=$2 AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING id`, [id, attemptId, value.scoring, value.markdownSyntax, value.scores, value.status]);
       return result.rowCount === 1;
     },
     async questionScores(items) {
@@ -104,6 +137,23 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         ON r.question_id=q.id AND r.dataset_version=q."datasetVersion"
         ORDER BY r.question_id,r.dataset_version,r.service_key,r.started_at DESC,r.id DESC`, [JSON.stringify(items)]);
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
+    },
+    async listHistory(userId) {
+      const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title
+        FROM public.unified_evaluation_runs r
+        LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
+        WHERE r.origin='manual' AND coalesce(h.hidden,false)=false
+        ORDER BY r.started_at DESC,r.id DESC LIMIT 50`, [userId]);
+      return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at) }));
+    },
+    async updateHistory(userId, runId, action, title) {
+      const result = await (await adminPool()).query(`INSERT INTO public.evaluation_user_run_history (user_id,run_id,title,hidden)
+        SELECT $1,r.id,$3,$4 FROM public.unified_evaluation_runs r WHERE r.id=$2 AND r.origin='manual'
+        ON CONFLICT (user_id,run_id) DO UPDATE SET
+          title=CASE WHEN $4 THEN evaluation_user_run_history.title ELSE EXCLUDED.title END,
+          hidden=CASE WHEN $4 THEN true ELSE evaluation_user_run_history.hidden END, updated_at=now()
+        WHERE $4 OR NOT evaluation_user_run_history.hidden RETURNING run_id`, [userId, runId, title || null, action === 'remove']);
+      return result.rowCount === 1;
     },
     async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', questionId = '', datasetVersion = '', from = '', to = '' } = {}) {
       const requestedPage = Number(page);
@@ -132,7 +182,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const current = await adminPool();
       const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
       const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,
-        r.batch_id, r.status, r.scores, r.started_at, r.finished_at, q.domain_key ${source} ${filter}
+        r.batch_id, r.status, r.scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
         ORDER BY r.started_at DESC, r.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, safeSize, (safePage - 1) * safeSize]);
       return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },

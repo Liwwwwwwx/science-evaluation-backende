@@ -1,4 +1,6 @@
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { handleRuns } = require('./runs/http');
 const { handleBatches } = require('./runs/batch-http');
 const { handleRules } = require('./scoring/rule-http');
@@ -6,11 +8,44 @@ const { handleDailyReports } = require('./daily-reports/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createStandardsService } = require('./standards/service');
+const { createDirectScoreService } = require('./scoring/direct-score');
 
 const PATH = '/api/admin/team-services/evaluations/question-bank/generate';
 const MAX_BODY = 8192;
+const OPENAPI_SPEC = path.join(__dirname, '..', 'docs', 'openapi.yaml');
+// Swagger 静态资源按白名单只读提供；未列出的文件一律 404，避免目录遍历。
+const SWAGGER_ASSETS = new Map([
+  ['swagger-ui-bundle.js', 'application/javascript; charset=utf-8'],
+  ['swagger-ui.css', 'text/css; charset=utf-8'],
+  ['favicon-32x32.png', 'image/png'],
+  ['favicon-16x16.png', 'image/png'],
+]);
+const DOCS_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Science 测评后端 API</title>
+<link rel="icon" href="/docs/assets/favicon-32x32.png">
+<link rel="stylesheet" href="/docs/assets/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="/docs/assets/swagger-ui-bundle.js"></script>
+<script>
+  window.ui = SwaggerUIBundle({
+    url: '/openapi.yaml',
+    dom_id: '#swagger-ui',
+    deepLinking: true,
+    docExpansion: 'list',
+    tryItOutEnabled: false,
+    supportedSubmitMethods: ['get'],
+  });
+</script>
+</body>
+</html>`;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -45,9 +80,70 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
     entry.count++;
     return entry.count <= max;
   }
+  function sendStatic(res, status, type, body) {
+    res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+    res.end(body);
+  }
+  const swaggerAssetCache = new Map();
+  function readSwaggerAsset(name) {
+    if (!swaggerAssetCache.has(name)) swaggerAssetCache.set(name, fs.readFileSync(require.resolve(`swagger-ui-dist/${name}`)));
+    return swaggerAssetCache.get(name);
+  }
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200, { ok: true, service: 'science-evaluation' });
+    // 接口文档预览是纯静态页面，不涉及数据与凭据，与 /health 一样免登录。
+    if (req.method === 'GET' && (req.url === '/docs' || req.url === '/openapi.yaml' || req.url.startsWith('/docs/assets/'))) {
+      try {
+        if (req.url === '/docs') return sendStatic(res, 200, 'text/html; charset=utf-8', DOCS_HTML);
+        if (req.url === '/openapi.yaml') return sendStatic(res, 200, 'text/yaml; charset=utf-8', fs.readFileSync(OPENAPI_SPEC));
+        const name = decodeURIComponent(req.url.slice('/docs/assets/'.length));
+        const type = SWAGGER_ASSETS.get(name);
+        if (!type) return fail(res, 404, 'NOT_FOUND', 'Not found');
+        return sendStatic(res, 200, type, readSwaggerAsset(name));
+      } catch {
+        return fail(res, 500, 'DOCS_UNAVAILABLE', '接口文档暂不可用');
+      }
+    }
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/evaluation/direct-score') {
+      try {
+        if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+        if (!directScore) return fail(res, 503, 'DIRECT_SCORE_UNAVAILABLE', '直接评分尚未配置');
+        // 与标准生成一致的双模式鉴权：受信服务端用 Bearer 服务令牌直连；浏览器走登录会话与同源校验，不得使用令牌。
+        const bearer = req.headers.authorization || '';
+        const candidate = crypto.createHash('sha256').update(bearer.startsWith('Bearer ') ? bearer.slice(7) : '').digest();
+        const viaToken = crypto.timingSafeEqual(candidate, expected);
+        let user = null;
+        if (!viaToken) {
+          if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
+          user = await authService.authenticate(session(req));
+          if (!user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有评分权限');
+          if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        }
+        const input = await readBody(req, 384 * 1024);
+        let standard;
+        if (input.standard?.type === 'text') standard = input.standard.text;
+        else if (input.standard?.type === 'saved') {
+          if (user && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+          if (!standardsRepository || !questionBank) return fail(res, 503, 'STANDARDS_UNAVAILABLE', '标准存储尚未配置');
+          const { questionId, datasetVersion, id } = input.standard;
+          if (typeof id !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)) return fail(res, 400, 'INVALID_STANDARD', '请选择有效的评分标准');
+          const question = await questionBank.get(questionId, datasetVersion);
+          if (question.status !== 'active' || typeof input.question !== 'string' || question.question.trim() !== input.question.trim()) return fail(res, 409, 'QUESTION_CHANGED', '题目已变化或停用，请重新选择');
+          const saved = await standardsRepository.list(questionId, datasetVersion);
+          const selected = saved.items.find(item => item.id === id && item.question.trim() === question.question.trim());
+          if (!selected) return fail(res, 404, 'STANDARD_NOT_FOUND', '该题目版本下没有找到所选标准');
+          standard = JSON.stringify(selected.content);
+        } else return fail(res, 400, 'INVALID_STANDARD', '请选择或输入评分标准');
+        const caller = viaToken ? 'service-token' : `user:${user.id}`;
+        if (!rateLimit(`direct-score:${caller}`, 20)) return fail(res, 429, 'DIRECT_SCORE_RATE_LIMITED', '直接评分次数过多，请 15 分钟后再试');
+        return reply(res, 200, await directScore.score({ question: input.question, answer: input.answer, standard }));
+      } catch (error) {
+        if (error.code === '42P01') return fail(res, 503, 'STANDARDS_STORAGE_UNAVAILABLE', '标准存储尚未迁移');
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'DIRECT_SCORE_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '直接评分暂不可用，请稍后重试' : error.message);
+      }
+    }
     if (url.pathname === '/api/evaluation/question-standards' || /^\/api\/evaluation\/question-standards\/[^/]+\/confirm$/.test(url.pathname)) {
       try {
         if (!authService || !standardsRepository) return fail(res,503,'STANDARDS_UNAVAILABLE','标准存储尚未配置');
