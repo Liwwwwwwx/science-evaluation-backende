@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const argon2 = require('argon2');
 const { verifySync } = require('otplib');
+const { canManageAccounts } = require('./accounts');
 const scrypt = promisify(crypto.scrypt);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const READ = 'team-services:read';
@@ -20,7 +21,8 @@ async function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(digest, Buffer.from(match[2], 'hex'));
 }
 function publicUser(user, permissions) {
-  return { id: user.id, username: user.username, name: user.display_name, permissions };
+  const result = { id: user.id, username: user.username, name: user.display_name, permissions };
+  return { ...result, canManageAccounts: Boolean(canManageAccounts(result)) };
 }
 function createAuthService(repo) {
   return {

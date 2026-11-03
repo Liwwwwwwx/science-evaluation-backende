@@ -103,10 +103,12 @@
 
 本机可选用 SSH 隧道连接远端独立库：设置 `EVALUATION_DB_TUNNEL_ENABLED=true`、`EVALUATION_DB_TUNNEL_HOST`、`EVALUATION_DB_TUNNEL_USER`，以及可选的 `EVALUATION_DB_TUNNEL_SSH_PORT`、`EVALUATION_DB_TUNNEL_LOCAL_PORT`、`EVALUATION_DB_TUNNEL_REMOTE_PORT`。启动器负责创建隧道并在退出时关闭，若本地端口已被占用则拒绝启动，不复用未知隧道；`EVALUATION_DATABASE_URL` 必须指向隧道本地端口和 `science_evaluation`。`.env.local` 包含凭据时须限制文件权限，不提交版本库。
 
-认证读取 `auth_users` 和管理端权限表；需要 `team-services:read` 或 `team-services:write`。支持现有 scrypt、Argon2 哈希、TOTP 与一次性备用码；备用码消费会更新所连接数据库的用户表。连接独立 `science_evaluation` 时，账号和权限是迁入时的副本，不会自动与原 Science Admin 数据库同步；账号创建、修改密码和权限分配尚需独立管理方式。每次读取会话都校验密码哈希、token_version 和当前权限；旧数据库实现中的 `auth_users` 没有禁用状态字段，因此不能仅靠此表识别产品用户禁用状态，接入前需要核对账号禁用数据源。
+认证读取 `auth_users` 和管理端权限表；需要 `team-services:read` 或 `team-services:write`。支持现有 scrypt、Argon2 哈希、TOTP 与一次性备用码；备用码消费会更新所连接数据库的用户表。连接独立 `science_evaluation` 时，账号和权限是迁入时的副本，不会自动与原 Science Admin 数据库同步。每次读取会话都校验密码哈希、token_version 和当前权限；旧数据库实现中的 `auth_users` 没有禁用状态字段，因此不能仅靠此表识别产品用户禁用状态，接入前需要核对账号禁用数据源。
 
 - `POST /api/auth/login`：JSON `{username,password,rememberMe,totpCode}`；成功设置 HttpOnly、SameSite=Lax Cookie。未勾选记住时为浏览器会话 Cookie，服务端最长 12 小时；勾选后最长 30 天。需要二次验证时返回 `2FA_REQUIRED`。
 - `GET /api/auth/me`：返回当前用户和权限；会话无效 401，权限不足 403。
+- `GET /api/evaluation/accounts`、`POST /api/evaluation/accounts`：仅当前数据库中用户名为 `admin` 且同时拥有评测读写权限的登录用户可分页、按名称搜索评测账号或创建普通评测账号。仅支持独立 `science_evaluation` 数据库；事务内核对 `evaluation-local` 角色只能包含 `team-services:read` 和 `team-services:write`，账号和角色同时提交。初始密码为 4–12 个字符，使用 Argon2id 哈希，接口不返回密码。新账号可维护共享题库和规则，个人运行记录仍按原有规则隔离。
+- `PATCH /api/evaluation/accounts/{id}`、`POST /api/evaluation/accounts/{id}/reset-password`、`DELETE /api/evaluation/accounts/{id}`：仅 `admin` 可修改普通评测账号的显示名称、重置密码或删除。后端保护用户名 `admin`、`is_admin` 账号及具有其他角色或异常评测角色权限的账号；用户名不可修改。重置密码使现有会话失效。删除通过撤销评测角色和失效会话实现，保留账号标识和历史运行记录，用户名暂不可复用；正在运行的评测不自动停止。生产环境账号变更属于生产数据写入，需有明确授权。
 - `POST /api/auth/logout`：退出当前会话；`POST /api/auth/logout-all`：退出测评平台所有会话。写请求必须携带与配置一致的 Origin。
 
 Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理访问，禁止将内部数据库及服务令牌暴露到浏览器。限流目前为单进程内存计数，分别按连接 IP 和账号限制，重启会清空，代理后的 IP 可能都是代理地址；多实例或反向代理部署前应在可信网关配置统一限流。过期会话不会自动清理，需后续设计安全的清理任务。前端登录和题库已切换到新会话；新的统一运行代理也使用测评会话；保留的旧原生运行代理仍依赖旧会话。

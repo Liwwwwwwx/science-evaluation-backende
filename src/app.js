@@ -45,7 +45,7 @@ const DOCS_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, accounts, questionBank, evaluations, batches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -105,6 +105,27 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
       }
     }
     const url = new URL(req.url, 'http://localhost');
+    const accountPath = /^\/api\/evaluation\/accounts\/([^/]+)(\/reset-password)?$/.exec(url.pathname);
+    if (url.pathname === '/api/evaluation/accounts' || accountPath) {
+      try {
+        const allowed = accountPath ? (accountPath[2] ? ['POST'] : ['PATCH', 'DELETE']) : ['GET', 'POST'];
+        if (!allowed.includes(req.method)) return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+        if (!authService || !accounts) return fail(res, 503, 'ACCOUNTS_UNAVAILABLE', '账号管理暂不可用');
+        const user = await authService.authenticate(session(req));
+        if (req.method === 'GET') return reply(res, 200, await accounts.list(user, { ...(url.searchParams.has('page') ? { page: url.searchParams.get('page') } : {}), ...(url.searchParams.has('pageSize') ? { pageSize: url.searchParams.get('pageSize') } : {}), ...(url.searchParams.has('search') ? { search: url.searchParams.get('search') } : {}) }));
+        if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
+        if (!rateLimit(`account-write:${user.id}`, 30)) return fail(res, 429, 'TOO_MANY_ATTEMPTS', '账号操作请求过多，请稍后再试');
+        if (!accountPath) return reply(res, 201, await accounts.create(user, await readBody(req, 4096)));
+        let id;
+        try { id = decodeURIComponent(accountPath[1]); } catch { return fail(res, 400, 'INVALID_ACCOUNT_ID', '用户标识无效'); }
+        if (accountPath[2]) return reply(res, 200, await accounts.resetPassword(user, id, await readBody(req, 4096)));
+        if (req.method === 'PATCH') return reply(res, 200, await accounts.update(user, id, await readBody(req, 4096)));
+        return reply(res, 200, await accounts.remove(user, id));
+      } catch (error) {
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+        return fail(res, status, status === 500 ? 'ACCOUNTS_FAILED' : error.code || 'REQUEST_FAILED', status === 500 ? '账号管理暂不可用，请稍后重试' : error.message);
+      }
+    }
     if (url.pathname === '/api/evaluation/direct-score') {
       try {
         if (req.method !== 'POST') return fail(res, 405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
