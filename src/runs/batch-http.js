@@ -5,7 +5,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const STATES = new Set(['preparing', 'dispatching', 'running', 'done', 'partial', 'failed']);
 const SOURCES = new Set(['all', 'trial', 'mission']);
 const EXECUTIONS = new Set(['completed', 'failed', 'timeout', 'unfinished']);
-const STATUSES = new Set(['queued', 'running', 'scoring', 'done', 'error']);
+const STATUSES = new Set(['queued', 'running', 'scoring', 'done', 'error', 'paused']);
 const SORTS = new Set(['scoreAsc', 'scoreDesc', 'startedAtAsc', 'startedAtDesc']);
 
 function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', message); }

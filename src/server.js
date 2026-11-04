@@ -15,6 +15,7 @@ const { createRunQuestionResolver } = require('./runs/question-resolver');
 const { createLiteratureEvaluator } = require('./runs/literature-evaluator');
 const { createMaterialEvaluator } = require('./runs/material-evaluator');
 const { createMissionEvaluator } = require('./runs/mission-evaluator');
+const { createAlphaRsiEvaluator } = require('./runs/alpha-rsi-evaluator');
 const { createMissionDailyRepository } = require('./runs/mission-daily.repository');
 const { createMissionDailyService } = require('./runs/mission-daily.service');
 const { createFeishuTestNotifier } = require('./notifications/feishu-test');
@@ -59,6 +60,7 @@ if (databaseUrl) {
   questionBank = createQuestionBankService(questionRepository);
   const evaluators = {};
   if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL, timeoutMs: missionTimeoutMs() });
+  if (process.env.EVALUATION_ALPHA_RSI_WS_URL) evaluators['alpha-rsi'] = createAlphaRsiEvaluator({ url: process.env.EVALUATION_ALPHA_RSI_WS_URL });
   if (process.env.EVALUATION_LITERATURE_WS_URL) evaluators.literature = createLiteratureEvaluator({ url: process.env.EVALUATION_LITERATURE_WS_URL });
   if (process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL) evaluators['literature-aircraft'] = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL });
   for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {

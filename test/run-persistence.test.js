@@ -76,7 +76,7 @@ test('幂等键命中已有记录时只执行一次并返回原运行', async ()
     throw new Error(`unexpected SQL: ${sql}`);
   } };
   let starts = 0;
-  const evaluator = { async askQuestionStream(_, { onText }) { starts++; onText('回答'); return { run: { id: 'native-1' }, completion: Promise.resolve({ status: 'done' }) }; }, async getAskResult() { return { deepSeekScore: { status: 'unavailable' }, qwenScore: { status: 'unavailable' } }; } };
+  const evaluator = { async startQuestionRun(_, { onText }) { starts++; onText('回答'); return { run: { id: 'native-1' }, completion: Promise.resolve({ status: 'done' }) }; }, async getRunQuality() { return { status: 'unavailable', quality: null, error: null }; } };
   const repository = createUnifiedEvaluationRepository({ pgPool: pool });
   const service = createUnifiedEvaluationService({ repository, evaluators: { 'alpha-rsi': evaluator }, scoreWaitMs: 0 });
   const input = { serviceKey: 'alpha-rsi', question: '这是一个测试问题' };

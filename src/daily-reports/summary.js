@@ -1,11 +1,11 @@
 const { createHash } = require('node:crypto');
 const { DOMAINS } = require('../question-bank/domains');
-const SERVICES = { 'mission-material':'Mission 主服务', literature:'文献检索', 'literature-aircraft':'航空文献', alloy:'合金材料', synthesis:'合成制备', 'new-material':'新材料', 'alpha-rsi':'1110' };
+const SERVICES = { 'mission-material':'Mission 主服务', literature:'文献检索', 'literature-aircraft':'航空文献', alloy:'合金材料', synthesis:'合成制备', 'new-material':'新材料', 'alpha-rsi':'ALPHA 材料 RSI（1110）' };
 const JUDGES = { deepSeekScore:'DeepSeek', qwenScore:'千问' };
 function validDate(value) { return typeof value === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value; }
 function nightDate(now) { return new Date(now.getTime() + 8*3600000 - 22*3600000).toISOString().slice(0,10); }
 function deadline(day) { return new Date(Date.parse(`${day}T22:00:00+08:00`) + 8*3600000); }
-function pending(run) { return !['done','error'].includes(run.status) || !run.finishedAt || Object.values(run.scores || {}).some(score => score?.status === 'pending'); }
+function pending(run) { return !['done','error','paused'].includes(run.status) || !run.finishedAt || Object.values(run.scores || {}).some(score => score?.status === 'pending'); }
 function execution(run) { return run.run?.status === 'error' || run.status === 'error' && !run.run?.status ? /超时|timeout/i.test(run.error || run.run?.error || '') ? 'timeout' : 'failed' : run.run?.status === 'done' || run.status === 'done' && !run.run?.status ? 'completed' : 'unfinished'; }
 function scoreGroups(runs, key) {
   const groups = new Map(); const states = { ready:0, provisional:0, pending:0, failed:0, unavailable:0, absent:0, invalid:0 };

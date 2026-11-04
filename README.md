@@ -52,6 +52,16 @@
 
 批次表未迁移时列表返回 `storageReady=false`，详情返回 503；读取失败、参数错误和批次不存在分别返回明确状态。应用不自动执行迁移。测试：`node --test test/batches.test.js test/batches-http.test.js`。
 
+## 对比测评
+
+`POST /api/evaluation/unified/comparisons` 接收 `{serviceKeys:[两个不同服务], question, questionId?, datasetVersion?, sourceType?}`，用同一份题面和同一份规则快照创建两条人工运行；`GET /api/evaluation/unified/comparisons/:groupId` 读取两条运行及当前执行、评分状态。两者使用现有测评会话和 `team-services:read/write`，POST 还校验同源、JSON、运行写开关和 `Idempotency-Key`；分组 ID 由账号范围和幂等键确定，重试不会重复派发。
+
+1110（alpha-rsi）通过 `EVALUATION_ALPHA_RSI_WS_URL` 接入：首帧为 `{idea, taskid, user_name, file_metadata: []}`，正文按 `[start]/[end]` 收尾；开工确认自动答复，补充条件请求由已配置的 DeepSeek 或千问模型依据题目生成答复并自动发送。提示词要求明确标记假设，答复及模型保存在运行记录中；假设和模型输出仍需核对。模型未配置或答复失败时明确结束，不发送空答复。仅收到 `waiting_for_input` 结果而没有可回复请求时，本轮标记未完成，不假装已继续。1110 输出与 Mission 等已接入服务使用同一套 DeepSeek/千问平台评分，不使用服务自带评分。
+
+对比组持久化依赖手工执行 `migrations/012_comparison_groups.sql`。未迁移时单条运行和历史照常可用，对比创建和读取明确返回 503，不回退为无分组记录，也不在启动时自动迁移。生产迁移、真实对比派发和 1110 调用需另行确认。
+
+测试：`node --test test/alpha-rsi-evaluator.test.js test/comparison.test.js test/comparison-http.test.js`。
+
 ## 每日测评分析报告
 
 新增 `/api/evaluation/unified/daily-reports` 列表、`/:date` 详情、`/:date/markdown` 下载和 `POST /:date/generate` 仅生成报告接口；使用现有会话与读写权限，POST 还校验同源、JSON、幂等键及报告写开关。GET 不调用模型。前端侧栏提供“每日总结”。
@@ -68,7 +78,7 @@
 
 验证：`node --test test/daily-reports.test.js`。隔离PG使用独立新建实例及 `EVALUATION_DAILY_REPORT_TEST_PG_SOCKET=/tmp/evaluation-report-pg.XXXXXX`，端口55791、临时数据库`science_evaluation`，执行 `node --test test/daily-reports-postgres.test.js`；不得指向共享或远端生产库。
 
-独立进程，提供登录、题库及受开关控制的单题测评接口。主服务 Mission_ScienceMaterial 和文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）、新材料（1115）五类下游服务已接入独立运行与评分；1110和原自动化调度尚未迁入，不代替现有管理端生产运行。
+独立进程，提供登录、题库及受开关控制的单题测评接口。主服务 Mission_ScienceMaterial、ALPHA 材料 RSI（1110）和文献检索（1106）、航空文献（1108）、合金材料（1111）、合成制备（1112）、新材料（1115）五类下游服务已接入独立运行与评分；原自动化调度尚未迁入，不代替现有管理端生产运行。
 
 ## 接口文档预览
 

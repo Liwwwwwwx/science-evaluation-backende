@@ -140,13 +140,13 @@ function batchScores(runs) {
   return { deepSeek: judgeSummary(runs, 'deepSeek'), qwen: judgeSummary(runs, 'qwen') };
 }
 
-function normalizedState(plan, totals, planned) {
+function normalizedState(plan, totals, planned, hasPaused = false) {
   if (plan.state === 'failed' || plan.state === 'skipped') return 'failed';
   if (plan.state === 'generating') return 'preparing';
   if (plan.state === 'dispatching') return 'dispatching';
   if (plan.state === 'empty') return 'done';
   if (totals.queued + totals.running + totals.scoring > 0) return 'running';
-  return totals.total < planned ? 'partial' : 'done';
+  return hasPaused || totals.total < planned ? 'partial' : 'done';
 }
 
 function summaryOf(plan, runs) {
@@ -157,7 +157,7 @@ function summaryOf(plan, runs) {
     batchId: plan.id,
     date: dateOnly(plan.plan_date),
     source: plan.source,
-    state: normalizedState(plan, totals, planned),
+    state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
     rawState: plan.state,
     planned,
     services,
@@ -210,7 +210,7 @@ function detailOf(plan, runs) {
       batchId: plan.id,
       date: dateOnly(plan.plan_date),
       source: plan.source,
-      state: normalizedState(plan, totals, planned),
+      state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
       rawState: plan.state,
       planned,
       services: servicePlans(plan),
