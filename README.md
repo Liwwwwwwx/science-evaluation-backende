@@ -60,7 +60,7 @@
 
 `POST /api/evaluation/unified/comparisons` 接收 `{serviceKeys:[两个不同服务], question, questionId?, datasetVersion?, sourceType?}`，用同一份题面和同一份规则快照创建两条人工运行；`GET /api/evaluation/unified/comparisons/:groupId` 读取两条运行及当前执行、评分状态。两者使用现有测评会话和 `team-services:read/write`，POST 还校验同源、JSON、运行写开关和 `Idempotency-Key`；分组 ID 由账号范围和幂等键确定，重试不会重复派发。
 
-1110（alpha-rsi）通过 `EVALUATION_ALPHA_RSI_WS_URL` 接入：首帧为 `{idea, taskid, user_name, file_metadata: []}`，正文按 `[start]/[end]` 收尾；开工确认自动答复，补充条件请求由已配置的 DeepSeek 或千问模型依据题目生成答复并自动发送。提示词要求明确标记假设，答复及模型保存在运行记录中；假设和模型输出仍需核对。模型未配置或答复失败时明确结束，不发送空答复。仅收到 `waiting_for_input` 结果而没有可回复请求时，本轮标记未完成，不假装已继续。1110 输出与 Mission 等已接入服务使用同一套 DeepSeek/千问平台评分，不使用服务自带评分。
+1110（alpha-rsi）通过 `EVALUATION_ALPHA_RSI_WS_URL` 接入：首帧为 `{idea, taskid, user_name, file_metadata: []}`，正文按 `[start]/[end]` 收尾；开工确认自动答复，补充条件请求由已配置的 DeepSeek 或千问模型依据题目生成答复并自动发送。提示词要求明确标记假设，答复及模型保存在运行记录中；假设和模型输出仍需核对。模型未配置或答复失败时明确结束，不发送空答复。仅收到 `waiting_for_input` 且原连接结束时，保存追问和首轮结果，自动生成补充并以新的下游 taskid 重新发起一次；新一轮正文独立展示和评分。无具体追问、模型失败或再次等待时明确结束，不无限重试。1110 输出与 Mission 等已接入服务使用同一套 DeepSeek/千问平台评分，不使用服务自带评分。
 
 对比组持久化依赖手工执行 `migrations/012_comparison_groups.sql`。未迁移时单条运行和历史照常可用，对比创建和读取明确返回 503，不回退为无分组记录，也不在启动时自动迁移。生产迁移、真实对比派发和 1110 调用需另行确认。
 
@@ -192,7 +192,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 材料适配器收尾保证completion正常结算：非法Unicode成果名会跳过对应预览并记录artifactError，保留正文、快照和其他可用文件；其他成果整理异常将当前运行标为失败并保留已有输出，避免未处理的异步异常影响进程和执行容量。
 
-`requirement_review_request`默认由测评平台立即自动发送 `checkpoint.reply`（action=continue），覆盖两类文献及三类材料服务。不等待120秒或人工操作，不伪造补充答案、不把服务建议标为用户授权；原请求source=service，自动答复source=automatic，并记录delivery=sent/failed。相同request_id只发送一次，单运行最多自动继续10个不同请求；身份错误、服务拒绝或发送失败如实结束为失败。页面显示自动答复次数，完整请求/答复随run JSON持久化。此策略不覆盖1110的user_input_request。
+`requirement_review_request` 覆盖两类文献及三类材料服务：没有具体问题时自动继续，有问题时由模型按题目生成逐项答复并使用 `action=apply`。模型补充可能包含假设，不是用户授权；请求、答复、模型及发送结果随运行保存。相同请求只答复一次，单运行最多处理10个请求；模型不可用、格式错误、服务拒绝或发送失败时明确结束。未知追问协议会保留原请求并显示，未经核实不猜测答复格式。仅返回等待状态且原运行正常结束时，统一运行层最多自动补充后重新发起一次。
 
 既有人工reply接口保留兼容：`POST /api/evaluation/unified/runs/:id/reply`，仍校验写权限、同源、写开关、当前进程发起人、请求身份和必填项，重复/过期答复拒绝。正常新运行不再进入人工等待；原人工记录和重启快照不自动续跑或回写。
 
@@ -264,7 +264,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 ## Mission_ScienceMaterial 主服务与每日测评
 
-通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、当前题面 `idea` 和 `has_context=false`，不发送上游路由 `type` 或历史上下文。正文立即转发；JSON 按返回的 `type` 分流。Mission 必须等连接正常关闭（1000/1001）并排空已收到的消息后才完成，子步骤、总结结束帧或正文中的 `[end]` 不单独结束整轮。需求确认自动 `continue`，普通补充输入及新版 `display.followup_request` 追问按 XIMUALPHA 自动确认默认回复“无”并标记自动答复；新版审批请求不会自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复，不自动重发请求。进度只记录服务实际发出的消息和明确阶段事件，不推断调用了哪个下游团队或虚构阶段耗时。
+通过 `EVALUATION_MISSION_MATERIAL_WS_URL` 显式配置 WebSocket 入口，启用运行写入后可手动测评。每次使用独立 `taskid`、当前题面 `idea` 和 `has_context=false`，不发送上游路由 `type` 或历史消息。正文立即转发；JSON 按返回的 `type` 分流。Mission 必须等连接正常关闭（1000/1001）并排空已收到的消息后才完成，子步骤、总结结束帧或正文中的 `[end]` 不单独结束整轮。需求确认无问题时自动继续，有问题时逐项生成答复；普通补充输入和新版 `display.followup_request` 按题目自动生成补充。审批请求不自动批准，回答后的已知反馈门拒绝追加任务。确认过程随运行保存，同一追问不重复答复；只有服务正常返回等待补充状态并结束时，才最多补充后重新发起一次。进度只记录服务实际发出的消息和明确阶段事件。
 
 执行超时默认 60 分钟，可用 `EVALUATION_MISSION_TIMEOUT_MS` 调整（整数毫秒，允许 1 分钟至 24 小时，启动时校验，非法值拒绝启动）。超时保存失败状态与已有输出并停止等待；超时不中断也不代表远端任务已停止。文献等下游服务的执行超时仍为各服务固定值，不受此开关影响。
 

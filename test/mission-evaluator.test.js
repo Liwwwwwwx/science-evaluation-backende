@@ -13,10 +13,13 @@ class Socket extends EventEmitter {
 }
 function fixture() {
   const sockets = []; const sent = [];
-  const evaluator = createMissionEvaluator({ url: 'ws://127.0.0.1:1234/start', timeoutMs: 1000, createSocket: () => {
-    const socket = new Socket(); socket.send = text => sent.push({ socket, value: JSON.parse(text) });
-    sockets.push(socket); queueMicrotask(() => socket.emit('open')); return socket;
-  } });
+  const evaluator = createMissionEvaluator({ url: 'ws://127.0.0.1:1234/start', timeoutMs: 1000,
+    generateSupplement: async () => ({ message: '按题目条件继续。', model: 'test-model' }),
+    generateAnswers: async ({ questions }) => ({ answers: questions.map(q => ({ id: q.id, answer: '依据题目条件补充' })), model: 'test-model' }),
+    createSocket: () => {
+      const socket = new Socket(); socket.send = text => sent.push({ socket, value: JSON.parse(text) });
+      sockets.push(socket); queueMicrotask(() => socket.emit('open')); return socket;
+    } });
   return { evaluator, sockets, sent };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -69,16 +72,18 @@ test('按旧协议答复下游确认和补充输入，重复请求不重复答�
   const review = { type: 'requirement_review_request', taskid: 'child-review', request_id: 'r1', data: { title: '确认' } };
   const input = { type: 'user_input_request', taskid: 'child-input', message: '缺少基线', parameters: { reason: 'missing_baseline' } };
   socket.message(review); socket.message(review); socket.message(input); socket.message(input);
+  await flush();
   socket.message('[start]结果'); socket.message('[end]'); socket.emit('close', { code: 1000 });
   const result = await started.completion;
   assert.equal(result.status, 'done'); assert.equal(sent.length, 3);
   assert.deepEqual(sent[1].value, { type: 'checkpoint.reply', schema_version: 1, taskid: 'child-review', request_id: 'r1', action: 'continue' });
-  assert.deepEqual(sent[2].value, { type: 'checkpoint.reply', taskid: 'child-input', params: { message: '无' }, mission: true, approved: true });
-  assert.equal(result.details.review.length, 2);
-  assert.ok(result.details.review.every(record => record.source === 'automatic' && record.delivery === 'sent'));
+  assert.deepEqual(sent[2].value, { type: 'checkpoint.reply', taskid: 'child-input', params: { message: '按题目条件继续。' }, mission: true, approved: true });
+  assert.equal(result.details.review.length, 3);
+  assert.ok(result.details.review.filter(record => record.source === 'automatic').every(record => record.delivery === 'sent'));
+  assert.equal(result.details.review.filter(record => record.source === 'service').length, 1);
 });
 
-test('新版多题追问按 XIMUALPHA 默认回复，重复事件不重复发送', async () => {
+test('新版多题追问生成自动补充，重复事件不重复发送', async () => {
   const { evaluator, sockets, sent } = fixture(); let state;
   const started = await evaluator.startQuestionRun({ question: '请设计材料测试方案' }, { onText() {}, onState: value => { state = value; } });
   await flush(); const socket = sockets[0];
@@ -89,7 +94,7 @@ test('新版多题追问按 XIMUALPHA 默认回复，重复事件不重复发送
   socket.message(question); socket.message({ ...question, seq: 2 });
   await flush();
   assert.equal(sent.length, 2);
-  assert.deepEqual(sent[1].value, { type: 'checkpoint.reply', taskid: started.run.id, params: { message: '无' }, mission: true, approved: true });
+  assert.deepEqual(sent[1].value, { type: 'checkpoint.reply', taskid: started.run.id, params: { message: '按题目条件继续。' }, mission: true, approved: true });
   assert.equal(state.review.length, 1); assert.equal(state.review[0].delivery, 'sent');
   assert.deepEqual(state.review[0].request.questions, question.questions);
   socket.message({ ...question, event_id: 'followup-2', taskid: 'child-task' });
@@ -108,6 +113,27 @@ test('新版审批请求不会作为普通追问自动批准', async () => {
   assert.equal(result.status, 'error'); assert.match(result.error, /审批请求未自动批准/);
   assert.deepEqual(sent[1].value, { type: 'checkpoint.reply', taskid: started.run.id, approved: false, params: { message: '' } });
   assert.equal(result.details.review[0].action, 'stop');
+});
+
+test('Mission 需求追问按子任务和问题标识逐项回复', async () => {
+  const { evaluator, sockets, sent } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '请设计材料测试方案' }, { onText() {} });
+  await flush();
+  sockets[0].message({ type: 'requirement_review_request', taskid: 'child-review', request_id: 'req-1', data: { questions: [{ id: 'q1', question: '目标功率？' }] } });
+  await flush();
+  assert.deepEqual(sent[1].value, { type: 'checkpoint.reply', schema_version: 1, taskid: 'child-review', request_id: 'req-1', action: 'apply', data: { edits: [], answers: [{ id: 'q1', answer: '依据题目条件补充' }] } });
+  sockets[0].message('[start]结果[end]'); sockets[0].emit('close', { code: 1000 });
+  assert.equal((await started.completion).status, 'done');
+});
+
+test('未知追问类型不自动发送答复并保留请求', async () => {
+  const { evaluator, sockets, sent } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '请设计材料测试方案' }, { onText() {} });
+  await flush();
+  sockets[0].message({ type: 'display.followup_request', event_id: 'unknown-1', kind: 'unknown', message: '待确认' });
+  const result = await started.completion;
+  assert.equal(result.status, 'error'); assert.match(result.error, /类型尚未支持/);
+  assert.equal(sent.length, 1); assert.equal(result.details.review[0].request.message, '待确认');
 });
 
 test('回答后的反馈门拒绝追加任务，正常收尾才成功', async () => {

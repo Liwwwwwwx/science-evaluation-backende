@@ -3,6 +3,8 @@ const { publicServiceAddress } = require('./service-address');
 const { createProcessRecorder } = require('../scoring/process-review');
 const { createConversationEvents } = require('./conversation-events');
 const { stackConfirmation } = require('./mission-confirmations');
+const { createAlphaRsiSupplement } = require('./alpha-rsi-supplement');
+const { createAutomaticReview } = require('./automatic-review');
 
 const MAX_ANSWER_CHARS = 3 * 1024 * 1024;
 // 接收上限与归档预算分开：下游团队的完整输出可能超过单条归档预算。
@@ -16,7 +18,7 @@ const SERVICE_LIMIT_RE = /active session limit|Try again when another session fi
 
 // Mission 的确认卡可能携带下游 taskid；只能在收到该卡的连接内答复。
 // 默认 60 分钟，可由 EVALUATION_MISSION_TIMEOUT_MS 覆盖；服务端启动时校验并注入。
-function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket = target => new WebSocket(target) } = {}) {
+function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket = target => new WebSocket(target), generateSupplement = createAlphaRsiSupplement(), generateAnswers } = {}) {
   const target = new URL(url);
   if (!['ws:', 'wss:'].includes(target.protocol)) throw new Error('Mission 主服务必须配置 WebSocket 地址');
   return {
@@ -32,6 +34,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
       const details = { process: process.data, progress: [], review: [], result: null, transport, ...conversation.data };
       const processSteps = new Set();
       const seen = new Set();
+      const automaticReviews = new Map(); const followupAbort = new AbortController();
       const openSummaries = new Set(); const completedSummaries = new Set();
       let socket; let timer; let errorTimer; let settled = false; let text = ''; let messageChain = Promise.resolve(); let frameCount = 0; let stateBytes = 0; let emitTimer; let received = false;
       let resolveCompletion;
@@ -40,7 +43,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
       const scheduleEmit = () => { if (!emitTimer) emitTimer = setTimeout(emit, 32); };
       const finish = error => {
         if (settled) return;
-        settled = true; clearTimeout(timer); clearTimeout(errorTimer);
+        settled = true; followupAbort.abort(); clearTimeout(timer); clearTimeout(errorTimer);
         transport.state = error ? 'failed' : 'closed'; transport.finishedAt = new Date().toISOString(); emit();
         try { socket?.close(); } catch {}
         resolveCompletion({ status: error ? 'error' : 'done', error: error || null, taskid, elapsedMs: Date.now() - started, details: structuredClone(details) });
@@ -59,7 +62,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
           if (details.progress.length > 50) details.progress.shift();
         }
       }
-      function replyToCheckpoint(frame) {
+      async function replyToCheckpoint(frame) {
         const childId = frame.type === 'stack_planner_prompt_request' ? frame.request_id : frame.taskid || frame.task_id || taskid;
         if (typeof childId !== 'string' || !childId || childId.length > 200) return finish('Mission 确认请求的任务标识无效');
         if (frame.request_id != null && (!['string', 'number'].includes(typeof frame.request_id) || String(frame.request_id).length > 200)) return finish('Mission 确认请求标识无效');
@@ -71,16 +74,28 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
         seen.add(key);
         const feedback = frame.type === 'user_input_request' && frame.parameters?.reason === 'adaptive_refactor' && frame.message === '本次生成是否符合用户需求';
         const approval = frame.type === 'display.followup_request' && frame.kind === 'approval';
+        if (frame.type === 'display.followup_request' && frame.kind !== 'clarify' && !approval) {
+          if (!keep(frame)) return finish('Mission 确认记录超过保存上限');
+          details.review.push({ at: new Date().toISOString(), action: 'requested', source: 'service', request: frame });
+          emit();
+          return finish('Mission 追问类型尚未支持，已保存请求，未发送答复');
+        }
+        if (frame.type === 'requirement_review_request') {
+          if (!keep(frame)) return finish('Mission 确认记录超过保存上限');
+          if (!automaticReviews.has(childId)) automaticReviews.set(childId, createAutomaticReview({ taskid:childId, question, review:details.review, send:reply => socket.send(JSON.stringify(reply)), onRecord:emit, onError:finish, isActive:() => !settled && !followupAbort.signal.aborted, signal:followupAbort.signal, ...(generateAnswers ? {generateAnswers} : {}) }));
+          await automaticReviews.get(childId)(frame);
+          const saved = details.review.find(item => item.source === 'automatic' && String(item.requestId) === String(frame.request_id));
+          if (!settled && followupAbort.signal.aborted && saved?.delivery !== 'sent') finish('Mission 连接已关闭，未能答复追问');
+          return;
+        }
         let decision;
         if (frame.type === 'stack_planner_prompt_request') {
           try { decision = stackConfirmation(frame); } catch (error) { return finish(error.message); }
         }
-        const reply = decision ? decision.reply : frame.type === 'equations_request'
+        let reply = decision ? decision.reply : frame.type === 'equations_request'
           ? { type: 'checkpoint.reply', taskid: childId, approved: true, params: { formulaKey: typeof frame.extractType === 'string' ? frame.extractType : '', selectedFormulas: {} } }
           : frame.type === 'temporarily_suspend_request'
             ? { type: 'checkpoint.reply', taskid: childId, approved: true, params: { action: 'continue' } }
-          : frame.type === 'requirement_review_request'
-          ? { type: 'checkpoint.reply', schema_version: 1, taskid: childId, ...(frame.request_id == null ? {} : { request_id: frame.request_id }), action: 'continue' }
           : feedback
             ? { type: 'checkpoint.reply', taskid: childId, approved: false, params: { message: '本轮测试到此结束，不追加问题。' } }
             : approval
@@ -90,6 +105,21 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
         const record = { at: new Date().toISOString(), requestId: frame.request_id ?? null, taskId: childId, action: feedback || approval ? 'stop' : 'continue', source: 'automatic', delivery: 'pending', ...(summary ? { summary } : {}), request: frame, reply };
         if (!keep(record)) return finish('Mission 确认记录超过保存上限');
         details.review.push(record);
+        if (!feedback && !approval && (frame.type === 'user_input_request' || frame.type === 'display.followup_request')) {
+          const questions = (Array.isArray(frame.questions) ? frame.questions : Array.isArray(frame.data?.questions) ? frame.data.questions : []).map(item => typeof item === 'string' ? item : item?.question).filter(item => typeof item === 'string' && item.trim()).slice(0,20);
+          const title = typeof frame.message === 'string' ? frame.message.slice(0,500) : '';
+          if (!title && !questions.length) { record.delivery = 'failed'; emit(); return finish('Mission 追问没有具体内容，无法自动补充'); }
+          emit();
+          try {
+            const signal = AbortSignal.any([followupAbort.signal, AbortSignal.timeout(90000)]);
+            const value = await Promise.race([generateSupplement({ question, title, questions, signal }), new Promise((_, reject) => { if (signal.aborted) reject(Error('aborted')); else signal.addEventListener('abort', () => reject(Error('aborted')), {once:true}); })]);
+            if (settled) return;
+            if (signal.aborted) { record.delivery = 'failed'; emit(); return finish('Mission 连接已关闭，未能答复追问'); }
+            if (typeof value?.message !== 'string' || !value.message.trim() || value.message.length > 4000) throw Error('invalid');
+            reply = { type:'checkpoint.reply', taskid:childId, params:{message:value.message.trim()}, mission:true, approved:true };
+            record.action = 'apply'; record.reply = reply; record.answers = [{answer:value.message.trim()}]; record.model = value.model || null; record.summary = '已自动补充追问；假设请结合题目核对。';
+          } catch { if (!settled) { record.delivery = 'failed'; emit(); finish('Mission 自动补充失败，未发送答复'); } return; }
+        }
         try { socket.send(JSON.stringify(reply)); record.delivery = 'sent'; emit(); if (approval) finish('Mission 审批请求未自动批准'); }
         catch { record.delivery = 'failed'; emit(); finish('Mission 自动答复发送失败'); }
       }
@@ -179,6 +209,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
         socket.addEventListener('message', event => { messageChain = messageChain.then(() => receive(event)).catch(() => finish('处理 Mission 消息失败')); });
         socket.addEventListener('close', event => {
           if (settled) return;
+          followupAbort.abort();
           transport.closedAt = new Date().toISOString();
           transport.closeCode = Number.isInteger(event?.code) ? event.code : null;
           transport.wasClean = typeof event?.wasClean === 'boolean' ? event.wasClean : null;
@@ -192,7 +223,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
         socket.addEventListener('error', () => { if (!settled) { transport.socketError = true; errorTimer = setTimeout(() => { void messageChain.finally(() => finish('Mission WebSocket 连接错误')); }, 50); } });
         timer = setTimeout(() => finish('Mission 执行超时'), timeoutMs);
       } catch { finish('Mission WebSocket 连接失败'); }
-      return { run: { id: taskid }, completion };
+      return { run: { id: taskid }, completion, cancel: () => finish('本次运行已结束') };
     },
     async getRunQuality() { return { status: 'absent', quality: null, error: null }; },
   };
