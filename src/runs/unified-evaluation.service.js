@@ -415,10 +415,11 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
   async function createBatchRun(input, { key, ruleSnapshot } = {}) {
     if (!input || typeof input.batchId !== 'string' || !input.batchId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '批次测评任务参数无效');
-    const safe = { serviceKey: input.serviceKey, question: input.question, origin: 'automation', questionId: input.questionId || null,
-      datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null, batchId: input.batchId };
+    const safe = { serviceKey: input.serviceKey, question: input.question, origin: input.ownerUserId ? 'manual' : 'automation', questionId: input.questionId || null,
+      datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null, batchId: input.batchId,
+      ...(input.comparisonGroupId ? { comparisonGroupId: input.comparisonGroupId } : {}) };
     const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
-    return start(safe, { idempotency: { scope: 'evaluation-automation:batch', key, hash }, caseDef: null, scoreMode: evaluators?.[safe.serviceKey]?.scoreMode, ruleSnapshot });
+    return start(safe, { idempotency: { scope: input.ownerUserId ? `evaluation-user:${input.ownerUserId}` : 'evaluation-automation:batch', key, hash }, caseDef: null, scoreMode: evaluators?.[safe.serviceKey]?.scoreMode, ruleSnapshot });
   }
   let recoveryTimer = null;
   let recoveryRunning = false;
@@ -726,6 +727,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, createComparison, getComparison, rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

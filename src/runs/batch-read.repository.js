@@ -13,26 +13,27 @@ function createBatchReadRepository({ pgPool } = {}) {
   }
 
   async function available() {
-    const result = await (await database()).query("SELECT to_regclass('public.evaluation_trial_batch_plans') IS NOT NULL AS trial, to_regclass('public.evaluation_mission_daily_plans') IS NOT NULL AS mission");
-    return { trial: result.rows[0]?.trial === true, mission: result.rows[0]?.mission === true };
+    const result = await (await database()).query("SELECT to_regclass('public.evaluation_trial_batch_plans') IS NOT NULL AS trial, to_regclass('public.evaluation_mission_daily_plans') IS NOT NULL AS mission, to_regclass('public.evaluation_manual_batch_plans') IS NOT NULL AS manual");
+    return { trial: result.rows[0]?.trial === true, mission: result.rows[0]?.mission === true, manual: result.rows[0]?.manual === true };
   }
 
   function planSelect(source) {
+    if (source === 'manual') return `SELECT 'manual'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, config_snapshot FROM public.evaluation_manual_batch_plans WHERE created_by=$1`;
     if (source === 'trial') {
-      return `SELECT 'trial'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at
+      return `SELECT 'trial'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, to_jsonb(evaluation_trial_batch_plans)->'config_snapshot' AS config_snapshot
         FROM public.evaluation_trial_batch_plans`;
     }
-    return `SELECT 'mission'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, reason AS error, created_at, updated_at
+    return `SELECT 'mission'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, reason AS error, created_at, updated_at, NULL::jsonb AS config_snapshot
       FROM public.evaluation_mission_daily_plans`;
   }
 
   return {
-    async plans({ source = 'all', from = '', to = '', limit = 200, offset = 0 } = {}) {
+    async plans({ source = 'all', from = '', to = '', limit = 200, offset = 0, userId = null } = {}) {
       const tables = await available();
-      const sources = source === 'all' ? ['trial', 'mission'] : [source];
+      const sources = source === 'all' ? ['trial', 'mission', 'manual'] : [source];
       const selected = sources.filter((key) => tables[key]);
       if (!selected.length) return { storageReady: false, items: [] };
-      const params = [];
+      const params = selected.includes('manual') ? [String(userId || '')] : [];
       const where = [];
       if (from) { params.push(from); where.push(`plan_date >= $${params.length}::date`); }
       if (to) { params.push(to); where.push(`plan_date <= $${params.length}::date`); }
@@ -46,32 +47,36 @@ function createBatchReadRepository({ pgPool } = {}) {
       return { storageReady: true, items: result.rows };
     },
 
-    async plan(id) {
+    async plan(id, userId = null) {
       const tables = await available();
-      for (const source of ['trial', 'mission']) {
+      for (const source of ['trial', 'mission', 'manual']) {
         if (!tables[source]) continue;
-        const result = await (await database()).query(`${planSelect(source)} WHERE id::text=$1`, [String(id)]);
+        const result = source === 'manual'
+          ? await (await database()).query(`${planSelect(source)} AND id::text=$2`, [String(userId || ''), String(id)])
+          : await (await database()).query(`${planSelect(source)} WHERE id::text=$1`, [String(id)]);
         if (result.rows[0]) return { storageReady: true, plan: result.rows[0] };
       }
-      return { storageReady: tables.trial || tables.mission, plan: null };
+      return { storageReady: tables.trial || tables.mission || tables.manual, plan: null };
     },
 
-    async previousPlan(source, date) {
+    async previousPlan(source, date, userId = null) {
       const tables = await available();
       if (!tables[source]) return null;
-      const result = await (await database()).query(`${planSelect(source)} WHERE plan_date < $1::date ORDER BY plan_date DESC LIMIT 1`, [String(date)]);
+      const result = source === 'manual'
+        ? await (await database()).query(`${planSelect(source)} AND plan_date < $2::date ORDER BY plan_date DESC LIMIT 1`, [String(userId || ''), String(date)])
+        : await (await database()).query(`${planSelect(source)} WHERE plan_date < $1::date ORDER BY plan_date DESC LIMIT 1`, [String(date)]);
       return result.rows[0] || null;
     },
 
-    async runsByBatchIds(batchIds) {
+    async runsByBatchIds(batchIds, userId = null) {
       if (!batchIds.length) return [];
       const result = await (await database()).query(`SELECT id::text AS id, batch_id, service_key, question_id, dataset_version, question,
-        status, error, scores, answer_truncated, started_at, finished_at,
+        status, error, scores, answer_truncated, started_at, finished_at, to_jsonb(unified_evaluation_runs)->>'comparison_group_id' AS comparison_group_id,
         run->>'elapsedMs' AS elapsed_ms, run->>'status' AS run_status,
         COALESCE(run->'scoring'->'ruleSnapshot', run->'ruleSnapshot') AS rule_snapshot
         FROM public.unified_evaluation_runs
-        WHERE origin='automation' AND batch_id = ANY($1::text[])
-        ORDER BY started_at, id`, [batchIds.map(String)]);
+        WHERE (origin='automation' OR (origin='manual' AND to_jsonb(unified_evaluation_runs)->>'owner_user_id'=$2)) AND batch_id = ANY($1::text[])
+        ORDER BY started_at, id`, [batchIds.map(String), String(userId || '')]);
       return result.rows;
     },
   };

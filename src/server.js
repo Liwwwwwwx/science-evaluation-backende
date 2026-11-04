@@ -28,6 +28,9 @@ const { validDate } = require('./daily-reports/summary');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
 const { createTrialBatchService, TARGETS } = require('./runs/trial-batch.service');
+const { createBatchSchemeRepository } = require('./runs/batch-scheme.repository');
+const { createManualBatchRepository } = require('./runs/manual-batch.repository');
+const { createManualBatchService } = require('./runs/manual-batch.service');
 const { createTrialBatchScheduler } = require('./runs/trial-batch.scheduler');
 const { createStandardsRepository } = require('./standards/repository');
 const { automationEnabled, httpSettings, missionTimeoutMs } = require('./runtime-config');
@@ -47,6 +50,8 @@ let missionDailyReport;
 let dailyReports;
 let rules;
 let trialScheduler;
+let batchSchemes;
+let manualBatches;
 let standardsRepository;
 if (databaseUrl) {
   ({ publicOrigin, secureCookies } = httpSettings());
@@ -71,20 +76,23 @@ if (databaseUrl) {
   const dailyMultiService = automation && process.env.EVALUATION_DAILY_MULTI_SERVICE_ENABLED === 'true';
   if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
   const serviceAddresses = Object.fromEntries(Object.keys(TARGETS).map(key => [key, evaluators[key]?.serviceAddress || null]));
-  if ((trialDate || dailyMultiService) && (process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true' || Object.values(serviceAddresses).some(value => !value))) throw new Error('六服务自动测评需要启用运行写入和全部六个服务');
+  if ((trialDate || dailyMultiService) && process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true') throw new Error('自动测评需要启用运行写入');
   const scoring = createScoringService({ rules });
-  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, serviceLimits: trialDate || dailyMultiService ? { 'literature-aircraft': 1 } : {} });
+  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 } });
   batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
+  batchSchemes = createBatchSchemeRepository({ pgPool: pool });
+  const trialRepository = createTrialBatchRepository({ pgPool: pool });
+  const generator = createQuestionBankGenerationService();
+  const trialService = createTrialBatchService({ repository: trialRepository, evaluations, scoring, serviceAddresses, generator, schemes: batchSchemes });
+  manualBatches = createManualBatchService({ repository: createManualBatchRepository({ pgPool: pool, schemes: batchSchemes }), evaluations, scoring, serviceAddresses, generator, trialService, schemes: batchSchemes, onError: () => console.error('手动组合测评暂不可用，请检查批次状态') });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
     serviceAddress: evaluators['mission-material']?.serviceAddress || null,
     enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'], skipDate: day => dailyMultiService || day === trialDate,
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
   if (trialDate || dailyMultiService) {
-    const repository = createTrialBatchRepository({ pgPool: pool });
-    const service = createTrialBatchService({ repository, evaluations, scoring, serviceAddresses, generator: createQuestionBankGenerationService() });
-    trialScheduler = createTrialBatchScheduler({ date: trialDate, daily: dailyMultiService, service, repository, missionRepository: plans,
-      onError: () => console.error('六服务自动测评尚未准备或派发完成，请检查计划和未完成任务') });
+    trialScheduler = createTrialBatchScheduler({ date: trialDate, daily: dailyMultiService, service: trialService, repository: trialRepository, missionRepository: plans,
+      onError: () => console.error('自动测评尚未准备或派发完成，请检查服务地址、对比存储及未完成任务') });
   }
   const notifier = createFeishuTestNotifier();
   const dailyReportEnabled = automation && process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
@@ -107,9 +115,10 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
+  if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') manualBatches?.start();
   missionDaily?.start();
   trialScheduler?.start();
   missionDailyReport?.start();

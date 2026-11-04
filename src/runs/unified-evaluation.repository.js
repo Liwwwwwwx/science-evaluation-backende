@@ -209,7 +209,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title
         FROM public.unified_evaluation_runs r
         LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
-        WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND coalesce(h.hidden,false)=false
+        WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND r.batch_id IS NULL AND coalesce(h.hidden,false)=false
         ORDER BY r.started_at DESC,r.id DESC LIMIT 50`, [userId]);
       return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at) }));
     },

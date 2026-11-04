@@ -2240,6 +2240,69 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/evaluation/unified/batch-schemes:
+    get:
+      tags: [测评批次]
+      summary: 查看测评方案
+      description: 返回默认配比、已保存方案、当前账号和可维护/可发起权限；未迁移时 storageReady 为 false。
+      responses:
+        '200': { description: 方案清单 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [测评批次]
+      summary: 管理员保存测评方案
+      description: 仅内置 admin 可保存；版本不一致返回 409。设为夜间方案只影响后续新批次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, version, isNightly, config]
+              properties:
+                id: { type: string, format: uuid, description: 省略时新建方案 }
+                name: { type: string, maxLength: 80 }
+                version: { type: integer, minimum: 0, description: 新建为0，修改需提交当前版本 }
+                isNightly: { type: boolean }
+                config: { $ref: '#/components/schemas/BatchSchemeConfig' }
+      responses:
+        '200': { description: 已保存方案 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 方案版本冲突 }
+        '503': { description: 运行写入关闭或方案存储未迁移 }
+
+  /api/evaluation/unified/batch-schemes/run:
+    post:
+      tags: [测评批次]
+      summary: 发起个人组合测评批次
+      description: 使用指定配比创建个人批次，不占用夜间日期名额，也不进入夜间日报；相同用户和幂等键重试返回原批次。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config: { $ref: '#/components/schemas/BatchSchemeConfig' }
+                schemeId: { type: string, format: uuid, nullable: true }
+                schemeVersion: { type: integer, nullable: true }
+      responses:
+        '202': { description: 已接受，返回 batchId、state 和 reused }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 已有活动批次、方案版本冲突或幂等键冲突 }
+        '503': { description: 所选服务、运行归属或对比存储不可用 }
+
   /api/evaluation/unified/batches:
     get:
       tags: [测评批次]
@@ -2248,7 +2311,7 @@ paths:
       parameters:
         - name: source
           in: query
-          schema: { type: string, enum: [all, trial, mission], default: all }
+          schema: { type: string, enum: [all, trial, mission, manual], default: all }
         - name: state
           in: query
           schema: { type: string, enum: [preparing, dispatching, running, done, partial, failed] }
@@ -3335,6 +3398,23 @@ components:
           type: string
           nullable: true
 
+    BatchSchemeCounts:
+      type: object
+      required: [aviation, synthesis]
+      properties:
+        aviation: { type: integer, minimum: 0, maximum: 100 }
+        synthesis: { type: integer, minimum: 0, maximum: 100 }
+    BatchSchemeConfig:
+      type: object
+      required: [pools, services, compareSynthesisAlpha]
+      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合成制备使用相同数量的合成题。
+      properties:
+        pools: { $ref: '#/components/schemas/BatchSchemeCounts' }
+        services:
+          type: object
+          required: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material, alpha-rsi]
+          additionalProperties: { $ref: '#/components/schemas/BatchSchemeCounts' }
+        compareSynthesisAlpha: { type: boolean }
     BatchSummary:
       type: object
       required: [batchId, date, source, state, planned]
@@ -3348,7 +3428,7 @@ components:
           nullable: true
         source:
           type: string
-          enum: [trial, mission]
+          enum: [trial, mission, manual]
         state:
           type: string
           enum: [preparing, dispatching, running, done, partial, failed]

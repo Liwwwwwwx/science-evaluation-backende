@@ -1,6 +1,6 @@
 const { TeamServiceError } = require('../errors');
 
-const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'];
+const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi'];
 const SERVICE_LABELS = {
   'mission-material': 'Mission 主服务',
   literature: '文献检索',
@@ -8,6 +8,7 @@ const SERVICE_LABELS = {
   alloy: '合金材料',
   synthesis: '合成制备',
   'new-material': '新材料',
+  'alpha-rsi': 'ALPHA 材料 RSI（1110）',
 };
 const JUDGES = { deepSeek: 'deepSeekScore', qwen: 'qwenScore' };
 const THRESHOLD_POINTS = 5;
@@ -27,9 +28,11 @@ function iso(value) {
 }
 
 function servicePlans(plan) {
-  if (plan.source === 'trial') {
+  if (plan.source === 'trial' || plan.source === 'manual') {
     const items = plan.items && typeof plan.items === 'object' && !Array.isArray(plan.items) ? plan.items : {};
-    return SERVICE_ORDER.map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: Array.isArray(items[key]) ? items[key].length : 0 }));
+    const config = plan.config_snapshot?.config;
+    const expected = key => Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
+    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
   return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: Array.isArray(plan.items) ? plan.items.length : 0 }];
 }
@@ -60,6 +63,7 @@ function mapRun(row) {
     questionId: row.question_id || null,
     datasetVersion: row.dataset_version || null,
     question: String(row.question || ''),
+    comparisonGroupId: row.comparison_group_id || null,
     serviceKey: row.service_key,
     status: row.status,
     execution: executionOf(row),
@@ -215,6 +219,7 @@ function detailOf(plan, runs) {
       planned,
       services: servicePlans(plan),
       rule: plan.rule_snapshot ? { name: plan.rule_snapshot.name || null, version: plan.rule_snapshot.version || null, hash: plan.rule_snapshot.hash || null } : { name: null, version: null, hash: null },
+      scheme: plan.config_snapshot?.scheme || null,
       startedAt: iso(plan.created_at),
       updatedAt: iso(plan.updated_at),
       error: plan.error || null,
@@ -226,9 +231,9 @@ function detailOf(plan, runs) {
       planned,
       persisted: totals.total,
       missing: Math.max(0, planned - totals.total),
-      note: '已持久化自动测评；未入库脚本不在统计范围内。',
+      note: plan.source === 'manual' ? '仅显示当前账号的手动组合测评。' : '已持久化自动测评；未入库脚本不在统计范围内。',
     },
-    links: { dailyReport: `/daily-reports/${dateOnly(plan.plan_date)}`, comparison: `/batches/${plan.id}/comparison` },
+    links: { dailyReport: plan.source === 'manual' ? null : `/daily-reports/${dateOnly(plan.plan_date)}`, comparison: `/batches/${plan.id}/comparison` },
   };
 }
 
@@ -357,13 +362,13 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
 function createBatchReadService({ repository } = {}) {
   if (!repository) throw new Error('批次读取仓储未配置');
 
-  async function list({ source = 'all', state = '', from = '', to = '', page = 1, pageSize = PAGE_SIZE } = {}) {
+  async function list({ source = 'all', state = '', from = '', to = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
     const items = [];
     const chunkSize = 100;
     for (let offset = 0; ; offset += chunkSize) {
-      const result = await repository.plans({ source, from, to, limit: chunkSize, offset });
+      const result = await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
       if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
-      const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id));
+      const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id), userId);
       const byBatch = new Map();
       for (const run of runs) {
         if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
@@ -376,21 +381,21 @@ function createBatchReadService({ repository } = {}) {
     return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true };
   }
 
-  async function get(id) {
-    const found = await repository.plan(id);
+  async function get(id, userId = null) {
+    const found = await repository.plan(id, userId);
     if (!found.storageReady) throw new TeamServiceError(503, 'BATCH_STORAGE_UNAVAILABLE', '批次存储尚未迁移');
     if (!found.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '批次不存在');
-    const runs = (await repository.runsByBatchIds([String(id)])).map(mapRun);
+    const runs = (await repository.runsByBatchIds([String(id)], userId)).map(mapRun);
     return detailOf(found.plan, runs);
   }
 
-  async function runs(id, { serviceKey = '', status = '', execution = '', sort = 'scoreAsc', page = 1, pageSize = PAGE_SIZE } = {}) {
-    const found = await repository.plan(id);
+  async function runs(id, { serviceKey = '', status = '', execution = '', sort = 'scoreAsc', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
+    const found = await repository.plan(id, userId);
     if (!found.storageReady) throw new TeamServiceError(503, 'BATCH_STORAGE_UNAVAILABLE', '批次存储尚未迁移');
     if (!found.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '批次不存在');
     const allowed = servicePlans(found.plan).map((service) => service.key);
     if (serviceKey && !allowed.includes(serviceKey)) throw new TeamServiceError(400, 'BATCH_SERVICE_INVALID', '服务筛选无效');
-    let items = (await repository.runsByBatchIds([String(id)])).map(mapRun);
+    let items = (await repository.runsByBatchIds([String(id)], userId)).map(mapRun);
     if (serviceKey) items = items.filter((run) => run.serviceKey === serviceKey);
     if (status) items = items.filter((run) => run.status === status);
     if (execution) items = items.filter((run) => run.execution === execution);
@@ -408,21 +413,21 @@ function createBatchReadService({ repository } = {}) {
     return { batchId: String(id), items: items.slice((safePage - 1) * pageSize, safePage * pageSize).map(publicRun), total: items.length, page: safePage, pageSize };
   }
 
-  async function comparison(id, { against = 'previous' } = {}) {
-    const found = await repository.plan(id);
+  async function comparison(id, { against = 'previous', userId = null } = {}) {
+    const found = await repository.plan(id, userId);
     if (!found.storageReady) throw new TeamServiceError(503, 'BATCH_STORAGE_UNAVAILABLE', '批次存储尚未迁移');
     if (!found.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '批次不存在');
-    const baseRuns = (await repository.runsByBatchIds([String(id)])).map(mapRun);
+    const baseRuns = (await repository.runsByBatchIds([String(id)], userId)).map(mapRun);
     let previousPlan = null;
     if (against && against !== 'previous') {
-      const target = await repository.plan(against);
+      const target = await repository.plan(against, userId);
       if (!target.storageReady) throw new TeamServiceError(503, 'BATCH_STORAGE_UNAVAILABLE', '批次存储尚未迁移');
       if (!target.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '对比批次不存在');
       previousPlan = target.plan;
     } else {
-      previousPlan = await repository.previousPlan(found.plan.source, found.plan.plan_date);
+      previousPlan = await repository.previousPlan(found.plan.source, found.plan.plan_date, userId);
     }
-    const previousRuns = previousPlan ? (await repository.runsByBatchIds([String(previousPlan.id)])).map(mapRun) : [];
+    const previousRuns = previousPlan ? (await repository.runsByBatchIds([String(previousPlan.id)], userId)).map(mapRun) : [];
     return comparisonOf(found.plan, previousPlan, baseRuns, previousRuns);
   }
 
