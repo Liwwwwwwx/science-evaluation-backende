@@ -38,6 +38,30 @@ test('主服务按 Mission 协议发送独立任务，记录显式进度并流�
   assert.equal(result.taskid, started.run.id);
 });
 
+test('服务并发上限提示不被当作可评分回答', async () => {
+  const { evaluator, sockets } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '请设计材料测试方案' }, { onText() {} });
+  await flush(); const socket = sockets[0];
+  socket.message('[start]');
+  socket.message('Hermes is at the active session limit (32/32). Try again when another session finishes.');
+  socket.emit('close', { code: 1000 });
+  const result = await started.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /并发上限/);
+});
+
+test('非正常关闭保留最后一段正文作为原因', async () => {
+  const { evaluator, sockets } = fixture();
+  const started = await evaluator.startQuestionRun({ question: '请设计材料测试方案' }, { onText() {} });
+  await flush(); const socket = sockets[0];
+  socket.message('[start]开始执行');
+  socket.emit('close', { code: 1006 });
+  const result = await started.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /关闭码 1006/);
+  assert.match(result.error, /开始执行/);
+});
+
 test('按旧协议答复下游确认和补充输入，重复请求不重复答复', async () => {
   const { evaluator, sockets, sent } = fixture();
   const started = await evaluator.startQuestionRun({ question: '请根据条件完成材料设计' }, { onText() {} });

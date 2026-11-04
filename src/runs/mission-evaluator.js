@@ -11,6 +11,8 @@ const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_FRAMES = 100000;
 const MAX_CHECKPOINTS = 200;
+// 服务达到并发上限时会把提示当作最终正文返回；不能把它当成可评分回答。
+const SERVICE_LIMIT_RE = /active session limit|Try again when another session finishes/i;
 
 // Mission 的确认卡可能携带下游 taskid；只能在收到该卡的连接内答复。
 // 默认 60 分钟，可由 EVALUATION_MISSION_TIMEOUT_MS 覆盖；服务端启动时校验并注入。
@@ -164,6 +166,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
         if (openSummaries.size) return;
         if (text.length + raw.length > MAX_ANSWER_CHARS) return finish('Mission 回答超过保存上限');
         text += raw; onText(raw);
+        if (SERVICE_LIMIT_RE.test(text)) return finish('Mission 服务当前达到并发上限，请稍后重试');
       }
       try {
         socket = createSocket(target.href);
@@ -181,7 +184,8 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
           transport.wasClean = typeof event?.wasClean === 'boolean' ? event.wasClean : null;
           void messageChain.then(() => {
             const incomplete = openSummaries.size > 0;
-            const error = !received ? 'Mission 连接未返回业务输出' : ![1000, 1001].includes(transport.closeCode) ? `Mission 连接中断（关闭码 ${transport.closeCode ?? '未知'}）` : incomplete ? 'Mission 最终总结未收到结束帧' : null;
+            const visible = text.replace(/\[start\]|\[end\]/g, '').trim();
+            const error = !received ? 'Mission 连接未返回业务输出' : ![1000, 1001].includes(transport.closeCode) ? `Mission 连接中断（关闭码 ${transport.closeCode ?? '未知'}）${visible ? `：${visible.slice(-160)}` : ''}` : incomplete ? 'Mission 最终总结未收到结束帧' : null;
             finish(error);
           });
         });
