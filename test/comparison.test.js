@@ -110,3 +110,68 @@ test('对比组读取只返回当前账号的运行', async () => {
   await assert.rejects(service.getComparison(created.groupId, 'u2'), (error) => error.status === 404);
   await assert.rejects(service.getComparison('not-a-group', 'u1'), (error) => error.code === 'COMPARISON_ID_INVALID');
 });
+
+test('同一对比幂等键绑定完整服务组合和题目', async () => {
+  const repository = createRepository();
+  const service = createUnifiedEvaluationService({ evaluators: { 'mission-material': evaluator(), 'alpha-rsi': evaluator(), literature: evaluator(), synthesis: evaluator() }, repository, scoring: scoring([]) });
+  const options = { scope: 'evaluation-user:u1', key: 'whole-request' };
+  const original = { serviceKeys: ['mission-material', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
+  await service.createComparison(original, options);
+  for (const changed of [ { ...original, serviceKeys: ['mission-material', 'literature'] }, { ...original, serviceKeys: ['literature', 'synthesis'] }, { ...original, question: '请比较材料在低温下的性能并说明理由。' } ]) {
+    await assert.rejects(service.createComparison(changed, options), e => e.code === 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT');
+  }
+  assert.equal(repository.keys.size, 2);
+});
+
+test('部分创建后规则变化，重试仍使用首条运行的原始快照', async () => {
+  const repository = createRepository();
+  const create = repository.createIdempotent;
+  let fail = true;
+  repository.createIdempotent = async (...args) => { if (args[0].serviceKey === 'alpha-rsi' && fail) { fail = false; throw new Error('模拟中断'); } return create(...args); };
+  let version = 1;
+  const judge = scoring([]);
+  judge.snapshotRule = async () => ({ id: 'rule', version, name: '规则', hash: `hash-${version}` });
+  const service = createUnifiedEvaluationService({ evaluators: { 'mission-material': evaluator(), 'alpha-rsi': evaluator() }, repository, scoring: judge });
+  const input = { serviceKeys: ['mission-material', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
+  const options = { scope: 'evaluation-user:u1', key: 'retry-rule' };
+  await assert.rejects(service.createComparison(input, options), /模拟中断/);
+  version = 2;
+  const result = await service.createComparison(input, options);
+  assert.equal((await repository.get(result.runs[0].runId)).run.ruleSnapshot.version, 1);
+  assert.equal((await repository.get(result.runs[1].runId)).run.ruleSnapshot.version, 1);
+});
+
+test('并发使用同一键但不同组合时只允许一个完整对比组', async () => {
+  const repository = createRepository();
+  let version = 0;
+  const judge = scoring([]);
+  judge.snapshotRule = async () => ({ id: 'rule', version: ++version, hash: `hash-${version}` });
+  const service = createUnifiedEvaluationService({ evaluators: { 'mission-material': evaluator(), 'alpha-rsi': evaluator(), literature: evaluator() }, repository, scoring: judge });
+  const options = { scope: 'evaluation-user:u1', key: 'concurrent' };
+  const question = '请比较材料在高温下的性能并说明理由。';
+  const attempts = await Promise.allSettled([
+    service.createComparison({ serviceKeys: ['mission-material', 'alpha-rsi'], question }, options),
+    service.createComparison({ serviceKeys: ['literature', 'alpha-rsi'], question }, options),
+  ]);
+  assert.equal(attempts.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(attempts.find(item => item.status === 'rejected').reason.code, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT');
+  const group = attempts.find(item => item.status === 'fulfilled').value;
+  assert.equal(repository.keys.size, 2);
+  const left = await repository.get(group.runs[0].runId), right = await repository.get(group.runs[1].runId);
+  assert.equal(left.run.ruleSnapshot.hash, right.run.ruleSnapshot.hash);
+});
+
+test('并发重复请求共享首条运行的规则快照', async () => {
+  const repository = createRepository();
+  let version = 0;
+  const judge = scoring([]);
+  judge.snapshotRule = async () => ({ id: 'rule', version: ++version, hash: `hash-${version}` });
+  const service = createUnifiedEvaluationService({ evaluators: { 'mission-material': evaluator(), 'alpha-rsi': evaluator() }, repository, scoring: judge });
+  const input = { serviceKeys: ['mission-material', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
+  const options = { scope: 'evaluation-user:u1', key: 'concurrent-same' };
+  const results = await Promise.all(Array.from({ length: 8 }, () => service.createComparison(input, options)));
+  assert.equal(new Set(results.map(item => item.runs[0].runId)).size, 1);
+  assert.equal(new Set(results.map(item => item.runs[1].runId)).size, 1);
+  const left = await repository.get(results[0].runs[0].runId), right = await repository.get(results[0].runs[1].runId);
+  assert.equal(left.run.ruleSnapshot.hash, right.run.ruleSnapshot.hash);
+});

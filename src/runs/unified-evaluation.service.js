@@ -686,21 +686,27 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       if (!['fixed', 'random'].includes(metadata.sourceType) || !metadata.questionId || !metadata.datasetVersion || !resolveQuestion) throw new TeamServiceError(400, 'QUESTION_SOURCE_INVALID', '请选择有效的题目和版本');
       for (const serviceKey of serviceKeys) await resolveQuestion({ ...metadata, serviceKey, question: text });
     }
-    // 同一幂等键重试时对比组保持不变；对比组覆盖两条运行共用同一份规则快照。
+    // 第一个成员是整个对比请求的幂等锚点；请求哈希覆盖完整服务组合和题目。
     const groupId = crypto.createHash('sha256').update(JSON.stringify(['comparison', scope, key])).digest('hex');
-    const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
-    const runs = [];
-    for (const serviceKey of serviceKeys) {
-      const runKey = crypto.createHash('sha256').update(`comparison:${serviceKey}:${key}`).digest('hex');
-      const hash = crypto.createHash('sha256').update(JSON.stringify({
-        serviceKey, question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId,
-        rule: ruleSnapshot ? { id: ruleSnapshot.id, version: ruleSnapshot.version, hash: ruleSnapshot.hash } : null,
-      })).digest('hex');
-      const result = await start({ serviceKey, question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId }, {
-        idempotency: { scope, key: runKey, hash }, caseDef: null, ruleSnapshot, scoreMode: evaluators[serviceKey].scoreMode,
-      });
-      runs.push({ runId: result.runId, serviceKey, reused: result.reused === true });
-    }
+    const request = { serviceKeys, question: text, ...metadata, comparisonGroupId: groupId };
+    const runKey = (index) => crypto.createHash('sha256').update(`comparison:${index}:${key}`).digest('hex');
+    const hash = (index) => crypto.createHash('sha256').update(JSON.stringify({ ...request, index })).digest('hex');
+    const prior = await repository.findIdempotent(scope, runKey(0));
+    if (prior && prior.hash !== hash(0)) throw new TeamServiceError(409, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT', '幂等键已用于不同请求');
+    const original = prior ? await repository.get(prior.runId) : null;
+    if (prior && !original) throw new TeamServiceError(503, 'COMPARISON_STORAGE_UNAVAILABLE', '原对比请求暂不可读取，请稍后使用原请求重试');
+    let ruleSnapshot = prior ? original.run?.ruleSnapshot || null : scoring?.snapshotRule ? await scoring.snapshotRule() : null;
+    const first = await start({ serviceKey: serviceKeys[0], question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId }, {
+      idempotency: { scope, key: runKey(0), hash: hash(0) }, caseDef: null, ruleSnapshot, scoreMode: evaluators[serviceKeys[0]].scoreMode,
+    });
+    // 并发请求可能各自读取到不同规则：始终以实际写入的首条运行为准。
+    const anchor = await repository.get(first.runId);
+    if (!anchor) throw new TeamServiceError(503, 'COMPARISON_STORAGE_UNAVAILABLE', '原对比请求暂不可读取，请稍后使用原请求重试');
+    ruleSnapshot = anchor.run?.ruleSnapshot || null;
+    const second = await start({ serviceKey: serviceKeys[1], question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId }, {
+      idempotency: { scope, key: runKey(1), hash: hash(1) }, caseDef: null, ruleSnapshot, scoreMode: evaluators[serviceKeys[1]].scoreMode,
+    });
+    const runs = [first, second].map((result, index) => ({ runId: result.runId, serviceKey: serviceKeys[index], reused: result.reused === true }));
     return { groupId, runs };
   }
 

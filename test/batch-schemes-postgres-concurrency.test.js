@@ -141,6 +141,20 @@ test('独立 PostgreSQL：方案并发、幂等、调度互斥、归属和日报
   assert.equal(groups.rowCount, 50);
   await large.dispatch('2027-03-01');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE batch_id=$1', [largePlan.id])).rows[0].n, 320);
+  const compareOptions = { scope: 'evaluation-user:alice', key: 'pg-comparison-retry' };
+  const compareInput = { serviceKeys: ['synthesis', 'alpha-rsi'], question: '请比较新材料的合成路线与性能依据。' };
+  const comparisons = await Promise.all(Array.from({ length: 8 }, () => allEvaluations.createComparison(compareInput, compareOptions)));
+  assert.equal(new Set(comparisons.map(item => item.runs[0].runId)).size, 1);
+  assert.equal(new Set(comparisons.map(item => item.runs[1].runId)).size, 1);
+  await assert.rejects(allEvaluations.createComparison({ ...compareInput, serviceKeys: ['synthesis', 'literature'] }, compareOptions), { code: 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT' });
+  const compareCount = await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE comparison_group_id=$1', [comparisons[0].groupId]);
+  assert.equal(compareCount.rows[0].n, 2);
+  for (let i = 0; i < 200; i++) {
+    const pending = await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE comparison_group_id=$1 AND finished_at IS NULL', [comparisons[0].groupId]);
+    if (!pending.rows[0].n) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    if (i === 199) assert.fail('对比运行未完成');
+  }
   t.diagnostic(`320 次运行完成，最高并发 ${highest}；航空文献最高并发 ${maxByService.get('literature-aircraft')}。`);
   t.diagnostic(`本机隔离测试库保留供检查：${database}`);
 });
