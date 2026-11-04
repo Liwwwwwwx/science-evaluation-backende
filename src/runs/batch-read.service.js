@@ -22,6 +22,7 @@ function dateOnly(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
 }
+function planDate(plan) { return dateOnly(plan.calendar_date ?? plan.plan_date); }
 
 function iso(value) {
   return value ? new Date(value).toISOString() : null;
@@ -169,7 +170,7 @@ function summaryOf(plan, runs) {
   const totals = totalsOf(runs, planned);
   return {
     batchId: plan.id,
-    date: dateOnly(plan.plan_date),
+    date: planDate(plan),
     source: plan.source,
     state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
     rawState: plan.state,
@@ -224,7 +225,7 @@ function detailOf(plan, runs) {
   return {
     batch: {
       batchId: plan.id,
-      date: dateOnly(plan.plan_date),
+      date: planDate(plan),
       source: plan.source,
       state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
       rawState: plan.state,
@@ -245,7 +246,7 @@ function detailOf(plan, runs) {
       missing: Math.max(0, planned - totals.total),
       note: plan.source === 'manual' ? '仅显示当前账号的手动组合测评。' : '已持久化自动测评；未入库脚本不在统计范围内。',
     },
-    links: { dailyReport: plan.source === 'manual' ? null : `/daily-reports/${dateOnly(plan.plan_date)}`, comparison: `/batches/${plan.id}/comparison` },
+    links: { dailyReport: plan.source === 'manual' ? null : `/daily-reports/${planDate(plan)}`, comparison: `/batches/${plan.id}/comparison` },
   };
 }
 
@@ -316,11 +317,11 @@ function models(runs) {
 }
 
 function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
-  const base = { batchId: basePlan.id, date: dateOnly(basePlan.plan_date), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
+  const base = { batchId: basePlan.id, date: planDate(basePlan), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
   if (!previousPlan) {
     return { base, previous: null, comparable: false, mode: 'none', reason: '没有更早的同来源批次可用于比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
-  const previous = { batchId: previousPlan.id, date: dateOnly(previousPlan.plan_date), planned: servicePlans(previousPlan).reduce((sum, service) => sum + service.expected, 0) };
+  const previous = { batchId: previousPlan.id, date: planDate(previousPlan), planned: servicePlans(previousPlan).reduce((sum, service) => sum + service.expected, 0) };
   if (basePlan.source !== previousPlan.source) {
     return { base, previous, comparable: false, mode: 'none', reason: '不同来源的批次不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
@@ -454,7 +455,7 @@ function createBatchReadService({ repository } = {}) {
       if (!target.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '对比批次不存在');
       previousPlan = target.plan;
     } else {
-      previousPlan = await repository.previousPlan(found.plan.source, found.plan.plan_date, userId);
+      previousPlan = await repository.previousPlan(found.plan.source, found.plan.calendar_date ?? found.plan.plan_date, userId);
     }
     const previousRuns = previousPlan ? (await repository.runsByBatchIds([String(previousPlan.id)], userId)).map(mapRun) : [];
     return comparisonOf(found.plan, previousPlan, baseRuns, previousRuns);

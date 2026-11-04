@@ -71,4 +71,18 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   for (const options of [{ page: 1, pageSize: 2 }, { page: 2, pageSize: 2 }, { page: 99, pageSize: 2 }, { state: 'failed', page: 1, pageSize: 2 }, { state: 'done', page: 2, pageSize: 2 }]) {
     assert.deepEqual(await optimized.list({ ...options, userId: 'alice' }), await legacy.list({ ...options, userId: 'alice' }), JSON.stringify(options));
   }
+  const day = await optimized.list({ userId: 'alice', from: '2026-11-03', to: '2026-11-03' });
+  assert.equal(day.items.length, 1); assert.equal(day.items[0].date, '2026-11-03');
+  const detail = await optimized.get('batch-extra-1', 'alice');
+  assert.equal(detail.batch.date, '2026-11-03'); assert.equal(detail.links.dailyReport, '/daily-reports/2026-11-03');
+  const comparison = await optimized.comparison('batch-extra-1', { userId: 'alice' });
+  assert.equal(comparison.base.date, '2026-11-03'); assert.equal(comparison.previous.date, '2026-11-02');
+  await db.exec(`CREATE TABLE evaluation_mission_daily_plans (plan_date date, id text, state text, items jsonb, rule_snapshot jsonb, reason text, created_at timestamptz, updated_at timestamptz);
+    CREATE TABLE evaluation_manual_batch_plans (plan_date date, id text, state text, items jsonb, rule_snapshot jsonb, error text, created_at timestamptz, updated_at timestamptz, config_snapshot jsonb, created_by text);
+    INSERT INTO evaluation_mission_daily_plans VALUES ('2026-11-04','mission-1','submitted','[]',NULL,NULL,'2026-11-04','2026-11-04');
+    INSERT INTO evaluation_manual_batch_plans VALUES ('2026-11-04','manual-1','submitted','{}',NULL,NULL,'2026-11-04','2026-11-04',NULL,'alice');`);
+  assert.equal((await optimized.get('mission-1', 'alice')).batch.date, '2026-11-04');
+  assert.equal((await optimized.get('mission-1', 'alice')).links.dailyReport, '/daily-reports/2026-11-04');
+  assert.equal((await optimized.get('manual-1', 'alice')).batch.date, '2026-11-04');
+  assert.equal((await optimized.list({ source: 'nightly', from: '2026-11-04', to: '2026-11-04', userId: 'alice' })).items.every(item => item.date === '2026-11-04'), true);
 });

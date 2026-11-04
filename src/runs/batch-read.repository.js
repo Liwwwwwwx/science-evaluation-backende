@@ -25,12 +25,12 @@ function createBatchReadRepository({ pgPool } = {}) {
   }
 
   function planSelect(source) {
-    if (source === 'manual') return `SELECT 'manual'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, config_snapshot FROM public.evaluation_manual_batch_plans WHERE created_by=$1`;
+    if (source === 'manual') return `SELECT 'manual'::text AS source, plan_date, plan_date::text AS calendar_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, config_snapshot FROM public.evaluation_manual_batch_plans WHERE created_by=$1`;
     if (source === 'trial') {
-      return `SELECT 'trial'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, to_jsonb(evaluation_trial_batch_plans)->'config_snapshot' AS config_snapshot
+      return `SELECT 'trial'::text AS source, plan_date, plan_date::text AS calendar_date, id::text AS id, state, items, rule_snapshot, error, created_at, updated_at, to_jsonb(evaluation_trial_batch_plans)->'config_snapshot' AS config_snapshot
         FROM public.evaluation_trial_batch_plans`;
     }
-    return `SELECT 'mission'::text AS source, plan_date, id::text AS id, state, items, rule_snapshot, reason AS error, created_at, updated_at, NULL::jsonb AS config_snapshot
+    return `SELECT 'mission'::text AS source, plan_date, plan_date::text AS calendar_date, id::text AS id, state, items, rule_snapshot, reason AS error, created_at, updated_at, NULL::jsonb AS config_snapshot
       FROM public.evaluation_mission_daily_plans`;
   }
 
@@ -70,7 +70,7 @@ function createBatchReadRepository({ pgPool } = {}) {
       const sql = `WITH filtered AS MATERIALIZED (
         SELECT * FROM (${selected.map(planSelect).join(' UNION ALL ')}) plans ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ), page AS (
-          SELECT source,plan_date,id,state,error,created_at,updated_at,config_snapshot,
+          SELECT source,plan_date,calendar_date,id,state,error,created_at,updated_at,config_snapshot,
             CASE WHEN jsonb_typeof(items)='array' THEN jsonb_array_length(items) ELSE NULL END AS item_count,
             CASE WHEN jsonb_typeof(items)='object' THEN (SELECT jsonb_object_agg(entry.key, CASE WHEN jsonb_typeof(entry.value)='array' THEN jsonb_array_length(entry.value) ELSE NULL END) FROM jsonb_each(items) entry) ELSE NULL END AS item_counts
           FROM filtered ORDER BY plan_date DESC,created_at DESC,id DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}
