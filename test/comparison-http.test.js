@@ -13,7 +13,7 @@ test('对比测评接口校验权限、同源、写开关、幂等键和账号�
   const calls = [];
   const groupId = 'a'.repeat(64);
   const evaluations = {
-    async createComparison(input, { scope, key }) { calls.push({ input, scope, key }); return { groupId, runs: [{ runId: '1', serviceKey: 'mission-material' }, { runId: '2', serviceKey: 'alpha-rsi' }] }; },
+    async createComparison(input, { scope, key }) { calls.push({ input, scope, key }); return { groupId, runs: [{ runId: '1', serviceKey: 'synthesis' }, { runId: '2', serviceKey: 'alpha-rsi' }] }; },
     async getComparison(id, userId) {
       if (id !== groupId) throw Object.assign(new Error('对比组不存在'), { status: 404, code: 'COMPARISON_NOT_FOUND' });
       return { groupId: id, runs: [{ runId: '1', userId }, { runId: '2', userId }] };
@@ -23,7 +23,7 @@ test('对比测评接口校验权限、同源、写开关、幂等键和账号�
   await new Promise((resolve) => enabled.listen(0, '127.0.0.1', resolve));
   t.after(() => enabled.close());
   const base = `http://127.0.0.1:${enabled.address().port}/api/evaluation/unified/comparisons`;
-  const body = JSON.stringify({ serviceKeys: ['mission-material', 'alpha-rsi'], question: '请比较两种材料在 900°C 下的强度并说明依据。' });
+  const body = JSON.stringify({ serviceKeys: ['synthesis', 'alpha-rsi'], question: '请比较两种材料在 900°C 下的强度并说明依据。' });
   const post = (token = 'writer', origin = 'http://localhost', key = 'compare-key') => fetch(base, { method: 'POST', headers: { cookie: `evaluation_session=${token}`, origin, 'content-type': 'application/json', 'Idempotency-Key': key }, body });
   assert.equal((await fetch(base, { method: 'POST' })).status, 401);
   assert.equal((await post('reader')).status, 403);
@@ -33,7 +33,7 @@ test('对比测评接口校验权限、同源、写开关、幂等键和账号�
   assert.equal(calls.length, 1);
   assert.equal(calls[0].scope, 'evaluation-user:writer');
   assert.equal(calls[0].key, 'compare-key');
-  assert.deepEqual(calls[0].input.serviceKeys, ['mission-material', 'alpha-rsi']);
+  assert.deepEqual(calls[0].input.serviceKeys, ['synthesis', 'alpha-rsi']);
   assert.equal((await created.json()).groupId, groupId);
 
   const read = await fetch(`${base}/${groupId}`, { headers: { cookie: 'evaluation_session=reader' } });

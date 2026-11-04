@@ -40,12 +40,12 @@ test('侧栏存储尚未迁移时保留原运行列表，写入明确返回不�
 test('列表仅将当前进程无法确认的活动记录标为快照，不改写数据库状态', async () => {
   let liveId; let complete;
   const completion = new Promise(resolve => { complete = resolve; });
-  const items = () => [{ runId: liveId, status: 'running' }, { runId: 'previous', status: 'running' }, { runId: 'finished', status: 'done' }];
+  const items = () => [{ runId: liveId, status: 'done' }, { runId: 'previous', status: 'running' }, { runId: 'finished', status: 'done' }];
   const repository = { async findIdempotent() { return null; }, async createIdempotent(job) { liveId = job.runId; return { created: true }; }, async save() {}, async get() { return null; }, async listHistory() { return items(); }, async list() { return { items: items(), total: 3 }; } };
   const service = createUnifiedEvaluationService({ repository, evaluators: { literature: { async startQuestionRun() { return { run: { id: 'native' }, completion }; }, async getRunQuality() { return { status: 'absent' }; } } } });
   const started = await service.createRun({ serviceKey: 'literature', question: '请提供一份可以验证的说明。' }, { scope: 'evaluation-user:u1', key: 'history-recovery' });
   for (const result of [await service.listHistory('u1'), await service.list({})]) {
-    assert.equal(result.items[0].runId, started.runId); assert.equal(result.items[0].recoveryState, undefined);
+    assert.equal(result.items[0].runId, started.runId); assert.equal(result.items[0].status, 'running'); assert.equal(result.items[0].recoveryState, undefined);
     assert.equal(result.items[1].status, 'running'); assert.equal(result.items[1].recoveryState, 'snapshot_only');
     assert.equal(result.items[2].recoveryState, undefined);
   }

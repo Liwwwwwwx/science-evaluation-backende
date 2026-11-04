@@ -146,7 +146,7 @@ test('独立 PostgreSQL：方案并发、幂等、调度互斥、归属和日报
   const comparisons = await Promise.all(Array.from({ length: 8 }, () => allEvaluations.createComparison(compareInput, compareOptions)));
   assert.equal(new Set(comparisons.map(item => item.runs[0].runId)).size, 1);
   assert.equal(new Set(comparisons.map(item => item.runs[1].runId)).size, 1);
-  await assert.rejects(allEvaluations.createComparison({ ...compareInput, serviceKeys: ['synthesis', 'literature'] }, compareOptions), { code: 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT' });
+  await assert.rejects(allEvaluations.createComparison({ ...compareInput, serviceKeys: ['alpha-rsi', 'synthesis'] }, compareOptions), { code: 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT' });
   const compareCount = await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE comparison_group_id=$1', [comparisons[0].groupId]);
   assert.equal(compareCount.rows[0].n, 2);
   for (let i = 0; i < 200; i++) {

@@ -458,7 +458,8 @@ paths:
         需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
-        旧服务维度请求（未传 generationMode）仍需提供非空 topic。两种维度互斥。
+        对比题传 `generationMode=comparison` 和 `serviceKeys`（合成制备与 ALPHA 材料 RSI），只生成一道候选题。
+        旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
         content:
@@ -2111,7 +2112,7 @@ paths:
       summary: 创建对比组
       description: |
         需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`
-        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。两个服务必须不同且已接入。
+        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合成制备与 ALPHA 材料 RSI（1110），且两者均已接入。
         以同一份题面和同一份评分规则快照创建两条人工运行；分组 ID 由账号范围和幂等键确定，
         重试不会重复派发。依赖手工执行的 `migrations/012_comparison_groups.sql`，未迁移返回 503。
       parameters:
@@ -2130,10 +2131,10 @@ paths:
                   maxItems: 2
                   items:
                     type: string
-                    enum: [mission-material, alpha-rsi, literature, literature-aircraft, alloy, synthesis, new-material]
+                    enum: [alpha-rsi, synthesis]
                 question:
                   type: string
-                  description: 题面；8 到两个服务较小上限（synthesis 200，其余 500）
+                  description: 题面；8–200 字符
                 questionId:
                   type: string
                 datasetVersion:
@@ -2307,7 +2308,7 @@ paths:
     get:
       tags: [测评批次]
       summary: 批次列表
-      description: 试跑批次与 Mission 每日计划统一为批次。批次表未迁移时返回 `storageReady=false` 且列表为空。
+      description: 夜间批次和当前用户的手动批次统一展示。批次表未迁移时返回 `storageReady=false` 且列表为空。
       parameters:
         - name: source
           in: query
@@ -2878,8 +2879,17 @@ components:
       properties:
         generationMode:
           type: string
-          enum: [service]
-          description: 按被测服务出题时指定；仅使用 general 方向，topic 可选
+          enum: [service, comparison]
+          description: service 按单服务出题；comparison 根据两个服务生成一道对比题，不自动保存
+        serviceKeys:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            type: string
+            enum: [alpha-rsi, synthesis]
+          description: comparison 模式必填，必须同时包含这两个服务，不能与 serviceKey、domainKey、topic 或 focus 同时提供
         serviceKey:
           type: string
           enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
@@ -2905,6 +2915,14 @@ components:
       type: object
       required: [items, model]
       properties:
+        generationMode:
+          type: string
+          description: 对比出题时为 comparison
+        serviceKeys:
+          type: array
+          items:
+            type: string
+          description: 对比出题时返回请求中的服务
         items:
           type: array
           items:

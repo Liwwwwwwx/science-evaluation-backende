@@ -1022,7 +1022,7 @@ function createEvalQuestionBankRepository({ pool } = {}) {
   }
 
   // 分页检索（管理端题库页）：筛选 + 题面搜索 + 总数。
-  async function listQuestionsPaged({ serviceKey, domainKey, runnableFor, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
+  async function listQuestionsPaged({ serviceKey, domainKey, runnableFor, comparisonWith, maxLength, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
     const where = ['1 = 1'];
     const params = [];
     if (status) { params.push(status); where.push(`status = $${params.length}`); }
@@ -1033,6 +1033,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
       params.push(runnableFor); where.push(`(service_key IS NULL OR service_key = $${params.length})`);
       where.push("layer = 'base' AND source_type IN ('fixed', 'random') AND (criteria IS NULL OR criteria = 'null'::jsonb)");
     }
+    if (comparisonWith) { params.push(comparisonWith); where.push(`(service_key IS NULL OR service_key = $${params.length})`); }
+    if (maxLength != null) { params.push(maxLength); where.push(`char_length(btrim(question)) <= $${params.length}`); }
     if (layer) { params.push(layer); where.push(`layer = $${params.length}`); }
     if (sourceType) { params.push(sourceType); where.push(`source_type = $${params.length}`); }
     if (search) { params.push(`%${search}%`); where.push(`question ILIKE $${params.length}`); }

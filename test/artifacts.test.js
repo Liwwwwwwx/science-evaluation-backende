@@ -25,6 +25,17 @@ test('代理允许固定公开产物源，对上游失败与大小超限给出�
   await assert.rejects(readRunArtifact(run(), 0, { fetchImpl: async () => new Response('x', { headers: { 'content-length': String(MAX_ARTIFACT_BYTES + 1) } }) }), { status: 413 });
   await assert.rejects(readRunArtifact(run(), 0, { fetchImpl: async () => new Response(new Uint8Array(MAX_ARTIFACT_BYTES + 1)) }), { status: 413 });
 });
+test('1110 ALPHA 产物允许同源的本次 alloy 任务路径，拒绝其他任务和服务', async () => {
+  const url = 'http://127.0.0.1:1115/alloy/tasks/task-1/assets/summary.md';
+  const sample = { ...run(url), serviceKey: 'alpha-rsi' };
+  const result = await readRunArtifact(sample, 0, { fetchImpl: async () => new Response('# summary') });
+  assert.equal(result.contentType, 'text/plain; charset=utf-8');
+  assert.equal(result.body.toString(), '# summary');
+  const never = async () => { throw Error('不应联网'); };
+  await assert.rejects(readRunArtifact({ ...run(url), serviceKey: 'alloy' }, 0, { fetchImpl: never }), { status: 403 });
+  await assert.rejects(readRunArtifact({ ...run(url.replace('/task-1/', '/other/')), serviceKey: 'alpha-rsi' }, 0, { fetchImpl: never }), { status: 403 });
+  await assert.rejects(readRunArtifact({ ...run(url.replace('127.0.0.1', 'example.com')), serviceKey: 'alpha-rsi' }, 0, { fetchImpl: never }), { status: 403 });
+});
 test('HTTP产物读取保留会话与读权限校验，无产物404，非法ID400', async t => {
   const server = createApp({ token: 'x'.repeat(32), publicOrigin: 'http://localhost', authService: { authenticate: async token => {
     if (!token) throw Object.assign(Error('请登录'), { status: 401 });

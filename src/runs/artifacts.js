@@ -14,7 +14,8 @@ async function readRunArtifact(run, index, { fetchImpl = fetch } = {}) {
   } catch { fail(403, 'ARTIFACT_ORIGIN_INVALID', '无法核验产物来源，请使用原始文件地址'); }
   const taskid = run.nativeRunId || run.run.taskId;
   const entry = service.pathname.replace(/\/start\/?$/, '').replace(/\/$/, '');
-  const serviceAsset = url.origin === service.origin && ((typeof taskid === 'string' && url.pathname.startsWith(`${entry}/tasks/${encodeURIComponent(taskid)}/assets/`)) || url.pathname.startsWith('/files/'));
+  const taskAsset = typeof taskid === 'string' && (url.pathname.startsWith(`${entry}/tasks/${encodeURIComponent(taskid)}/assets/`) || (run.serviceKey === 'alpha-rsi' && url.pathname.startsWith(`/alloy/tasks/${encodeURIComponent(taskid)}/assets/`)));
+  const serviceAsset = url.origin === service.origin && (taskAsset || url.pathname.startsWith('/files/'));
   const publicAsset = url.origin === 'https://www.science42.tech' && url.pathname.startsWith('/alpha/materials/modelfiles/');
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || /%(?:2f|5c|00|25)/i.test(url.pathname) || (!serviceAsset && !publicAsset)) fail(403, 'ARTIFACT_ORIGIN_INVALID', '产物来源不在当前运行允许范围，请使用原始文件地址');
   const filename = url.pathname.split('/').pop() || 'artifact';
