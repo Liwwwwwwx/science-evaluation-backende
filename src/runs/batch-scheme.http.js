@@ -10,7 +10,7 @@ async function handleBatchSchemes({ req, res, url, user, schemes, manualBatches,
   if (url.pathname === base && req.method === 'GET') {
     const canWrite = runWriteEnabled && user.permissions.includes('team-services:write');
     const data = await schemes.list({ userId: String(user.id), admin: user.username === 'admin' });
-    const nightly = data.storageReady && typeof schemes.nightly === 'function' ? await schemes.nightly() : null;
+    const nightly = data.nightly !== undefined ? data.nightly : data.storageReady && typeof schemes.nightly === 'function' ? await schemes.nightly() : null;
     return reply(res, 200, { ...data, nightly: nightly ? { id: nightly.id, name: nightly.name, version: nightly.version } : null, nightlyEnabled: typeof nightlyEnabled === 'boolean' ? nightlyEnabled : null, userId: String(user.id), defaultConfig: DEFAULT_SCHEME, canManage: canWrite, canSetNightly: canWrite && user.username === 'admin', canRun: canWrite });
   }
   if (req.method !== 'POST') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');

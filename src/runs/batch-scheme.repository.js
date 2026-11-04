@@ -14,8 +14,9 @@ function createBatchSchemeRepository({ pgPool } = {}) {
     return result.rows[0]?.ready === true;
   }
   async function managementReady() {
-    if (!await ready()) return false;
-    const result = await (await db()).query("SELECT count(*)::int=2 AS ready FROM pg_attribute WHERE attrelid=to_regclass('public.evaluation_batch_schemes') AND attname IN ('created_by','deleted_at') AND attnum>0 AND NOT attisdropped");
+    const result = await (await db()).query(`SELECT to_regclass('public.evaluation_batch_schemes') IS NOT NULL
+      AND to_regclass('public.evaluation_manual_batch_plans') IS NOT NULL
+      AND (SELECT count(*)=2 FROM pg_attribute WHERE attrelid=to_regclass('public.evaluation_batch_schemes') AND attname IN ('created_by','deleted_at') AND attnum>0 AND NOT attisdropped) AS ready`);
     return result.rows[0]?.ready === true;
   }
   async function requireManagement() { if (!await managementReady()) throw new TeamServiceError(503, 'BATCH_SCHEMES_NOT_MIGRATED', '批次配置管理尚未迁移'); }
@@ -27,8 +28,12 @@ function createBatchSchemeRepository({ pgPool } = {}) {
     ready, managementReady,
     async list({ userId = null, admin = false } = {}) {
       if (!await managementReady()) return { storageReady: false, items: [] };
-      const r = await (await db()).query(`SELECT * FROM evaluation_batch_schemes WHERE deleted_at IS NULL${userId && !admin ? ' AND created_by=$1' : ''} ORDER BY is_nightly DESC, updated_at DESC`, userId && !admin ? [String(userId)] : []);
-      return { storageReady: true, items: r.rows.map(map) };
+      const r = await (await db()).query(`SELECT
+        COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.is_nightly DESC,s.updated_at DESC) FROM (
+          SELECT * FROM evaluation_batch_schemes WHERE deleted_at IS NULL${userId && !admin ? ' AND created_by=$1' : ''}
+        ) s), '[]'::jsonb) AS items,
+        (SELECT jsonb_build_object('id',id,'name',name,'version',version) FROM evaluation_batch_schemes WHERE is_nightly=true AND deleted_at IS NULL LIMIT 1) AS nightly`, userId && !admin ? [String(userId)] : []);
+      return { storageReady: true, items: (r.rows[0]?.items || []).map(map), nightly: r.rows[0]?.nightly || null };
     },
     async nightly() { if (!await ready()) return null; const r = await (await db()).query('SELECT * FROM evaluation_batch_schemes WHERE is_nightly=true'); return r.rows[0] ? map(r.rows[0]) : null; },
     async save({ id, name, config, version, userId, nightly }) {

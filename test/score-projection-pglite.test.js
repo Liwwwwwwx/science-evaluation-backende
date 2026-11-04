@@ -59,4 +59,16 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   assert.deepEqual(await service(compact).list({ userId: 'alice' }), await service(baseline).list({ userId: 'alice' }));
   assert.deepEqual(await service(compact).get('batch-1', 'alice'), await service(baseline).get('batch-1', 'alice'));
   assert.deepEqual(await service(compact).runs('batch-1', { userId: 'alice' }), await service(baseline).runs('batch-1', { userId: 'alice' }));
+  // 对照同一数据库中的旧读取路径，覆盖分页、状态筛选、评分截断与个人归属。
+  for (let i = 0; i < 5; i++) {
+    const id = `batch-extra-${i}`;
+    await db.query("INSERT INTO evaluation_trial_batch_plans VALUES ($1::date,$2,$3,'{\"alloy\":[\"q\"]}'::jsonb,NULL,NULL,$1::date,$1::date)", [`2026-11-0${i + 2}`, id, i === 1 ? 'failed' : 'submitted']);
+    const scores = i === 0 ? { deepSeekScore: { status: 'ready', model: 'a', quality: { total: 72.5, source: { truncated: true } } } } : i === 1 ? { deepSeekScore: { status: 'failed' } } : i === 2 ? { deepSeekScore: { status: 'ready', model: 'b', quality: { total: 120 } } } : detailed;
+    await db.query(insert, [`extra-${i}`, 'automation', null, `q${i}`, id, JSON.stringify(scores), JSON.stringify({ status: i === 3 ? 'error' : 'done' })]);
+  }
+  const optimized = createBatchReadService({ repository: repo });
+  const legacy = createBatchReadService({ repository: { plans: (...args) => repo.plans(...args), runsByBatchIds: (...args) => repo.runsByBatchIds(...args) } });
+  for (const options of [{ page: 1, pageSize: 2 }, { page: 2, pageSize: 2 }, { page: 99, pageSize: 2 }, { state: 'failed', page: 1, pageSize: 2 }, { state: 'done', page: 2, pageSize: 2 }]) {
+    assert.deepEqual(await optimized.list({ ...options, userId: 'alice' }), await legacy.list({ ...options, userId: 'alice' }), JSON.stringify(options));
+  }
 });

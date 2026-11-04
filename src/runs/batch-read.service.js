@@ -30,11 +30,12 @@ function iso(value) {
 function servicePlans(plan) {
   if (plan.source === 'trial' || plan.source === 'manual') {
     const items = plan.items && typeof plan.items === 'object' && !Array.isArray(plan.items) ? plan.items : {};
+    const counts = plan.item_counts && typeof plan.item_counts === 'object' ? plan.item_counts : null;
     const config = plan.config_snapshot?.config;
-    const expected = key => Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
-    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
+    const expected = key => counts && typeof counts[key] === 'number' ? counts[key] : Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
+    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
-  return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: Array.isArray(plan.items) ? plan.items.length : 0 }];
+  return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: typeof plan.item_count === 'number' ? plan.item_count : Array.isArray(plan.items) ? plan.items.length : 0 }];
 }
 
 function totalScore(scores, key) {
@@ -75,6 +76,15 @@ function mapRun(row) {
     ruleSnapshot: row.rule_snapshot || null,
     rawScores: row.scores || null,
   };
+}
+
+function mapSummaryEntry(entry) {
+  const scores = {};
+  const makeJudge = index => ({ status: entry[index + 1], model: entry[index + 2], quality: { total: entry[index + 3], source: { truncated: entry[index + 4] } } });
+  if (entry[4]) scores.deepSeekScore = makeJudge(4);
+  if (entry[9]) scores.qwenScore = makeJudge(9);
+  const row = { status: entry[0], run_status: entry[1], error: entry[2] ? 'timeout' : '', answer_truncated: entry[3], scores };
+  return { status: row.status, execution: executionOf(row), answerTruncated: row.answer_truncated === true, rawScores: scores };
 }
 
 function judgeSummary(runs, key) {
@@ -367,17 +377,33 @@ function createBatchReadService({ repository } = {}) {
   async function list({ source = 'all', state = '', from = '', to = '', schemeId = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
     const items = [];
     const chunkSize = 100;
+    async function summarize(plans) {
+      const byBatch = new Map();
+      if (repository.summariesByBatchIds) {
+        const groups = await repository.summariesByBatchIds(plans.map(plan => plan.id), userId);
+        for (const group of groups) byBatch.set(group.batch_id, group.entries.map(mapSummaryEntry));
+      } else {
+        const runs = await repository.runsByBatchIds(plans.map(plan => plan.id), userId);
+        for (const run of runs) {
+          if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
+          byBatch.get(run.batch_id).push(mapRun(run));
+        }
+      }
+      return plans.map(plan => summaryOf(plan, byBatch.get(plan.id) || []));
+    }
+    if (!state && repository.pagePlans) {
+      const requested = Math.max(Number(page) || 1, 1);
+      let result = await repository.pagePlans({ source, from, to, schemeId, limit: pageSize, offset: (requested - 1) * pageSize, userId });
+      if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
+      const safePage = Math.min(requested, Math.max(1, Math.ceil(result.total / pageSize)));
+      if (safePage !== requested) result = await repository.pagePlans({ source, from, to, schemeId, limit: pageSize, offset: (safePage - 1) * pageSize, userId });
+      return { items: await summarize(result.items), total: result.total, page: safePage, pageSize, storageReady: true, ...(schemeId ? { schemeFilterApplied: true } : {}) };
+    }
     for (let offset = 0; ; offset += chunkSize) {
-      const result = await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
+      const result = repository.pagePlans ? await repository.pagePlans({ source, from, to, schemeId, limit: chunkSize, offset, userId }) : await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
       if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
       const plans = schemeId ? result.items.filter(plan => plan.config_snapshot?.scheme?.id === schemeId) : result.items;
-      const runs = await repository.runsByBatchIds(plans.map((plan) => plan.id), userId);
-      const byBatch = new Map();
-      for (const run of runs) {
-        if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
-        byBatch.get(run.batch_id).push(mapRun(run));
-      }
-      items.push(...plans.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state));
+      items.push(...(await summarize(plans)).filter((item) => !state || item.state === state));
       if (result.items.length < chunkSize) break;
     }
     const safePage = Math.min(Math.max(Number(page) || 1, 1), Math.max(1, Math.ceil(items.length / pageSize)));

@@ -54,6 +54,32 @@ function createBatchReadRepository({ pgPool } = {}) {
       return { storageReady: true, items: result.rows };
     },
 
+    // 无状态筛选时，先在数据库确定页码与总数，避免读取其他页的运行记录。
+    async pagePlans({ source = 'all', from = '', to = '', schemeId = '', limit = 20, offset = 0, userId = null } = {}) {
+      const tables = await available();
+      const sources = source === 'all' ? ['trial', 'mission', 'manual'] : source === 'nightly' ? ['trial', 'mission'] : [source];
+      const selected = sources.filter(key => tables[key]);
+      if (!selected.length) return { storageReady: false, items: [], total: 0 };
+      const params = selected.includes('manual') ? [String(userId || '')] : [];
+      const where = [];
+      if (from) { params.push(from); where.push(`plan_date >= $${params.length}::date`); }
+      if (to) { params.push(to); where.push(`plan_date <= $${params.length}::date`); }
+      if (schemeId) { params.push(schemeId); where.push(`config_snapshot->'scheme'->>'id' = $${params.length}`); }
+      params.push(Math.min(Math.max(Number(limit) || 20, 1), 100)); const limitIndex = params.length;
+      params.push(Math.max(Number(offset) || 0, 0)); const offsetIndex = params.length;
+      const sql = `WITH filtered AS MATERIALIZED (
+        SELECT * FROM (${selected.map(planSelect).join(' UNION ALL ')}) plans ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ), page AS (
+          SELECT source,plan_date,id,state,error,created_at,updated_at,config_snapshot,
+            CASE WHEN jsonb_typeof(items)='array' THEN jsonb_array_length(items) ELSE NULL END AS item_count,
+            CASE WHEN jsonb_typeof(items)='object' THEN (SELECT jsonb_object_agg(entry.key, CASE WHEN jsonb_typeof(entry.value)='array' THEN jsonb_array_length(entry.value) ELSE NULL END) FROM jsonb_each(items) entry) ELSE NULL END AS item_counts
+          FROM filtered ORDER BY plan_date DESC,created_at DESC,id DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}
+      ) SELECT counts.total,page.* FROM (SELECT count(*)::int AS total FROM filtered) counts
+        LEFT JOIN page ON true ORDER BY page.plan_date DESC,page.created_at DESC,page.id DESC`;
+      const result = await (await database()).query(sql, params);
+      return { storageReady: true, items: result.rows.filter(row => row.id != null).map(({ total, ...row }) => row), total: result.rows[0]?.total || 0 };
+    },
+
     async plan(id, userId = null) {
       const tables = await available();
       for (const source of ['trial', 'mission', 'manual']) {
@@ -87,6 +113,21 @@ function createBatchReadRepository({ pgPool } = {}) {
         FROM public.unified_evaluation_runs
         WHERE (origin='automation' OR (origin='manual' AND ${owner}=$2)) AND batch_id = ANY($1::text[])
         ORDER BY started_at, id`, [batchIds.map(String), String(userId || '')]);
+      return result.rows;
+    },
+
+    // 只传输列表汇总所需的状态和评分字段，详情页仍使用完整运行读取。
+    async summariesByBatchIds(batchIds, userId = null) {
+      if (!batchIds.length) return [];
+      const current = await database();
+      const owner = hasOwnerColumn ? 'owner_user_id' : "to_jsonb(unified_evaluation_runs)->>'owner_user_id'";
+      const judge = key => `jsonb_typeof(scores)='object' AND scores ? '${key}', scores #> '{${key},status}', scores #> '{${key},model}', scores #> '{${key},quality,total}', scores #> '{${key},quality,source,truncated}'`;
+      const result = await current.query(`SELECT batch_id, jsonb_agg(jsonb_build_array(
+        status, run->>'status', COALESCE(error,'') ~* '(超时|timeout)', answer_truncated,
+        ${judge('deepSeekScore')}, ${judge('qwenScore')}
+      ) ORDER BY started_at,id) AS entries FROM public.unified_evaluation_runs
+      WHERE (origin='automation' OR (origin='manual' AND ${owner}=$2)) AND batch_id=ANY($1::text[])
+      GROUP BY batch_id`, [batchIds.map(String), String(userId || '')]);
       return result.rows;
     },
   };
