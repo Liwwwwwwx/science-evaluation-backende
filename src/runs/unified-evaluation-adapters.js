@@ -1,9 +1,11 @@
 // 将现有服务接口约束在适配边界内；原生运行与评分语义保持不变。
+const { withWaitingRetry } = require('./followup-retry');
 function createUnifiedEvaluationAdapters(evaluators = {}) {
   return Object.fromEntries(Object.entries(evaluators).map(([serviceKey, evaluator]) => {
+    const runtime = serviceKey === 'alpha-rsi' ? evaluator : withWaitingRetry(evaluator);
     return [serviceKey, {
-      start(body, onText, onState) {
-        return evaluator.startQuestionRun(body, { onText, onState });
+      start(body, onText, onState, onTextReset) {
+        return runtime.startQuestionRun(body, { onText, onState, onTextReset });
       },
       async startCase(caseDef, onText) {
         let completion;

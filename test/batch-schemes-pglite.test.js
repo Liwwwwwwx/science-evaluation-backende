@@ -17,6 +17,7 @@ const { createUnifiedEvaluationRepository } = require('../src/runs/unified-evalu
 const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
 const { createMissionDailyRepository } = require('../src/runs/mission-daily.repository');
 const { createDailyReportRepository } = require('../src/daily-reports/repository');
+const { createApp } = require('../src/app');
 
 test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对、归属与互斥', { skip: !process.env.PGLITE_PACKAGE }, async t => {
   const { PGlite } = require(process.env.PGLITE_PACKAGE);
@@ -33,11 +34,12 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
   const pool = { query, async connect() { return { query, release() {} }; } };
   await db.exec("CREATE TABLE auth_users(id text PRIMARY KEY,username text NOT NULL UNIQUE); INSERT INTO auth_users VALUES ('admin','admin'),('alice','alice'),('bob','bob')");
   await db.exec('CREATE TABLE eval_questions(id text,dataset_version text,domain_key text,UNIQUE(id,dataset_version))');
-  for (const name of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql', '011_run_ownership.sql', '012_comparison_groups.sql', '013_batch_schemes.sql']) await db.exec(fs.readFileSync(path.join(__dirname, '../migrations', name), 'utf8'));
+  for (const name of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql', '011_run_ownership.sql', '012_comparison_groups.sql', '013_batch_schemes.sql', '014_batch_scheme_ownership.sql']) await db.exec(fs.readFileSync(path.join(__dirname, '../migrations', name), 'utf8'));
   const schemes = createBatchSchemeRepository({ pgPool: pool });
   const config = structuredClone(DEFAULT_SCHEME); config.pools = { aviation: 0, synthesis: 3 };
   for (const key of SERVICE_KEYS) config.services[key] = { aviation: 0, synthesis: ['synthesis', 'alpha-rsi'].includes(key) ? 3 : 0 };
   const scheme = await schemes.save({ id: randomUUID(), name: '隔离测试方案', config, version: 0, userId: 'admin', nightly: true });
+  const aliceScheme = await schemes.save({ id: randomUUID(), name: '个人方案', config, version: 0, userId: 'alice', nightly: false });
   assert.equal((await schemes.nightly()).version, 1);
   await assert.rejects(schemes.save({ id: scheme.id, name: '冲突', config, version: 0, userId: 'admin', nightly: true }), { code: 'BATCH_SCHEME_CONFLICT' });
   const addresses = { synthesis: 'ws://synthesis.test', 'alpha-rsi': 'ws://alpha.test' };
@@ -49,7 +51,10 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
   const trial = createTrialBatchService({ repository: trialRepo, evaluations, generator, serviceAddresses: addresses, schemes });
   const manualRepo = createManualBatchRepository({ pgPool: pool, schemes });
   const manual = createManualBatchService({ repository: manualRepo, evaluations, generator, serviceAddresses: addresses, trialService: trial, schemes });
-  const first = await manual.create({ config, userId: 'alice', key: 'same-request', schemeId: scheme.id, schemeVersion: scheme.version });
+  await assert.rejects(manual.create({ config, userId: 'bob', key: 'foreign-scheme', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version }), { code: 'BATCH_SCHEME_CONFLICT' });
+  const changedConfig = structuredClone(config); changedConfig.compareSynthesisAlpha = false;
+  await assert.rejects(manual.create({ config: changedConfig, userId: 'alice', key: 'changed-scheme', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version }), { code: 'BATCH_SCHEME_CONFLICT' });
+  const first = await manual.create({ config, userId: 'alice', key: 'same-request', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version });
   let manualFinished = 0;
   for (let i = 0; i < 200; i++) {
     const result = await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE batch_id=$1 AND finished_at IS NOT NULL', [first.batchId]);
@@ -69,7 +74,7 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
   assert.equal((await read.list({ userId: 'bob' })).total, 0);
   assert.equal((await createDailyReportRepository(pool, { trialEnabled: true }).source('2026-11-04')).runs.length, 0);
   await schemes.save({ id: scheme.id, name: '改名后的方案', config, version: 1, userId: 'admin', nightly: true });
-  assert.equal((await manual.create({ config, userId: 'alice', key: 'same-request', schemeId: scheme.id, schemeVersion: scheme.version })).reused, true);
+  assert.equal((await manual.create({ config, userId: 'alice', key: 'same-request', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version })).reused, true);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs')).rows[0].n, 6);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM evaluation_batch_scheme_history WHERE scheme_id=$1', [scheme.id])).rows[0].n, 2);
   await pool.query(`INSERT INTO evaluation_manual_batch_plans(id,plan_date,state,service_addresses,config_snapshot,created_by,request_key,request_hash)
@@ -95,4 +100,51 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.equal(scheduledFinished, 6);
+});
+
+test('隔离数据库：个人配置归属、软删除与管理员切换夜间配置', { skip: !process.env.PGLITE_PACKAGE }, async t => {
+  const { PGlite } = require(process.env.PGLITE_PACKAGE);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'science-scheme-owner-'));
+  let db = new PGlite(root);
+  await db.exec('CREATE DATABASE science_evaluation'); await db.close();
+  db = new PGlite(root, { database: 'science_evaluation' }); t.after(() => db.close());
+  await db.exec('CREATE TABLE evaluation_trial_batch_plans(id text)');
+  await db.exec(fs.readFileSync(path.join(__dirname, '../migrations/013_batch_schemes.sql'), 'utf8'));
+  const legacyId = randomUUID(); const unknownId = randomUUID();
+  await db.query("INSERT INTO evaluation_batch_schemes(id,name,config,version,is_nightly,updated_by) VALUES($1,'旧方案',$2::jsonb,2,false,'admin'),($3,'未知方案',$2::jsonb,1,true,'admin')", [legacyId, JSON.stringify(DEFAULT_SCHEME), unknownId]);
+  await db.query("INSERT INTO evaluation_batch_scheme_history(scheme_id,version,name,config,is_nightly,updated_by) VALUES($1,1,'旧方案',$2::jsonb,false,'alice'),($1,2,'旧方案',$2::jsonb,false,'admin')", [legacyId, JSON.stringify(DEFAULT_SCHEME)]);
+  const query = async (sql, args = []) => { const result = await db.query(sql, args); return { ...result, rowCount: result.rowCount ?? result.affectedRows }; };
+  const pool = { query, async connect() { return { query, release() {} }; } };
+  const schemes = createBatchSchemeRepository({ pgPool: pool });
+  assert.equal((await schemes.list({ userId: 'alice' })).storageReady, false);
+  assert.equal((await schemes.nightly()).id, unknownId);
+  await db.exec(fs.readFileSync(path.join(__dirname, '../migrations/014_batch_scheme_ownership.sql'), 'utf8'));
+  const alice = (await schemes.list({ userId: 'alice' })).items;
+  assert.equal(alice.length, 1); assert.equal(alice[0].id, legacyId); assert.equal(alice[0].createdBy, 'alice');
+  assert.equal((await schemes.list({ userId: 'bob' })).items.length, 0);
+  assert.equal((await schemes.list({ userId: 'admin', admin: true })).items.find(item => item.id === unknownId).createdBy, null);
+  const authService = { async authenticate(token) { return { id: token, username: token === 'admin' ? 'admin' : 'user', permissions: ['team-services:read', 'team-services:write'] }; } };
+  const server = createApp({ token: 'x'.repeat(32), authService, batchSchemes: schemes, runWriteEnabled: true, nightlyEnabled: true, publicOrigin: 'http://localhost' });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
+  const endpoint = `http://127.0.0.1:${server.address().port}/api/evaluation/unified/batch-schemes`;
+  const headers = user => ({ cookie: `evaluation_session=${user}`, origin: 'http://localhost', 'content-type': 'application/json' });
+  assert.equal((await (await fetch(endpoint, { headers: headers('bob') })).json()).items.length, 0);
+  const body = JSON.stringify({ action: 'setNightly', id: legacyId, version: 2 });
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: headers('alice'), body })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: headers('bob'), body: JSON.stringify({ action: 'remove', id: legacyId, version: 2 }) })).status, 404);
+  await assert.rejects(schemes.save({ id: legacyId, name: '越权', config: DEFAULT_SCHEME, version: 2, userId: 'bob', nightly: false }), { code: 'BATCH_SCHEME_NOT_FOUND' });
+  await assert.rejects(schemes.remove({ id: legacyId, version: 2, userId: 'bob' }), { code: 'BATCH_SCHEME_NOT_FOUND' });
+  const response = await fetch(endpoint, { method: 'POST', headers: headers('admin'), body }); assert.equal(response.status, 200);
+  const nightly = (await response.json()).item;
+  assert.equal(nightly.createdBy, 'alice'); assert.equal(nightly.isNightly, true);
+  await assert.rejects(schemes.remove({ id: legacyId, version: nightly.version, userId: 'alice' }), { code: 'BATCH_SCHEME_NIGHTLY' });
+  const other = await schemes.save({ id: randomUUID(), name: '管理员方案', config: DEFAULT_SCHEME, version: 0, userId: 'admin', nightly: false });
+  await schemes.setNightly({ id: other.id, version: other.version, userId: 'admin' });
+  const current = (await schemes.list({ userId: 'alice' })).items[0];
+  assert.equal(current.createdBy, 'alice'); assert.equal(current.isNightly, false);
+  await assert.rejects(schemes.remove({ id: legacyId, version: 2, userId: 'alice' }), { code: 'BATCH_SCHEME_CONFLICT' });
+  await schemes.remove({ id: legacyId, version: current.version, userId: 'alice' });
+  assert.equal((await schemes.list({ userId: 'alice' })).items.length, 0);
+  await assert.rejects(schemes.save({ id: legacyId, name: '不能复活', config: DEFAULT_SCHEME, version: 0, userId: 'bob', nightly: false }), { code: 'BATCH_SCHEME_NOT_FOUND' });
+  assert.equal((await query('SELECT count(*)::int AS n FROM evaluation_batch_scheme_history WHERE scheme_id=$1', [legacyId])).rows[0].n, 4);
 });

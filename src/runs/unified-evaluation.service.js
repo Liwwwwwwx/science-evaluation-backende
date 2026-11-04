@@ -258,6 +258,11 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       job.run = { ...job.run, details }; scheduleSave(job);
       send(job, 'state', { runId: job.runId, run: job.run });
     };
+    const onTextReset = () => {
+      if (job.cancelRequested) return;
+      job.answer = ''; job.answerTruncated = false; scheduleSave(job);
+      send(job, 'answer_reset', { runId: job.runId });
+    };
     try {
       if (idempotency) {
         const claim = internal?.rerun
@@ -335,9 +340,10 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
           ? { run: { id: internal.nativeRunId }, completion: Promise.resolve().then(() => internal.execute(onText)) }
           : internal && internal.caseDef
             ? await adapters[serviceKey].startCase(internal.caseDef, onText)
-            : await adapters[serviceKey].start(body, onText, onState);
+            : await adapters[serviceKey].start(body, onText, onState, onTextReset);
         if (!started || !started.run || (!existingRun && !started.run.id) || !started.completion || typeof started.completion.then !== 'function') throw new Error('invalid evaluator response');
-        job.nativeRunId = started.run.id || null; job.reply = started.reply || null;
+        job.nativeRunId = started.run.id || null; job.reply = started.reply || null; job.cancel = started.cancel || null;
+        if (job.cancelRequested) job.cancel?.();
         void save(job).catch(() => { job.persistenceError = true; });
         void finish(job, started.completion, release);
         return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: started.completion, subscribe: (listener) => job.events.subscribe(listener) };
@@ -533,6 +539,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (job.status === 'scoring') throw new TeamServiceError(409, 'END_UNAVAILABLE', '评分已经启动，无法结束本次测评');
     if (job.settled) return { ok: true, runId, status: job.status };
     job.cancelRequested = true;
+    job.cancel?.();
     job.reservation?.cancel();
     job.status = 'cancelled';
     job.error = '用户结束了本次测评';

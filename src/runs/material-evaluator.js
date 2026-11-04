@@ -45,7 +45,7 @@ function collectArtifacts(value, baseUrl) {
   visit(value); return items;
 }
 
-function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, autoContinueReview = true, createSocket = target => new WebSocket(target), fetchImpl = fetch } = {}) {
+function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, autoContinueReview = true, createSocket = target => new WebSocket(target), fetchImpl = fetch, generateAnswers } = {}) {
   const config = Object.hasOwn(MATERIAL_SERVICES, serviceKey) ? MATERIAL_SERVICES[serviceKey] : null; if (!config) throw Error('不支持的材料服务');
   const target = new URL(url); if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw Error('材料服务必须配置 WebSocket 地址');
   const httpUrl = new URL(target); httpUrl.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
@@ -58,6 +58,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
       const conversation = createConversationEvents({ baseUrl: httpUrl.origin });
       const details = { displayEvents: conversation.data.displayEvents, process: process.data, progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
       let socket; let settled = false; let ending = false; let text = ''; let endTimer; let pendingRaw = null; let stateBytes = 0; let displayTimer; let summaryActive = false;
+      const reviewAbort = new AbortController();
       const emit = () => { clearTimeout(displayTimer); displayTimer = null; details.truncated ||= conversation.data.truncated; onState(structuredClone(details)); };
       const accept = value => {
         const size = Buffer.byteLength(JSON.stringify(value));
@@ -68,6 +69,8 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
       const completion = new Promise(resolve => { resolveCompletion = resolve; });
       const finish = async error => {
         if (settled || ending) return; ending = true;
+        if (!error && automaticReview.hasPending()) error = '服务在自动补充完成前结束，本轮未继续。';
+        reviewAbort.abort();
         clearTimeout(timer); clearTimeout(endTimer); clearTimeout(displayTimer); emit(); pendingRaw = null; details.pendingReview = null;
         try { socket?.close(); } catch {}
         let completionError = error;
@@ -103,7 +106,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
         }
       };
       const timer = setTimeout(() => void finish(`${config.label}执行超时`), timeoutMs ?? config.timeoutMs);
-      const automaticReview = createAutomaticReview({ taskid: id, review: details.review, send: frame => socket.send(JSON.stringify(frame)), onRecord: emit, onError: error => void finish(error) });
+      const automaticReview = createAutomaticReview({ taskid: id, question, review: details.review, send: frame => socket.send(JSON.stringify(frame)), onRecord: emit, onError: error => void finish(error), isActive: () => !settled && !ending, signal:reviewAbort.signal, ...(generateAnswers ? { generateAnswers } : {}) });
       const reply = input => {
         if (settled || ending || !pendingRaw || String(input.requestId) !== String(pendingRaw.request_id)) throw new TeamServiceError(409, 'REVIEW_NOT_PENDING', '确认请求已处理或已失效，请刷新运行');
         if (!['apply', 'continue', 'stop'].includes(input.action)) inputError('无效的确认操作');
@@ -144,6 +147,10 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
           if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
             if (frame.type === 'timeline.event' && frame.event && typeof frame.event === 'object') frame = frame.event;
             if (frame.ignore === true || ['heartbeat.ping', 'heartbeat', 'ping', 'pong'].includes(frame.type)) return;
+            if (['user_input_request', 'display.followup_request'].includes(frame.type)) {
+              if (accept(frame)) details.review.push({ at:new Date().toISOString(), action:'requested', source:'service', data:frame.data || {}, request:frame });
+              emit(); void finish('服务提出了尚不支持的追问协议，已保留请求，未发送答复'); return;
+            }
             if (typeof frame.type === 'string' && frame.type.startsWith('display.')) {
               if (frame.type === 'display.final_answer') summaryActive = ['start', 'delta'].includes(frame.phase);
               if (conversation.record(frame, text.length)) { details.artifacts = [...conversation.data.artifacts]; if (frame.phase === 'delta') { if (!displayTimer) displayTimer = setTimeout(emit, 32); } else emit(); }
@@ -151,9 +158,8 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
             }
             if (!frame.taskid || frame.taskid === id) process.record(frame);
             if (['error', 'requirement_review_error'].includes(frame.type)) { void finish(frame.type === 'requirement_review_error' && autoContinueReview ? '服务拒绝自动继续，请查看本次确认记录' : `${config.label}返回执行错误`); return; }
-            if (frame.type === 'user_input_request') { void finish('该服务返回了尚不支持的交互协议'); return; }
             if (frame.type === 'requirement_review_request') {
-              if (autoContinueReview) { automaticReview(frame); return; }
+              if (autoContinueReview) { void automaticReview(frame); return; }
               if (pendingRaw || details.review.length >= 20 || !['string', 'number'].includes(typeof frame.request_id) || String(frame.request_id).length > 200 || !accept(frame)) { void finish('服务确认请求异常或超过上限'); return; }
               const data = frame.data && typeof frame.data === 'object' ? frame.data : {};
               const qs = Array.isArray(data.questions) ? data.questions : [];
@@ -190,7 +196,7 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
           }
         });
       } catch { void finish(`${config.label}连接失败`); }
-      return { run: { id }, completion, reply };
+      return { run: { id }, completion, reply, cancel: () => void finish('本次运行已结束') };
     },
     async getRunQuality() { return { status: 'absent', quality: null, error: null }; },
   };

@@ -3,6 +3,7 @@ const { publicServiceAddress } = require('./service-address');
 const { createProcessRecorder } = require('../scoring/process-review');
 const { collectArtifacts } = require('./material-evaluator');
 const { createAlphaRsiSupplement } = require('./alpha-rsi-supplement');
+const { withWaitingRetry } = require('./followup-retry');
 
 // 协议来源：旧管理端 material-service-cases 的 alpha-rsi-ws runner。
 // 1110 用 [start]/[end] 标记正文，user_input_request 表达开工确认与补充条件请求。
@@ -30,7 +31,7 @@ function partialMarkerLength(value) {
   return length;
 }
 
-function createAlphaRsiEvaluator({
+function createAlphaRsiSingleEvaluator({
   url,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   endSettleMs = DEFAULT_END_SETTLE_MS,
@@ -212,7 +213,7 @@ function createAlphaRsiEvaluator({
           if (frame.ignore === true || ['heartbeat.ping', 'heartbeat', 'ping', 'pong'].includes(frame.type)) return;
           process.record(frame);
           if (['error', 'requirement_review_error'].includes(frame.type)) return finish(`${SERVICE_LABEL} 返回执行错误`);
-          if (frame.type === 'user_input_request') { void replyToInputRequest(frame); return; }
+          if (frame.type === 'user_input_request') { recordProtocol(frame); void replyToInputRequest(frame); return; }
           if (typeof frame.type === 'string' && /(?:_request|\.request)$/.test(frame.type)) {
             recordProtocol(frame);
             return finish(`${SERVICE_LABEL} 交互尚未支持：${frame.type.slice(0, 100)}`);
@@ -270,10 +271,15 @@ function createAlphaRsiEvaluator({
         });
       } catch { finish(`${SERVICE_LABEL} 连接失败`); }
 
-      return { run: { id }, completion };
+      return { run: { id }, completion, cancel: () => finish('本次运行已结束') };
     },
     async getRunQuality() { return { status: 'absent', quality: null, error: null }; },
   };
+}
+
+function createAlphaRsiEvaluator(options = {}) {
+  const generateSupplement = options.generateSupplement || createAlphaRsiSupplement();
+  return withWaitingRetry(createAlphaRsiSingleEvaluator({ ...options, generateSupplement }), { generateSupplement });
 }
 
 module.exports = { createAlphaRsiEvaluator, SERVICE_LABEL };

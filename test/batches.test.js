@@ -91,6 +91,16 @@ test('存储未迁移时列表返回空并标记 storageReady=false', async () =
   assert.deepEqual(await service.list(), { items: [], total: 0, page: 1, pageSize: 20, storageReady: false });
 });
 
+test('执行列表按冻结的配置标识筛选，保留来源版本和失败原因', async () => {
+  const first = trialPlan({ id: TRIAL, config_snapshot: { scheme: { id: 'scheme-a', name: '个人方案', version: 2 } }, state: 'failed', error: '生成失败' });
+  const second = trialPlan({ id: TRIAL_PREVIOUS, config_snapshot: { scheme: { id: 'scheme-b', name: '另一方案', version: 1 } } });
+  const service = createBatchReadService({ repository: repository({ plans: [first, second] }) });
+  const result = await service.list({ schemeId: 'scheme-a' });
+  assert.equal(result.total, 1); assert.equal(result.items[0].batchId, TRIAL); assert.equal(result.schemeFilterApplied, true);
+  assert.deepEqual(result.items[0].scheme, { id: 'scheme-a', name: '个人方案', version: 2 });
+  assert.equal(result.items[0].error, '生成失败');
+});
+
 test('超过 500 个批次时列表和状态筛选仍包含旧记录', async () => {
   const plans = Array.from({ length: 501 }, (_, index) => plan({ id: `batch-${index}`, state: index === 500 ? 'failed' : 'submitted' }));
   const service = createBatchReadService({ repository: repository({ plans }) });

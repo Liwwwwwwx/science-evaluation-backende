@@ -1,4 +1,5 @@
 const { TeamServiceError } = require('../errors');
+const { scoreProjection } = require('./score-projection');
 function scoreSummary(scores) {
   return Object.fromEntries(Object.entries(scores || {}).filter(([key]) => ['deepSeekScore','qwenScore','quality'].includes(key)).map(([key, value]) => [key, { status: value?.status, model: value?.model, total: value?.quality?.total ?? null, taskStatus: value?.quality?.taskCompletion?.status || null, provisional: value?.quality?.source?.truncated === true }]));
 }
@@ -23,10 +24,13 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
   if (!pgPool || typeof pgPool.query !== 'function') throw new Error('必须显式提供运行记录数据库连接');
   const pool = () => pgPool;
   let verified;
+  let hasComparisonColumn = false;
   async function adminPool() {
     const current = pool();
-    if (!verified) verified = current.query('SELECT current_database() AS name').then((result) => {
+    if (!verified) verified = current.query(`SELECT current_database() AS name,
+      EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.unified_evaluation_runs') AND attname='comparison_group_id' AND attnum>0 AND NOT attisdropped) AS has_comparison`).then((result) => {
       if (!['science_admin', 'science_evaluation'].includes(result.rows[0]?.name)) throw new Error('统一评测记录只能使用 science_admin 或 science_evaluation 数据库');
+      hasComparisonColumn = result.rows[0]?.has_comparison === true;
       return current;
     }).catch((error) => { verified = null; throw error; });
     return verified;
@@ -198,7 +202,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
     async questionScores(items, userId) {
       if (!items.length) return [];
       const result = await (await adminPool()).query(`SELECT DISTINCT ON (r.question_id,r.dataset_version,r.service_key)
-        r.id,r.question_id,r.dataset_version,r.service_key,r.scores,r.started_at,r.status
+        r.id,r.question_id,r.dataset_version,r.service_key,${scoreProjection('r.scores')} AS scores,r.started_at,r.status
         FROM public.unified_evaluation_runs r JOIN jsonb_to_recordset($1::jsonb) AS q(id text,"datasetVersion" text)
         ON r.question_id=q.id AND r.dataset_version=q."datasetVersion"
         WHERE r.origin='automation' OR r.owner_user_id=$2
@@ -206,7 +210,9 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
     },
     async listHistory(userId) {
-      const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title,to_jsonb(r)->>'comparison_group_id' AS comparison_group_id
+      const current = await adminPool();
+      const comparison = hasComparisonColumn ? 'r.comparison_group_id' : "to_jsonb(r)->>'comparison_group_id'";
+      const result = await current.query(`SELECT r.id,r.question,r.status,r.started_at,h.title,${comparison} AS comparison_group_id
         FROM public.unified_evaluation_runs r
         LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
         WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND r.batch_id IS NULL AND coalesce(h.hidden,false)=false
@@ -257,9 +263,10 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       if (toDate) { params.push(toDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date <= $${params.length}::date`); }
       const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const current = await adminPool();
+      const comparison = hasComparisonColumn ? 'r.comparison_group_id' : "to_jsonb(r)->>'comparison_group_id'";
       const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
       const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,
-        r.batch_id, to_jsonb(r)->>'comparison_group_id' AS comparison_group_id, r.status, r.scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
+        r.batch_id, ${comparison} AS comparison_group_id, r.status, ${scoreProjection('r.scores')} AS scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
         ORDER BY r.started_at DESC, r.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, safeSize, (safePage - 1) * safeSize]);
       return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },

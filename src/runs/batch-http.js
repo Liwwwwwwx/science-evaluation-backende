@@ -3,7 +3,7 @@ const { TeamServiceError } = require('../errors');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const STATES = new Set(['preparing', 'dispatching', 'running', 'done', 'partial', 'failed']);
-const SOURCES = new Set(['all', 'trial', 'mission', 'manual']);
+const SOURCES = new Set(['all', 'nightly', 'trial', 'mission', 'manual']);
 const EXECUTIONS = new Set(['completed', 'failed', 'timeout', 'unfinished']);
 const STATUSES = new Set(['queued', 'running', 'scoring', 'done', 'error', 'paused']);
 const SORTS = new Set(['scoreAsc', 'scoreDesc', 'startedAtAsc', 'startedAtDesc']);
@@ -28,8 +28,9 @@ async function handleBatches({ req, res, url, user, batches, reply }) {
     const state = url.searchParams.get('state') || '';
     const from = url.searchParams.get('from') || '';
     const to = url.searchParams.get('to') || '';
-    if (!SOURCES.has(source) || (state && !STATES.has(state)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to)) invalid('批次筛选参数无效');
-    return reply(res, 200, await batches.list({ source, state, from, to, userId: String(user.id), page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
+    const schemeId = url.searchParams.get('schemeId') || '';
+    if (!SOURCES.has(source) || (schemeId && !UUID.test(schemeId)) || (state && !STATES.has(state)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to)) invalid('批次筛选参数无效');
+    return reply(res, 200, await batches.list({ source, state, from, to, schemeId, userId: String(user.id), page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
   }
   const match = /^\/api\/evaluation\/unified\/batches\/([^/]+)(\/runs|\/comparison)?$/.exec(url.pathname);
   if (!match) throw new TeamServiceError(404, 'NOT_FOUND', 'Not found');

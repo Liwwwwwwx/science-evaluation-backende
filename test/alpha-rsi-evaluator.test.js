@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createAlphaRsiEvaluator } = require('../src/runs/alpha-rsi-evaluator');
+const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
+const { packInput } = require('../src/scoring/service');
 
 class FakeSocket {
   constructor() { this.listeners = new Map(); this.sent = []; this.closed = false; }
@@ -102,7 +104,89 @@ test('模型不可用时不发送空答复；结果只有等待状态时不误�
   second.socket.message(JSON.stringify({ type: 'result', data: { status: 'waiting_for_input' } }));
   second.socket.message('[start]需要更多条件[end]');
   const result = await waiting.completion;
-  assert.equal(result.status, 'error'); assert.match(result.error, /未提供可回复/);
+  assert.equal(result.status, 'error'); assert.match(result.error, /未说明需要什么信息/);
+});
+
+test('无交互帧的等待结果自动补充后重新发起一次，首轮与新回答分别保存', async () => {
+  const sockets = []; const states = []; let visible = ''; let resets = 0;
+  const evaluator = createAlphaRsiEvaluator({ url:'ws://example.test/start', timeoutMs:1000, endSettleMs:10,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    generateSupplement: async ({ question, title, questions }) => {
+      assert.match(question, /CoCrFeNi/); assert.equal(title, '请明确材料体系'); assert.deepEqual(questions, ['材料体系']);
+      return { message:'假设为高熵多主元合金。', model:'test-model' };
+    },
+  });
+  const started = await evaluator.startQuestionRun({ question:'请比较 CoCrFeNi 合金的性能。' }, { onText: delta => { visible += delta; }, onTextReset: () => { visible = ''; resets++; }, onState: state => states.push(state) });
+  sockets[0].open();
+  sockets[0].message(JSON.stringify({ type:'result', data:{ status:'waiting_for_input', user_conclusion:'请明确材料体系', requirement_interpretation:{ questions_to_confirm:['材料体系'] } } }));
+  sockets[0].message('[start]首轮追问[end]');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(sockets.length, 2); assert.equal(resets, 1);
+  sockets[1].open(); assert.match(sockets[1].sent[0].idea, /假设为高熵多主元合金/); assert.notEqual(sockets[1].sent[0].taskid, sockets[0].sent[0].taskid);
+  sockets[1].message(JSON.stringify({ type:'result', data:{ status:'completed' } })); sockets[1].message('[start]新一轮结果[end]');
+  const result = await started.completion;
+  assert.equal(result.status, 'done'); assert.equal(visible, '新一轮结果');
+  assert.equal(result.details.autoRetry.previousAnswer, '首轮追问'); assert.equal(result.details.autoRetry.message, '假设为高熵多主元合金。');
+  assert.equal(result.details.autoRetry.model, 'test-model'); assert.equal(result.details.autoRetry.state, 'completed');
+  assert.ok(states.some(value => value.autoRetry?.state === 'running'));
+});
+
+test('自动重试后仍等待时停止，不反复重新发起', async () => {
+  const sockets = [];
+  const evaluator = createAlphaRsiEvaluator({ url:'ws://example.test/start', timeoutMs:1000, endSettleMs:10,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, generateSupplement: async () => ({ message:'假设为同一体系。' }) });
+  const started = await evaluator.startQuestionRun({ question:'请比较材料性能。' }); sockets[0].open();
+  sockets[0].message(JSON.stringify({ type:'result',data:{status:'waiting_for_input',user_conclusion:'请补充体系'} })); sockets[0].message('[start]追问[end]');
+  await new Promise(resolve => setTimeout(resolve, 30)); sockets[1].open();
+  sockets[1].message(JSON.stringify({ type:'result',data:{status:'waiting_for_input',user_conclusion:'仍需确认'} })); sockets[1].message('[start]仍需追问[end]');
+  const result = await started.completion;
+  assert.equal(sockets.length, 2); assert.equal(result.status, 'error'); assert.equal(result.details.autoRetry.state, 'failed');
+});
+
+test('无法生成补充时保留追问与首轮结果，不发起第二次请求', async () => {
+  const sockets = [];
+  const evaluator = createAlphaRsiEvaluator({ url:'ws://example.test/start', timeoutMs:1000, endSettleMs:10,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, generateSupplement: async () => { throw new Error('模型不可用'); } });
+  const started = await evaluator.startQuestionRun({ question:'请比较材料体系的性能。' }); sockets[0].open();
+  sockets[0].message(JSON.stringify({ type:'result',data:{status:'waiting_for_input',user_conclusion:'请补充体系'} })); sockets[0].message('[start]首轮内容[end]');
+  const result = await started.completion;
+  assert.equal(sockets.length, 1); assert.equal(result.status, 'error'); assert.match(result.error, /生成失败/);
+  assert.equal(result.details.autoRetry.title, '请补充体系'); assert.equal(result.details.autoRetry.previousAnswer, '首轮内容');
+});
+
+test('统一运行替换首轮正文，并将自动补充作为评委上下文而非交付证据', async () => {
+  const sockets = [];
+  const evaluator = createAlphaRsiEvaluator({ url:'ws://example.test/start', timeoutMs:1000, endSettleMs:10,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, generateSupplement: async () => ({ message:'假设为高熵体系。',model:'test-model' }) });
+  const service = createUnifiedEvaluationService({ evaluators:{'alpha-rsi':evaluator}, scoreWaitMs:0 });
+  const started = await service.start({ serviceKey:'alpha-rsi',question:'请比较材料体系的性能。' });
+  const events = []; started.subscribe((event, data) => events.push({event,data}));
+  sockets[0].open(); sockets[0].message(JSON.stringify({type:'result',data:{status:'waiting_for_input',user_conclusion:'请补充材料体系'}})); sockets[0].message('[start]首轮未完成[end]');
+  await new Promise(resolve => setTimeout(resolve, 30)); sockets[1].open(); sockets[1].message('[start]最终回答[end]');
+  await started.nativeCompletion; await new Promise(resolve => setImmediate(resolve));
+  const result = await service.get(started.runId);
+  assert.equal(result.answer, '最终回答'); assert.equal(result.run.details.autoRetry.previousAnswer, '首轮未完成');
+  assert.ok(events.some(event => event.event === 'answer_reset'));
+  const input = packInput(result); assert.equal(input.automaticSupplement.message, '假设为高熵体系。'); assert.doesNotMatch(input.structured, /首轮未完成|假设为高熵体系/);
+});
+
+test('等待自动补充时结束运行，不再发起新连接', async () => {
+  const sockets = []; let resolveSupplement;
+  const evaluator = createAlphaRsiEvaluator({ url:'ws://example.test/start', timeoutMs:1000, endSettleMs:10,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, generateSupplement: () => new Promise(resolve => { resolveSupplement = resolve; }) });
+  const started = await evaluator.startQuestionRun({ question:'请比较材料性能。' }); sockets[0].open();
+  sockets[0].message(JSON.stringify({ type:'result',data:{status:'waiting_for_input',user_conclusion:'请补充体系'} })); sockets[0].message('[start]追问[end]');
+  await new Promise(resolve => setTimeout(resolve, 30)); started.cancel();
+  await started.completion; resolveSupplement({ message:'假设为同一体系。' }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sockets.length, 1);
+});
+
+test('等待结果之后异常断线且没有完整结束标记时，不自动重复派发', async () => {
+  const harness = createHarness({ generateSupplement: async () => { assert.fail('不应生成补充'); } });
+  const started = await harness.evaluator.startQuestionRun({ question:'请比较材料性能。' }); harness.socket.open();
+  harness.socket.message(JSON.stringify({type:'result',data:{status:'waiting_for_input',user_conclusion:'请补充体系'}}));
+  harness.socket.emit('close',{code:1006,wasClean:false});
+  const result = await started.completion; assert.match(result.error,/连接中断/); assert.equal(harness.socket.sent.length,1);
 });
 
 test('运行结束后迟到的模型答复不会发送', async () => {

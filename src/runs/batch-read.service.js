@@ -22,6 +22,7 @@ function dateOnly(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
 }
+function planDate(plan) { return dateOnly(plan.calendar_date ?? plan.plan_date); }
 
 function iso(value) {
   return value ? new Date(value).toISOString() : null;
@@ -30,11 +31,12 @@ function iso(value) {
 function servicePlans(plan) {
   if (plan.source === 'trial' || plan.source === 'manual') {
     const items = plan.items && typeof plan.items === 'object' && !Array.isArray(plan.items) ? plan.items : {};
+    const counts = plan.item_counts && typeof plan.item_counts === 'object' ? plan.item_counts : null;
     const config = plan.config_snapshot?.config;
-    const expected = key => Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
-    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
+    const expected = key => counts && typeof counts[key] === 'number' ? counts[key] : Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
+    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
-  return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: Array.isArray(plan.items) ? plan.items.length : 0 }];
+  return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: typeof plan.item_count === 'number' ? plan.item_count : Array.isArray(plan.items) ? plan.items.length : 0 }];
 }
 
 function totalScore(scores, key) {
@@ -75,6 +77,15 @@ function mapRun(row) {
     ruleSnapshot: row.rule_snapshot || null,
     rawScores: row.scores || null,
   };
+}
+
+function mapSummaryEntry(entry) {
+  const scores = {};
+  const makeJudge = index => ({ status: entry[index + 1], model: entry[index + 2], quality: { total: entry[index + 3], source: { truncated: entry[index + 4] } } });
+  if (entry[4]) scores.deepSeekScore = makeJudge(4);
+  if (entry[9]) scores.qwenScore = makeJudge(9);
+  const row = { status: entry[0], run_status: entry[1], error: entry[2] ? 'timeout' : '', answer_truncated: entry[3], scores };
+  return { status: row.status, execution: executionOf(row), answerTruncated: row.answer_truncated === true, rawScores: scores };
 }
 
 function judgeSummary(runs, key) {
@@ -159,10 +170,12 @@ function summaryOf(plan, runs) {
   const totals = totalsOf(runs, planned);
   return {
     batchId: plan.id,
-    date: dateOnly(plan.plan_date),
+    date: planDate(plan),
     source: plan.source,
     state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
     rawState: plan.state,
+    scheme: plan.config_snapshot?.scheme || null,
+    error: plan.error || null,
     planned,
     services,
     totals,
@@ -212,7 +225,7 @@ function detailOf(plan, runs) {
   return {
     batch: {
       batchId: plan.id,
-      date: dateOnly(plan.plan_date),
+      date: planDate(plan),
       source: plan.source,
       state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
       rawState: plan.state,
@@ -233,7 +246,7 @@ function detailOf(plan, runs) {
       missing: Math.max(0, planned - totals.total),
       note: plan.source === 'manual' ? '仅显示当前账号的手动组合测评。' : '已持久化自动测评；未入库脚本不在统计范围内。',
     },
-    links: { dailyReport: plan.source === 'manual' ? null : `/daily-reports/${dateOnly(plan.plan_date)}`, comparison: `/batches/${plan.id}/comparison` },
+    links: { dailyReport: plan.source === 'manual' ? null : `/daily-reports/${planDate(plan)}`, comparison: `/batches/${plan.id}/comparison` },
   };
 }
 
@@ -304,11 +317,11 @@ function models(runs) {
 }
 
 function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
-  const base = { batchId: basePlan.id, date: dateOnly(basePlan.plan_date), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
+  const base = { batchId: basePlan.id, date: planDate(basePlan), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
   if (!previousPlan) {
     return { base, previous: null, comparable: false, mode: 'none', reason: '没有更早的同来源批次可用于比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
-  const previous = { batchId: previousPlan.id, date: dateOnly(previousPlan.plan_date), planned: servicePlans(previousPlan).reduce((sum, service) => sum + service.expected, 0) };
+  const previous = { batchId: previousPlan.id, date: planDate(previousPlan), planned: servicePlans(previousPlan).reduce((sum, service) => sum + service.expected, 0) };
   if (basePlan.source !== previousPlan.source) {
     return { base, previous, comparable: false, mode: 'none', reason: '不同来源的批次不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
@@ -362,23 +375,40 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
 function createBatchReadService({ repository } = {}) {
   if (!repository) throw new Error('批次读取仓储未配置');
 
-  async function list({ source = 'all', state = '', from = '', to = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
+  async function list({ source = 'all', state = '', from = '', to = '', schemeId = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
     const items = [];
     const chunkSize = 100;
-    for (let offset = 0; ; offset += chunkSize) {
-      const result = await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
-      if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
-      const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id), userId);
+    async function summarize(plans) {
       const byBatch = new Map();
-      for (const run of runs) {
-        if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
-        byBatch.get(run.batch_id).push(mapRun(run));
+      if (repository.summariesByBatchIds) {
+        const groups = await repository.summariesByBatchIds(plans.map(plan => plan.id), userId);
+        for (const group of groups) byBatch.set(group.batch_id, group.entries.map(mapSummaryEntry));
+      } else {
+        const runs = await repository.runsByBatchIds(plans.map(plan => plan.id), userId);
+        for (const run of runs) {
+          if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
+          byBatch.get(run.batch_id).push(mapRun(run));
+        }
       }
-      items.push(...result.items.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state));
+      return plans.map(plan => summaryOf(plan, byBatch.get(plan.id) || []));
+    }
+    if (!state && repository.pagePlans) {
+      const requested = Math.max(Number(page) || 1, 1);
+      let result = await repository.pagePlans({ source, from, to, schemeId, limit: pageSize, offset: (requested - 1) * pageSize, userId });
+      if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
+      const safePage = Math.min(requested, Math.max(1, Math.ceil(result.total / pageSize)));
+      if (safePage !== requested) result = await repository.pagePlans({ source, from, to, schemeId, limit: pageSize, offset: (safePage - 1) * pageSize, userId });
+      return { items: await summarize(result.items), total: result.total, page: safePage, pageSize, storageReady: true, ...(schemeId ? { schemeFilterApplied: true } : {}) };
+    }
+    for (let offset = 0; ; offset += chunkSize) {
+      const result = repository.pagePlans ? await repository.pagePlans({ source, from, to, schemeId, limit: chunkSize, offset, userId }) : await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
+      if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
+      const plans = schemeId ? result.items.filter(plan => plan.config_snapshot?.scheme?.id === schemeId) : result.items;
+      items.push(...(await summarize(plans)).filter((item) => !state || item.state === state));
       if (result.items.length < chunkSize) break;
     }
     const safePage = Math.min(Math.max(Number(page) || 1, 1), Math.max(1, Math.ceil(items.length / pageSize)));
-    return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true };
+    return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true, ...(schemeId ? { schemeFilterApplied: true } : {}) };
   }
 
   async function get(id, userId = null) {
@@ -425,7 +455,7 @@ function createBatchReadService({ repository } = {}) {
       if (!target.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '对比批次不存在');
       previousPlan = target.plan;
     } else {
-      previousPlan = await repository.previousPlan(found.plan.source, found.plan.plan_date, userId);
+      previousPlan = await repository.previousPlan(found.plan.source, found.plan.calendar_date ?? found.plan.plan_date, userId);
     }
     const previousRuns = previousPlan ? (await repository.runsByBatchIds([String(previousPlan.id)], userId)).map(mapRun) : [];
     return comparisonOf(found.plan, previousPlan, baseRuns, previousRuns);

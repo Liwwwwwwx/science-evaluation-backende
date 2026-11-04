@@ -50,7 +50,9 @@ function packInput(job) {
     messages.push({id:typeof message.id === 'string' ? message.id.slice(0,80) : '',text,atMs:typeof message.atMs === 'number' && Number.isFinite(message.atMs) ? message.atMs : null}); processChars += text.length;
     if (text.length < message.text.length) processTruncated = true;
   }
-  return { answer, structured, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
+  const supplements = [details.autoRetry?.message, ...(Array.isArray(details.review) ? details.review : []).filter(item => item?.source === 'automatic' && item?.action === 'apply' && item?.delivery === 'sent').flatMap(item => (Array.isArray(item.answers) ? item.answers : []).map(answer => answer?.answer))].filter(item => typeof item === 'string' && item.trim());
+  const automaticSupplement = supplements.length ? { source: 'automatic', message: redact(supplements.join('\n')).slice(0, 4000) } : null;
+  return { answer, structured, automaticSupplement, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
     truncated: job.answerTruncated === true || answer.length < fullAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
 }
 function normalizeRubric(value, question, model) {
@@ -153,6 +155,7 @@ function judgePrompt(job, rubric, input, markdown, policy) {
     `完整JSON结构示例（只示意字段，条目数量和id必须按冻结清单填写）：${JSON.stringify(schema)}`,
     `题目：${JSON.stringify(job.question)}`,
     `冻结清单：${JSON.stringify(rubric)}`,
+    ...(input.automaticSupplement ? ['本轮追问曾使用自动生成的补充内容。automaticSupplement 是模型生成的条件，可能含假设，不是用户原题或已验证事实，也不是服务交付成果；按原题评估，不能把它作为服务回答证据。'] : []),
     `本题图文辅助适用性已冻结为 ${rubric.visualAidsApplicable}；${rubric.visualAidsApplicable ? 'visualAids.score必须是0到100的数字，质量差可以是0，不能为null。' : 'visualAids.score必须是null，不得自行修改适用性。'}`,
     `Markdown机检：${JSON.stringify(markdown)}`,
     `待评数据：${JSON.stringify(promptInput)}`,
