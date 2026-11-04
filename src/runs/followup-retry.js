@@ -1,4 +1,5 @@
 const { createAlphaRsiSupplement } = require('./alpha-rsi-supplement');
+const { TeamServiceError } = require('../errors');
 
 function waitingDetails(result) {
   const value = result && typeof result === 'object' ? result : {};
@@ -64,7 +65,11 @@ function withWaitingRetry(single, { generateSupplement = createAlphaRsiSupplemen
         retry.state = second.status === 'done' && !stillWaiting ? 'completed' : 'failed';
         return { ...second, ...(stillWaiting ? { status:'error',error:'重新发起后服务仍要求补充，本轮未完成。' } : {}), taskid: first.run.id, details: { ...second.details, autoRetry: retry } };
       })();
-      return { run: first.run, completion, cancel: () => { cancelled = true; controller.abort(); active?.cancel?.(); } };
+      return { run: first.run, completion, cancel: () => { cancelled = true; controller.abort(); active?.cancel?.(); },
+        ...(typeof first.reply === 'function' ? { reply: input => {
+          if (typeof active?.reply !== 'function') throw new TeamServiceError(409, 'REVIEW_UNAVAILABLE', '当前运行无法答复，请刷新运行');
+          return active.reply(input);
+        } } : {}) };
     },
   };
 }

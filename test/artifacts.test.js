@@ -19,6 +19,14 @@ test('代理拒绝缺失索引、任意URL、其他任务、凭据、重编码�
   for (const url of ['http://evil.invalid/a.png', 'http://127.0.0.1:1115/new-material/tasks/other/assets/a.png', 'http://u:p@127.0.0.1:1115/files/a.png', 'http://127.0.0.1:1115/files/%252e.png', 'file:///tmp/a.png', 'http://127.0.0.1:1115/files/%2fetc.png']) await assert.rejects(readRunArtifact(run(url), 0, { fetchImpl: never }), { status: 403 });
   for (const extension of ['svg', 'exe']) await assert.rejects(readRunArtifact(run(`http://127.0.0.1:1115/files/a.${extension}`), 0, { fetchImpl: never }), { status: 415 });
 });
+test('自动重试产物允许已记录的第二次任务，拒绝其他任务', async () => {
+  const sample = run('http://127.0.0.1:1115/new-material/tasks/task-2/assets/model.glb');
+  sample.run.details.autoRetry = { taskId: 'task-2' };
+  const result = await readRunArtifact(sample, 0, { fetchImpl: async () => new Response('retry') });
+  assert.equal(result.body.toString(), 'retry');
+  sample.run.details.artifacts[0].url = 'http://127.0.0.1:1115/new-material/tasks/other/assets/model.glb';
+  await assert.rejects(readRunArtifact(sample, 0, { fetchImpl: async () => { throw Error('不应联网'); } }), { status: 403 });
+});
 test('代理允许固定公开产物源，对上游失败与大小超限给出可恢复错误', async () => {
   assert.equal((await readRunArtifact(run('https://www.science42.tech/alpha/materials/modelfiles/a.png'), 0, { fetchImpl: async () => new Response('png') })).contentType, 'image/png');
   for (const fetchImpl of [async () => new Response('', { status: 404 }), async () => { throw Error('redirect'); }]) await assert.rejects(readRunArtifact(run(), 0, { fetchImpl }), { status: 502 });

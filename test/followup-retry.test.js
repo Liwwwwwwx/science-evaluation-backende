@@ -39,3 +39,22 @@ test('逐项补充校验问题编号，首个模型不合规则使用备用模�
   }});
   assert.deepEqual(await client({question:'比较材料',title:'条件',questions:[{id:'q1',question:'温度？'}]}),{answers:[{id:'q1',answer:'假设为室温。'}],model:'备用模型'});
 });
+
+test('包装器保留人工答复并转发到当前活动的重试任务', async () => {
+  let resolveFirst; let resolveSecond; let startedSecond;
+  const secondStarted = new Promise(resolve => { startedSecond = resolve; });
+  const calls = [];
+  const single = { startQuestionRun: async () => {
+    const index = calls.length + 1; calls.push([]);
+    const completion = new Promise(resolve => { if (index === 1) resolveFirst = resolve; else resolveSecond = resolve; });
+    return { run: { id: `task-${index}` }, completion, reply: input => calls[index - 1].push(input) };
+  } };
+  const started = await withWaitingRetry(single, { generateSupplement: async () => ({ message: '室温' }) }).startQuestionRun({ question: '测试' }, { onState: details => { if (details.autoRetry?.state === 'running') startedSecond(); } });
+  started.reply({ requestId: 'first' });
+  resolveFirst({ status: 'done', details: { result: { status: 'waiting_for_input', message: '请补充温度' } } });
+  await secondStarted;
+  started.reply({ requestId: 'second' });
+  resolveSecond({ status: 'done', details: { result: { status: 'completed' } } });
+  await started.completion;
+  assert.deepEqual(calls, [[{ requestId: 'first' }], [{ requestId: 'second' }]]);
+});
