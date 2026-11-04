@@ -157,6 +157,44 @@ test('批次运行列表支持服务筛选、执行状态和分数排序', async
   assert.equal(failed.items[0].runId, 'b');
 });
 
+test('新批次统计1110并返回同题对比入口，旧批次不添加空服务', async () => {
+  const group = 'a'.repeat(64);
+  const current = trialPlan({ items: { synthesis: ['同一道合成问题'], 'alpha-rsi': ['同一道合成问题'] } });
+  const service = createBatchReadService({ repository: repository({ plans: [current], runs: [
+    run({ id: 's', batch_id: TRIAL, service_key: 'synthesis', question: '同一道合成问题', comparison_group_id: group }),
+    run({ id: 'a', batch_id: TRIAL, service_key: 'alpha-rsi', question: '同一道合成问题', comparison_group_id: group }),
+  ] }) });
+  const detail = await service.get(TRIAL);
+  assert.equal(detail.coverage.planned, 2);
+  assert.equal(detail.services.find(item => item.serviceKey === 'alpha-rsi').totals.total, 1);
+  const listed = await service.runs(TRIAL);
+  assert.deepEqual(listed.items.map(item => item.comparisonGroupId), [group, group]);
+  const legacy = createBatchReadService({ repository: repository({ plans: [trialPlan()] }) });
+  assert.equal((await legacy.get(TRIAL)).services.some(item => item.serviceKey === 'alpha-rsi'), false);
+});
+
+test('手动批次读取与运行列表只向仓储传当前用户身份', async () => {
+  const manual = trialPlan({ source: 'manual', items: { synthesis: ['同一题'] } }); const seen = [];
+  const repo = {
+    async plan(id, userId) { seen.push(['plan', userId]); return { storageReady: true, plan: userId === 'owner' ? manual : null }; },
+    async runsByBatchIds(ids, userId) { seen.push(['runs', userId]); return []; },
+  };
+  const service = createBatchReadService({ repository: repo });
+  assert.equal((await service.get(TRIAL, 'owner')).batch.source, 'manual');
+  await service.runs(TRIAL, { userId: 'owner' });
+  await assert.rejects(service.get(TRIAL, 'other'), { code: 'BATCH_NOT_FOUND' });
+  assert.deepEqual(seen, [['plan', 'owner'], ['runs', 'owner'], ['plan', 'owner'], ['runs', 'owner'], ['plan', 'other']]);
+});
+
+test('出题期间依据冻结方案展示计划数量，不伪装成零次', async () => {
+  const pending = trialPlan({ source: 'manual', state: 'generating', items: null, config_snapshot: { config: { services: { synthesis: { aviation: 0, synthesis: 3 }, 'alpha-rsi': { aviation: 0, synthesis: 3 } } } } });
+  const service = createBatchReadService({ repository: repository({ plans: [pending] }) });
+  const result = await service.get(TRIAL, 'owner');
+  assert.equal(result.batch.planned, 6);
+  assert.deepEqual(result.services.map(item => item.serviceKey), ['synthesis', 'alpha-rsi']);
+  assert.equal(result.coverage.missing, 6);
+});
+
 test('Mission 同题批次输出逐题环比，包含回归、新增失败和修复', async () => {
   const current = plan({ id: MISSION, items: [
     { questionId: 'q1', datasetVersion: 'v1', question: '题一' },

@@ -3,6 +3,7 @@ function scoreSummary(scores) {
   return Object.fromEntries(Object.entries(scores || {}).filter(([key]) => ['deepSeekScore','qwenScore','quality'].includes(key)).map(([key, value]) => [key, { status: value?.status, model: value?.model, total: value?.quality?.total ?? null, taskStatus: value?.quality?.taskCompletion?.status || null, provisional: value?.quality?.source?.truncated === true }]));
 }
 function date(value) { return value ? new Date(value).toISOString() : null; }
+function insertSql(columns) { return `(${columns.join(',')}) VALUES (${columns.map((_, index) => `$${index + 1}`).join(',')})`; }
 function ownerFromScope(scope) {
   return typeof scope === 'string' && scope.startsWith('evaluation-user:') ? scope.slice('evaluation-user:'.length) || null : null;
 }
@@ -11,7 +12,7 @@ function map(row) {
   return {
     runId: row.id, serviceKey: row.service_key, origin: row.origin, nativeRunId: row.native_run_id,
     question: row.question, questionId: row.question_id, datasetVersion: row.dataset_version,
-    questionSourceType: row.question_source_type, batchId: row.batch_id,
+    questionSourceType: row.question_source_type, batchId: row.batch_id, comparisonGroupId: row.comparison_group_id,
     status: row.status, answer: row.answer, answerTruncated: row.answer_truncated === true,
     run: row.run, scores: row.scores, scoreError: row.score_error, error: row.error,
     startedAt: date(row.started_at), finishedAt: date(row.finished_at), updatedAt: date(row.updated_at),
@@ -32,19 +33,22 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
   }
   return {
     async create(job) {
-      await (await adminPool()).query(`INSERT INTO public.unified_evaluation_runs
-        (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at, run)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, job.run]);
+      const withGroup = job.comparisonGroupId != null;
+      const columns = ['id', 'service_key', 'origin', 'question', 'question_id', 'dataset_version', 'question_source_type', 'batch_id',
+        ...(withGroup ? ['comparison_group_id'] : []), 'status', 'started_at', 'run'];
+      await (await adminPool()).query(`INSERT INTO public.unified_evaluation_runs ${insertSql(columns)}`,
+      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId,
+        ...(withGroup ? [job.comparisonGroupId] : []), job.status, job.startedAt, job.run]);
     },
     async createIdempotent(job, scope, key, hash) {
       const current = await adminPool();
-      const result = await current.query(`INSERT INTO public.unified_evaluation_runs
-        (id, service_key, origin, question, question_id, dataset_version, question_source_type, batch_id, status, started_at,
-         idempotency_scope, idempotency_key, idempotency_hash, run, owner_user_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      const withGroup = job.comparisonGroupId != null;
+      const columns = ['id', 'service_key', 'origin', 'question', 'question_id', 'dataset_version', 'question_source_type', 'batch_id',
+        ...(withGroup ? ['comparison_group_id'] : []), 'status', 'started_at', 'idempotency_scope', 'idempotency_key', 'idempotency_hash', 'run', 'owner_user_id'];
+      const result = await current.query(`INSERT INTO public.unified_evaluation_runs ${insertSql(columns)}
         ON CONFLICT (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
-      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId, job.status, job.startedAt, scope, key, hash, job.run, ownerFromScope(scope)]);
+      [job.runId, job.serviceKey, job.origin, job.question, job.questionId, job.datasetVersion, job.questionSourceType, job.batchId,
+        ...(withGroup ? [job.comparisonGroupId] : []), job.status, job.startedAt, scope, key, hash, job.run, ownerFromScope(scope)]);
       if (result.rowCount === 1) return { created: true, runId: job.runId };
       const existing = await current.query("SELECT id, idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2 AND (origin='automation' OR owner_user_id=$3)", [scope, key, ownerFromScope(scope)]);
       if (!existing.rows[0]) throw new TeamServiceError(409, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT', '该请求标识不可用，请使用新请求');
@@ -68,11 +72,13 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         const lease = previous.run?.scoring;
         const expired = lease && !lease.finishedAt && Date.parse(lease.expiresAt) <= Date.now();
         if (previous.origin !== 'manual' || previous.batch_id || (!['done', 'error'].includes(previous.status) && !(previous.status === 'scoring' && expired)) || !['done', 'error'].includes(previous.run?.status) || (lease && !lease.finishedAt && !expired)) throw new TeamServiceError(409, 'RUN_NOT_RERUNNABLE', '仅可重新测评已结束的人工运行，请等待执行和评分结束');
-        const created = await client.query(`INSERT INTO public.unified_evaluation_runs
-          (id,service_key,origin,question,question_id,dataset_version,question_source_type,batch_id,status,started_at,idempotency_scope,idempotency_key,idempotency_hash,run,owner_user_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        const withGroup = job.comparisonGroupId != null;
+        const columns = ['id', 'service_key', 'origin', 'question', 'question_id', 'dataset_version', 'question_source_type', 'batch_id',
+          ...(withGroup ? ['comparison_group_id'] : []), 'status', 'started_at', 'idempotency_scope', 'idempotency_key', 'idempotency_hash', 'run', 'owner_user_id'];
+        const created = await client.query(`INSERT INTO public.unified_evaluation_runs ${insertSql(columns)}
           ON CONFLICT (idempotency_scope,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id`,
-        [job.runId,job.serviceKey,job.origin,job.question,job.questionId,job.datasetVersion,job.questionSourceType,job.batchId,job.status,job.startedAt,scope,key,hash,job.run,ownerFromScope(scope)]);
+        [job.runId,job.serviceKey,job.origin,job.question,job.questionId,job.datasetVersion,job.questionSourceType,job.batchId,
+          ...(withGroup ? [job.comparisonGroupId] : []),job.status,job.startedAt,scope,key,hash,job.run,ownerFromScope(scope)]);
         if (!created.rowCount) {
           const existing = (await client.query('SELECT id,idempotency_hash FROM public.unified_evaluation_runs WHERE idempotency_scope=$1 AND idempotency_key=$2 AND owner_user_id=$3', [scope,key,ownerFromScope(scope)])).rows[0];
           await client.query('ROLLBACK');
@@ -94,12 +100,67 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         ORDER BY started_at, id LIMIT $2`, [serviceKeys, limit, JSON.stringify(addresses)]);
       return result.rows.map(row => ({ ...map(row), ownerScope: row.owner_user_id ? `evaluation-user:${row.owner_user_id}` : row.idempotency_scope }));
     },
-    async claimQueued(job) {
+    async claimQueued(job, { pausedReason = '同批次 Mission 已暂停，本题未派发' } = {}) {
+      if (job.origin === 'automation' && job.serviceKey === 'mission-material' && job.batchId) {
+        const client = await (await adminPool()).connect();
+        try {
+          await client.query('BEGIN');
+          await client.query("SELECT pg_advisory_xact_lock(hashtext('science-evaluation-mission-pause'), hashtext($1))", [job.batchId]);
+          const state = await client.query(`SELECT EXISTS(SELECT 1 FROM public.unified_evaluation_runs
+            WHERE batch_id=$1 AND origin='automation' AND service_key='mission-material'
+              AND run->>'missionBatchPaused'='true') AS paused`, [job.batchId]);
+          if (state.rows[0]?.paused === true) {
+            await client.query(`UPDATE public.unified_evaluation_runs
+              SET status='paused',error=$2,finished_at=now(),updated_at=now()
+              WHERE id=$1 AND batch_id=$3 AND origin='automation' AND service_key='mission-material'
+                AND status='queued' AND native_run_id IS NULL`, [job.runId, pausedReason, job.batchId]);
+            await client.query('COMMIT');
+            return false;
+          }
+          const claimed = await client.query(`UPDATE public.unified_evaluation_runs
+            SET status='running', run=$2, scores=$3, updated_at=now()
+            WHERE id=$1 AND status='queued' AND native_run_id IS NULL RETURNING id`, [job.runId, job.run, job.scores]);
+          await client.query('COMMIT');
+          return claimed.rowCount === 1;
+        } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+        finally { client.release(); }
+      }
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
         SET status='running', run=$2, scores=$3, updated_at=now()
         WHERE id=$1 AND status='queued' AND native_run_id IS NULL RETURNING id`,
       [job.runId, job.run, job.scores]);
       return result.rowCount === 1;
+    },
+    async isMissionBatchPaused(batchId) {
+      const result = await (await adminPool()).query(`SELECT EXISTS(SELECT 1 FROM public.unified_evaluation_runs
+        WHERE batch_id=$1 AND origin='automation' AND service_key='mission-material'
+          AND run->>'missionBatchPaused'='true') AS paused`, [batchId]);
+      return result.rows[0]?.paused === true;
+    },
+    async pauseQueuedMissionRun(runId, reason, { claimed = false } = {}) {
+      const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
+        SET status='paused',error=$2,finished_at=now(),updated_at=now()
+        WHERE id=$1 AND origin='automation' AND service_key='mission-material'
+          AND (status='queued' OR ($3 AND status='running')) AND native_run_id IS NULL RETURNING id`, [runId, reason, claimed]);
+      return result.rowCount === 1;
+    },
+    async pauseMissionBatch(job, reason) {
+      const current = await adminPool();
+      const client = await current.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('science-evaluation-mission-pause'), hashtext($1))", [job.batchId]);
+        const failed = await client.query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2,status=$3,answer=$4,
+          answer_truncated=$5,run=$6,scores=$7,score_error=$8,error=$9,finished_at=$10,updated_at=now()
+          WHERE id=$1 AND origin='automation' AND service_key='mission-material' AND batch_id=$11 RETURNING id`,
+        [job.runId,job.nativeRunId,job.status,job.answer,job.answerTruncated,job.run,job.scores,job.scoreError,job.error,job.finishedAt,job.batchId]);
+        if (failed.rowCount !== 1) throw new Error('无法保存触发暂停的运行');
+        await client.query(`UPDATE public.unified_evaluation_runs SET status='paused',error=$2,finished_at=now(),updated_at=now()
+          WHERE batch_id=$1 AND origin='automation' AND service_key='mission-material'
+            AND status='queued' AND native_run_id IS NULL`, [job.batchId, reason]);
+        await client.query('COMMIT');
+      } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+      finally { client.release(); }
     },
     async save(job) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2, status=$3, answer=$4,
@@ -148,9 +209,19 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title
         FROM public.unified_evaluation_runs r
         LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
-        WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND coalesce(h.hidden,false)=false
+        WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND r.batch_id IS NULL AND coalesce(h.hidden,false)=false
         ORDER BY r.started_at DESC,r.id DESC LIMIT 50`, [userId]);
       return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at) }));
+    },
+    async comparisonReady() {
+      const result = await (await adminPool()).query("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='unified_evaluation_runs' AND column_name='comparison_group_id' LIMIT 1");
+      return result.rowCount === 1;
+    },
+    async getComparison(groupId, userId) {
+      const result = await (await adminPool()).query(`SELECT * FROM public.unified_evaluation_runs
+        WHERE comparison_group_id=$1 AND (origin='automation' OR owner_user_id=$2)
+        ORDER BY started_at, id`, [groupId, userId]);
+      return result.rows.map(map);
     },
     async updateHistory(userId, runId, action, title) {
       const result = await (await adminPool()).query(`INSERT INTO public.evaluation_user_run_history (user_id,run_id,title,hidden)

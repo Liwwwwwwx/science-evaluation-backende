@@ -11,6 +11,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const writable = runWriteEnabled && user.permissions.includes('team-services:write');
     return reply(res, 200, { items: [
       { key: 'mission-material', label: 'Mission_ScienceMaterial' },
+      { key: 'alpha-rsi', label: 'ALPHA 材料 RSI（1110）' },
       { key: 'literature', label: '文献检索' },
       { key: 'literature-aircraft', label: '航空文献' },
       { key: 'alloy', label: '合金材料' },
@@ -53,6 +54,20 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const result = await readRunArtifact(await evaluations.get(artifact[1]), Number(artifact[2]));
     res.writeHead(200, { 'Content-Type': result.contentType, 'Content-Length': result.body.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'", 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(result.filename)}` });
     res.end(result.body); return;
+  }
+  if (url.pathname === `${base}/comparisons`) {
+    if (req.method !== 'POST') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+    if (!user.permissions.includes('team-services:write')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
+    if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
+    if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
+    const input = await readBody(req, 16 * 1024);
+    const result = await evaluations.createComparison(input, { scope: `evaluation-user:${user.id}`, key: req.headers['idempotency-key'] });
+    return reply(res, 201, result);
+  }
+  const comparison = /^\/api\/evaluation\/unified\/comparisons\/([^/]+)$/.exec(url.pathname);
+  if (comparison) {
+    if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+    return reply(res, 200, await evaluations.getComparison(comparison[1], String(user.id)));
   }
   if (url.pathname === `${base}/runs`) {
     if (req.method === 'POST') {
@@ -115,7 +130,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const ended = ['done','error','cancelled'].includes(value.status) && ['done','error','cancelled'].includes(value.run?.status) && !leased && !value.run?.outputClearedAt;
     return reply(res, 200, { ...value, rerunPreservesOutput: true,
       canRescore: !!(scope && access.owned && runWriteEnabled && evaluations.scoringEnabled && ended),
-      canRerun: !!(scope && access.owned && runWriteEnabled && ended && value.origin === 'manual' && !value.batchId && value.serviceKey !== 'alpha-rsi' && (evaluations.availableServices?.() || []).includes(value.serviceKey)) });
+      canRerun: !!(scope && access.owned && runWriteEnabled && ended && value.origin === 'manual' && !value.batchId && (evaluations.availableServices?.() || []).includes(value.serviceKey)) });
   }
   // 先读取一次，保证不存在/不可读时返回 JSON 错误而不是半条 SSE。
   await evaluations.get(match[1]);

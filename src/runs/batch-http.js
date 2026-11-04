@@ -3,9 +3,9 @@ const { TeamServiceError } = require('../errors');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const STATES = new Set(['preparing', 'dispatching', 'running', 'done', 'partial', 'failed']);
-const SOURCES = new Set(['all', 'trial', 'mission']);
+const SOURCES = new Set(['all', 'trial', 'mission', 'manual']);
 const EXECUTIONS = new Set(['completed', 'failed', 'timeout', 'unfinished']);
-const STATUSES = new Set(['queued', 'running', 'scoring', 'done', 'error']);
+const STATUSES = new Set(['queued', 'running', 'scoring', 'done', 'error', 'paused']);
 const SORTS = new Set(['scoreAsc', 'scoreDesc', 'startedAtAsc', 'startedAtDesc']);
 
 function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', message); }
@@ -29,24 +29,24 @@ async function handleBatches({ req, res, url, user, batches, reply }) {
     const from = url.searchParams.get('from') || '';
     const to = url.searchParams.get('to') || '';
     if (!SOURCES.has(source) || (state && !STATES.has(state)) || (from && !validDate(from)) || (to && !validDate(to)) || (from && to && from > to)) invalid('批次筛选参数无效');
-    return reply(res, 200, await batches.list({ source, state, from, to, page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
+    return reply(res, 200, await batches.list({ source, state, from, to, userId: String(user.id), page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
   }
   const match = /^\/api\/evaluation\/unified\/batches\/([^/]+)(\/runs|\/comparison)?$/.exec(url.pathname);
   if (!match) throw new TeamServiceError(404, 'NOT_FOUND', 'Not found');
   if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
   if (!UUID.test(match[1])) invalid('批次 ID 无效');
-  if (!match[2]) return reply(res, 200, await batches.get(match[1]));
+  if (!match[2]) return reply(res, 200, await batches.get(match[1], String(user.id)));
   if (match[2] === '/runs') {
     const serviceKey = (url.searchParams.get('serviceKey') || '').trim();
     const status = (url.searchParams.get('status') || '').trim();
     const execution = (url.searchParams.get('execution') || '').trim();
     const sort = url.searchParams.get('sort') || 'scoreAsc';
     if (serviceKey.length > 64 || (status && !STATUSES.has(status)) || (execution && !EXECUTIONS.has(execution)) || !SORTS.has(sort)) invalid('批次运行筛选参数无效');
-    return reply(res, 200, await batches.runs(match[1], { serviceKey, status, execution, sort, page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
+    return reply(res, 200, await batches.runs(match[1], { serviceKey, status, execution, sort, userId: String(user.id), page: integer(url.searchParams.get('page'), 1, 1, 100000), pageSize: integer(url.searchParams.get('pageSize'), 20, 1, 100) }));
   }
   const against = url.searchParams.get('against') || 'previous';
   if (against !== 'previous' && !UUID.test(against)) invalid('对比批次 ID 无效');
-  return reply(res, 200, await batches.comparison(match[1], { against }));
+  return reply(res, 200, await batches.comparison(match[1], { against, userId: String(user.id) }));
 }
 
 module.exports = { handleBatches };

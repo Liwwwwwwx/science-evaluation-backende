@@ -27,9 +27,24 @@ function createMissionDailyRepository({ pgPool } = {}) {
     },
     async create(plan) {
       const current = await database();
-      await current.query(`INSERT INTO public.evaluation_mission_daily_plans(plan_date,id,service_address,items,rule_snapshot,state,reason)
+      const sql = `INSERT INTO public.evaluation_mission_daily_plans(plan_date,id,service_address,items,rule_snapshot,state,reason)
         VALUES ($1::date,$2,$3,$4::jsonb,$5::jsonb,$6,$7) ON CONFLICT (plan_date) DO NOTHING`,
-      [plan.date, plan.id, plan.serviceAddress, JSON.stringify(plan.items), plan.ruleSnapshot == null ? null : JSON.stringify(plan.ruleSnapshot), plan.state, plan.reason || null]);
+      values = value => [value.date, value.id, value.serviceAddress, JSON.stringify(value.items), value.ruleSnapshot == null ? null : JSON.stringify(value.ruleSnapshot), value.state, value.reason || null];
+      const tables = await current.query("SELECT to_regclass('public.evaluation_manual_batch_plans') IS NOT NULL AS ready");
+      if (!tables.rows[0]?.ready || plan.state !== 'dispatching') await current.query(sql, values(plan));
+      else {
+        const client = await current.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query("SELECT pg_advisory_xact_lock(hashtext('evaluation-batch-start'))");
+          const busy = await client.query(`SELECT EXISTS(SELECT 1 FROM evaluation_manual_batch_plans WHERE state IN ('generating','dispatching')) OR
+            EXISTS(SELECT 1 FROM unified_evaluation_runs u JOIN evaluation_manual_batch_plans m ON m.id::text=u.batch_id
+              WHERE u.status IN ('queued','running','scoring') OR u.finished_at IS NULL OR EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(u.scores)='object' THEN u.scores ELSE '{}'::jsonb END) s WHERE s.value->>'status'='pending')) AS busy`);
+          const actual = busy.rows[0]?.busy ? { ...plan, state: 'skipped', items: [], reason: '手动组合批次尚未结束，本轮未叠加运行' } : plan;
+          await client.query(sql, values(actual));
+          await client.query('COMMIT');
+        } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+      }
       return this.get(plan.date);
     },
     async markSubmitted(id) {

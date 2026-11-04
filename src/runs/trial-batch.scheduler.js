@@ -41,7 +41,7 @@ function createTrialBatchScheduler({ date, daily = false, service, repository, m
       }
       // 不与已有 Mission 计划或上一轮六服务任务叠加负载。
       if (await missionRepository.get(targetDate) || await missionRepository.pending() || await missionRepository.hasUnfinishedRuns()
-        || (daily && await repository.hasUnfinishedRuns())) {
+        || (daily && await repository.hasUnfinishedRuns()) || (repository.hasManualBusy && await repository.hasManualBusy())) {
         if (daily) blockedDate = targetDate;
         throw new Error('已有自动测评计划或未完成任务，本轮未启动');
       }

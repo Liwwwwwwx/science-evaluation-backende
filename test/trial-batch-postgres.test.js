@@ -44,12 +44,12 @@ test('隔离数据库：试运行计划唯一、保存快照，跨日报日期�
   assert.equal(snapshot.inProgress, true);
 });
 
-test('隔离数据库：完整270次批次持久化，失败后继续且重复派发不重复执行', { skip: !socket }, async t => {
+test('隔离数据库：完整320次批次持久化，失败后继续且重复派发不重复执行', { skip: !socket }, async t => {
   assert.match(socket, /^\/tmp\/evaluation-(trial|auth)-pg\.[A-Za-z0-9]+$/);
   const pool = new Pool({ host: socket, port: socket.includes('-auth-') ? 55481 : 55793, database: 'science_evaluation' }); t.after(() => pool.end());
-  for (const file of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql']) await pool.query(fs.readFileSync(path.join(__dirname, '../migrations', file), 'utf8'));
+  for (const file of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql', '012_comparison_groups.sql']) await pool.query(fs.readFileSync(path.join(__dirname, '../migrations', file), 'utf8'));
   await setupRunOwnership(pool);
-  const keys = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'];
+  const keys = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi'];
   const serviceAddresses = Object.fromEntries(keys.map(key => [key, `ws://${key}.example/start`]));
   const active = new Map(); const maxSeen = new Map(); let starts = 0; let generated = 0;
   const evaluators = Object.fromEntries(keys.map(key => [key, { scoreMode: 'none', serviceAddress: serviceAddresses[key], async startQuestionRun() {
@@ -58,19 +58,21 @@ test('隔离数据库：完整270次批次持久化，失败后继续且重复�
     const completion = new Promise(resolve => setTimeout(() => { active.set(key, active.get(key) - 1); resolve(number === 1 ? { status: 'error', error: '模拟服务故障' } : { status: 'done' }); }, 5));
     return { run: { id: randomUUID() }, completion };
   } }]));
-  const evaluations = createUnifiedEvaluationService({ evaluators, repository: createUnifiedEvaluationRepository({ pgPool: pool }), maxActive: 26, serviceLimits: { 'literature-aircraft': 1 } });
+  const evaluations = createUnifiedEvaluationService({ evaluators, repository: createUnifiedEvaluationRepository({ pgPool: pool }), maxActive: 26, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 } });
   const repository = createTrialBatchRepository({ pgPool: pool });
   const generator = { async generate(input) { return { items: Array.from({ length: input.count }, () => ({ question: `请分析材料结构与性能案例第${++generated}题。` })) }; } };
   const service = createTrialBatchService({ repository, evaluations, generator, serviceAddresses });
   const date = '2026-11-03'; await service.prepare(date); await service.dispatch(date); await service.dispatch(date);
   for (let i = 0; i < 400; i++) {
     const result = await pool.query("SELECT count(*)::int AS total,count(*) FILTER (WHERE status IN ('done','error'))::int AS finished,count(*) FILTER (WHERE status='error' AND error='模拟服务故障')::int AS failed FROM unified_evaluation_runs WHERE batch_id=$1", [(await repository.get(date)).id]);
-    if (result.rows[0].finished === 270) {
-      assert.equal(result.rows[0].total, 270); assert.equal(result.rows[0].failed, 1); assert.equal(starts, 270);
+    if (result.rows[0].finished === 320) {
+      assert.equal(result.rows[0].total, 320); assert.equal(result.rows[0].failed, 1); assert.equal(starts, 320);
+      const pairs = await pool.query("SELECT comparison_group_id FROM unified_evaluation_runs WHERE batch_id=$1 AND comparison_group_id IS NOT NULL GROUP BY comparison_group_id HAVING count(*)=2 AND count(DISTINCT service_key)=2 AND count(DISTINCT question)=1", [(await repository.get(date)).id]);
+      assert.equal(pairs.rowCount, 50);
       assert.equal(generated, 100); assert.equal(maxSeen.get('literature-aircraft'), 1);
       assert.ok([...maxSeen.values()].every(value => value <= 5)); return;
     }
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  assert.fail('270条运行未全部保存为终态');
+  assert.fail('320条运行未全部保存为终态');
 });

@@ -39,15 +39,15 @@ test('缺少安全令牌不能启动，未配置模型时返回 503', async (t) 
 test('独立运行核心区分执行与评分状态', async () => {
   let finishScore;
   const score = new Promise((resolve) => { finishScore = resolve; });
-  const evaluator = { async askQuestionStream(_, { onText }) { onText('回答'); return { run: { id: 'native-1' }, completion: Promise.resolve({ status: 'done' }) }; }, async getAskResult() { return score; } };
+  const evaluator = { async startQuestionRun(_, { onText }) { onText('回答'); return { run: { id: 'native-1' }, completion: Promise.resolve({ status: 'done' }) }; }, async getRunQuality() { return score; } };
   const service = createUnifiedEvaluationService({ evaluators: { 'alpha-rsi': evaluator } });
-  const run = await service.start({ serviceKey: 'alpha-rsi', question: '测试题目' });
+  const run = await service.start({ serviceKey: 'alpha-rsi', question: '这是一个测试题目' });
   await new Promise((resolve) => setImmediate(resolve));
   const pending = await service.get(run.runId);
   assert.equal(pending.answer, '回答');
   assert.equal(pending.executionStatus, 'succeeded');
   assert.equal(pending.scoringStatus, 'pending');
-  finishScore({ deepSeekScore: { status: 'failed' }, qwenScore: { status: 'unavailable' } });
+  finishScore({ status: 'failed', quality: null, error: null });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal((await service.get(run.runId)).scoringStatus, 'failed');
 });
