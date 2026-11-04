@@ -66,22 +66,23 @@ if (databaseUrl) {
   }
   const automation = automationEnabled();
   const trialDate = automation ? process.env.EVALUATION_TRIAL_DATE || '' : '';
+  const dailyMultiService = automation && process.env.EVALUATION_DAILY_MULTI_SERVICE_ENABLED === 'true';
   if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
   const serviceAddresses = Object.fromEntries(Object.keys(TARGETS).map(key => [key, evaluators[key]?.serviceAddress || null]));
-  if (trialDate && (process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true' || Object.values(serviceAddresses).some(value => !value))) throw new Error('试运行需要启用运行写入和全部六个服务');
+  if ((trialDate || dailyMultiService) && (process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true' || Object.values(serviceAddresses).some(value => !value))) throw new Error('六服务自动测评需要启用运行写入和全部六个服务');
   const scoring = createScoringService({ rules });
-  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate ? 26 : 25, serviceLimits: trialDate ? { 'literature-aircraft': 1 } : {} });
+  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, serviceLimits: trialDate || dailyMultiService ? { 'literature-aircraft': 1 } : {} });
   batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
     serviceAddress: evaluators['mission-material']?.serviceAddress || null,
-    enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'], skipDate: day => day === trialDate,
+    enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'], skipDate: day => dailyMultiService || day === trialDate,
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
-  if (trialDate) {
+  if (trialDate || dailyMultiService) {
     const repository = createTrialBatchRepository({ pgPool: pool });
     const service = createTrialBatchService({ repository, evaluations, scoring, serviceAddresses, generator: createQuestionBankGenerationService() });
-    trialScheduler = createTrialBatchScheduler({ date: trialDate, service, repository, missionRepository: plans,
-      onError: () => console.error('单日试运行尚未准备或派发完成，请检查试运行计划') });
+    trialScheduler = createTrialBatchScheduler({ date: trialDate, daily: dailyMultiService, service, repository, missionRepository: plans,
+      onError: () => console.error('六服务自动测评尚未准备或派发完成，请检查计划和未完成任务') });
   }
   const notifier = createFeishuTestNotifier();
   const dailyReportEnabled = automation && process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
