@@ -37,9 +37,10 @@ function createManualBatchService({ repository, evaluations, generator, scoring,
     if (!await repository.ownershipReady()) throw new TeamServiceError(503, 'RUN_OWNERSHIP_NOT_MIGRATED', '个人运行归属存储尚未迁移');
     let source = null;
     if (schemeId != null) {
-      const catalog = await schemes.list();
+      const catalog = await schemes.list({ userId });
       const selected = catalog.items.find(item => item.id === schemeId);
-      if (!selected || selected.version !== schemeVersion) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
+      if (!catalog.storageReady) throw new TeamServiceError(503, 'BATCH_SCHEMES_NOT_MIGRATED', '批次配置管理尚未迁移');
+      if (!selected || selected.version !== schemeVersion || JSON.stringify(validateScheme(selected.config)) !== JSON.stringify(scheme)) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
       source = { id: selected.id, name: selected.name, version: selected.version };
     }
     const keys = Object.keys(scheme.services).filter(service => scheme.services[service].aviation + scheme.services[service].synthesis > 0);

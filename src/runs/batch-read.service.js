@@ -163,6 +163,8 @@ function summaryOf(plan, runs) {
     source: plan.source,
     state: normalizedState(plan, totals, planned, runs.some(run => run.status === 'paused')),
     rawState: plan.state,
+    scheme: plan.config_snapshot?.scheme || null,
+    error: plan.error || null,
     planned,
     services,
     totals,
@@ -362,23 +364,24 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
 function createBatchReadService({ repository } = {}) {
   if (!repository) throw new Error('批次读取仓储未配置');
 
-  async function list({ source = 'all', state = '', from = '', to = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
+  async function list({ source = 'all', state = '', from = '', to = '', schemeId = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
     const items = [];
     const chunkSize = 100;
     for (let offset = 0; ; offset += chunkSize) {
       const result = await repository.plans({ source, from, to, limit: chunkSize, offset, userId });
       if (!result.storageReady) return { items: [], total: 0, page: 1, pageSize, storageReady: false };
-      const runs = await repository.runsByBatchIds(result.items.map((plan) => plan.id), userId);
+      const plans = schemeId ? result.items.filter(plan => plan.config_snapshot?.scheme?.id === schemeId) : result.items;
+      const runs = await repository.runsByBatchIds(plans.map((plan) => plan.id), userId);
       const byBatch = new Map();
       for (const run of runs) {
         if (!byBatch.has(run.batch_id)) byBatch.set(run.batch_id, []);
         byBatch.get(run.batch_id).push(mapRun(run));
       }
-      items.push(...result.items.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state));
+      items.push(...plans.map((plan) => summaryOf(plan, byBatch.get(plan.id) || [])).filter((item) => !state || item.state === state));
       if (result.items.length < chunkSize) break;
     }
     const safePage = Math.min(Math.max(Number(page) || 1, 1), Math.max(1, Math.ceil(items.length / pageSize)));
-    return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true };
+    return { items: items.slice((safePage - 1) * pageSize, safePage * pageSize), total: items.length, page: safePage, pageSize, storageReady: true, ...(schemeId ? { schemeFilterApplied: true } : {}) };
   }
 
   async function get(id, userId = null) {

@@ -37,7 +37,7 @@ function createBatchReadRepository({ pgPool } = {}) {
   return {
     async plans({ source = 'all', from = '', to = '', limit = 200, offset = 0, userId = null } = {}) {
       const tables = await available();
-      const sources = source === 'all' ? ['trial', 'mission', 'manual'] : [source];
+      const sources = source === 'all' ? ['trial', 'mission', 'manual'] : source === 'nightly' ? ['trial', 'mission'] : [source];
       const selected = sources.filter((key) => tables[key]);
       if (!selected.length) return { storageReady: false, items: [] };
       const params = selected.includes('manual') ? [String(userId || '')] : [];

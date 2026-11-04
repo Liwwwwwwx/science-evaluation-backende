@@ -17,6 +17,11 @@ function createManualBatchRepository({ pgPool, schemes } = {}) {
           if (existing.rows[0].request_hash !== requestHash) throw new TeamServiceError(409, 'BATCH_IDEMPOTENCY_CONFLICT', '幂等键已用于不同方案');
           await client.query('COMMIT'); return { plan: map(existing.rows[0]), reused: true };
         }
+        if (configSnapshot.scheme) {
+          await client.query("SELECT pg_advisory_xact_lock(hashtext('evaluation-batch-scheme'))");
+          const selected = await client.query('SELECT id FROM evaluation_batch_schemes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL AND version=$3 AND config=$4::jsonb', [configSnapshot.scheme.id, userId, configSnapshot.scheme.version, JSON.stringify(configSnapshot.config)]);
+          if (!selected.rowCount) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
+        }
         const busy = await client.query(`SELECT
           EXISTS(SELECT 1 FROM evaluation_manual_batch_plans WHERE state IN ('generating','dispatching')) OR
           EXISTS(SELECT 1 FROM evaluation_trial_batch_plans WHERE state IN ('generating','dispatching')) OR
