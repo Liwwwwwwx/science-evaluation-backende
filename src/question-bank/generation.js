@@ -3,6 +3,7 @@ const { createEvaluationLlmClient } = require('./llm');
 const { fingerprintOf } = require('./identity');
 const { DOMAINS } = require('./domains');
 const { randomInt } = require('node:crypto');
+const { isSupportedComparisonPair } = require('../runs/comparison-services');
 
 const QUESTION_TYPES = ['原理解释：解释机制或判断适用条件', '比较取舍：比较候选并给出选择依据', '故障诊断：根据现象排查原因', '数据解读：根据题内数据或观察推断结论', '方案设计：在明确约束下提出可行方案', '实验验证：检验假设并确定验证指标'];
 const SUBDIRECTIONS = Object.freeze({
@@ -31,12 +32,18 @@ function generalComposition(count, domainKey) {
 const SERVICES = new Set(['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
 const SERVICE_GUIDANCE = Object.freeze({
   'mission-material': 'Mission 主服务：提出需要协调多个研究环节的综合材料研发任务，交代目标与约束。',
+  'alpha-rsi': 'ALPHA 材料 RSI（1110）：围绕合金或玻璃材料的组成、配方、工艺条件与目标性能提出问题；优先使用高熵合金、镍基高温合金、铜合金、可复用火箭不锈钢、航空铝合金或芯片玻璃等已接入体系，给出必要的成分口径、温度和处理状态；不要使用未接入的胶粘剂、陶瓷等体系。',
   literature: '文献检索服务：围绕明确的科学问题设计文献检索、筛选或归纳任务，要求回答提供可追溯的文献信息及依据，不预设虚构论文或结论。',
   'literature-aircraft': '航空文献服务：围绕航空航天应用中的材料、结构或工况设计文献检索、筛选或归纳任务，要求回答提供可追溯的文献信息及依据，不预设虚构论文或结论。',
   alloy: '合金材料服务：围绕合金成分、性能、工艺或选型提出问题，给出必要的应用条件与约束。',
   synthesis: '合成制备服务：围绕材料合成路线、制备条件或工艺选择提出简洁问题，明确目标材料与必要约束。',
   'new-material': '新材料服务：围绕新材料候选、设计思路或性能需求提出问题，交代应用场景与约束。',
 });
+const COMPARISON_GUIDANCE = Object.freeze({
+  synthesis: SERVICE_GUIDANCE.synthesis,
+  'alpha-rsi': 'ALPHA 材料 RSI（1110）：围绕材料组成、配方比较或优化与目标性能提出明确问题，必要时给出成分口径、温度及工艺条件。',
+});
+const COMPARISON_DIRECTIONS = ['明确材料体系与目标性能', '围绕成分或原料选择及约束', '围绕性能目标与验证条件'];
 const FOCUSES = Object.freeze({
   general: '综合出题：覆盖当前领域的常见研究问题，各题考察不同方向',
   principles: '基础原理：考察关键概念、作用机制和理论依据',
@@ -48,6 +55,23 @@ const FOCUSES = Object.freeze({
 function createQuestionBankGenerationService({ llm } = {}) {
   return {
     async generate(input = {}) {
+      if (input.generationMode === 'comparison') {
+        const keys = input.serviceKeys;
+        if (!isSupportedComparisonPair(keys) || input.count !== 1 || input.serviceKey != null || input.domainKey != null || input.focus != null || input.topic != null) {
+          throw new TeamServiceError(400, 'QUESTION_GENERATION_INVALID', '对比出题目前仅支持合成制备与 ALPHA 材料 RSI（1110）');
+        }
+        const client = llm || createEvaluationLlmClient();
+        if (!client.isConfigured()) throw new TeamServiceError(503, 'QUESTION_GENERATION_UNAVAILABLE', '题目生成模型未配置');
+        const max = 200;
+        const pairGuidance = '这对服务侧重点不同：1110 侧重材料成分与性能预测，合成制备侧重制备路线和工艺。选择航空铝合金研发场景，给出质量百分比 wt.% 的组分配比约束、评价温度和处理状态，并提出成形或热处理路线需求；所有组分合计应为100%。性能目标只选屈服强度、抗拉强度或延伸率，不要求预测耐蚀性、断裂韧性或疲劳裂纹扩展等未经确认的指标。不要使用氧化物陶瓷或其他未经确认的材料体系，不编造具体性能数据。不要声称两个服务具有相同工具或保证合成制备服务支持该材料和路线。避免仅要求两种已知牌号做文献式选材比较。';
+        let data;
+        try {
+          data = await client.callJson(`请为科研评测平台生成一道中文双服务对比题。两个服务分别为：\n${keys.map(key => COMPARISON_GUIDANCE[key]).join('\n')}\n${pairGuidance}\n本题重点：${COMPARISON_DIRECTIONS[randomInt(COMPARISON_DIRECTIONS.length)]}。题面应直接要求被测服务给出分析或方案，不要要求被测服务出题、提问或生成问题。提供必要条件，未确定的数据明确说明为假设，不编造模型能力、实验结果或结论。题面最多 ${max} 字符，尽量简洁；只输出 JSON 对象 {"questions":["题目"]}，不输出答案。`, { temperature: 0.8, maxTokens: 2048 });
+        } catch { throw new TeamServiceError(502, 'QUESTION_GENERATION_FAILED', '题目生成失败，请稍后重试'); }
+        const question = Array.isArray(data?.questions) && typeof data.questions[0] === 'string' ? data.questions[0].trim() : '';
+        if (question.length < 8 || question.length > max || !fingerprintOf(question)) throw new TeamServiceError(502, 'QUESTION_GENERATION_EMPTY', '模型未生成有效题目，请重试');
+        return { generationMode: 'comparison', serviceKeys: [...keys], items: [{ question }], model: client.model || null };
+      }
       const serviceKey = typeof input.serviceKey === 'string' ? input.serviceKey.trim() : '';
       const domainKey = typeof input.domainKey === 'string' ? input.domainKey.trim() : '';
       const topic = typeof input.topic === 'string' ? input.topic.trim() : '';

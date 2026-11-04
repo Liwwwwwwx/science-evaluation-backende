@@ -3,6 +3,7 @@ const { TeamServiceError } = require('../errors');
 const { createUnifiedEvaluationAdapters } = require('./unified-evaluation-adapters');
 const { createRunEvents } = require('./unified-evaluation-events');
 const { createConcurrency } = require('./concurrency');
+const { isSupportedComparisonPair } = require('./comparison-services');
 
 const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
 const MAX_ACTIVE = 25;
@@ -555,8 +556,10 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     return { ok: true, runId };
   }
   function withRecoveryState(item) {
-    if (!['queued', 'running', 'scoring'].includes(item.status)) return item;
     const job = runs.get(item.runId);
+    // 运行中的详情来自内存，数据库列表可能尚未保存最新状态。
+    if (job && (!job.settled || job.persistenceError)) return { ...item, status: job.status, recoveryState: undefined };
+    if (!['queued', 'running', 'scoring'].includes(item.status)) return item;
     return !job || job.settled ? { ...item, recoveryState: 'snapshot_only' } : item;
   }
   async function list(query = {}) {
@@ -669,9 +672,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (!repository?.comparisonReady || !(await repository.comparisonReady())) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移，请先执行 migrations/012_comparison_groups.sql');
     if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
     const serviceKeys = input.serviceKeys;
-    if (!Array.isArray(serviceKeys) || serviceKeys.length !== 2 || serviceKeys[0] === serviceKeys[1]
-      || serviceKeys.some(value => typeof value !== 'string' || !SERVICE_KEYS.includes(value) || !evaluators?.[value])) {
-      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '请选择两个不同且已接入的服务');
+    if (!isSupportedComparisonPair(serviceKeys) || serviceKeys.some(value => !evaluators?.[value])) {
+      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合成制备与 ALPHA 材料 RSI（1110）');
     }
     if (typeof input.question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     const text = input.question.trim();

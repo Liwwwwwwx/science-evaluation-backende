@@ -43,6 +43,30 @@ test('运行记录仅接受指定数据库，拒绝写入其他数据库', async
   assert.equal(writes, 0);
 });
 
+test('运行列表和侧栏返回对比组标识，并兼容尚未增加对比列的数据库', async () => {
+  const groupId = 'a'.repeat(64);
+  const queries = [];
+  const repository = createUnifiedEvaluationRepository({ pgPool: { async query(sql, params) {
+    if (sql.includes('current_database()')) return { rows: [{ name: 'science_evaluation' }] };
+    queries.push({ sql, params });
+    if (sql.includes('count(*)')) return { rows: [{ total: 2 }] };
+    return { rows: [
+      { id: 'grouped', question: '对比题', status: 'done', comparison_group_id: groupId },
+      { id: 'old', question: '旧题', status: 'done' },
+    ] };
+  } } });
+  const history = await repository.listHistory('user-a');
+  const list = await repository.list({ userId: 'user-a' });
+  assert.deepEqual(history.map(item => item.comparisonGroupId), [groupId, null]);
+  assert.deepEqual(list.items.map(item => item.comparisonGroupId || null), [groupId, null]);
+  const selects = queries.filter(item => item.sql.includes('comparison_group_id'));
+  assert.equal(selects.length, 2);
+  for (const query of selects) {
+    assert.match(query.sql, /to_jsonb\(r\)->>'comparison_group_id'/);
+    assert.equal(query.params[0], 'user-a');
+  }
+});
+
 test('幂等键命中已有记录时只执行一次并返回原运行', async () => {
   const rows = new Map();
   const keys = new Map();

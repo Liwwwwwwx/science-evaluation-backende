@@ -54,7 +54,7 @@ test('按领域生成候选，不绑定服务且拒绝未知领域', async () =>
 test('按被测服务出题使用对应提示、支持选填主题并绑定目标服务', async () => {
   let prompt = ''; let calls = 0;
   const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { calls++; prompt = value; return { questions: ['请检索并归纳航空发动机高温合金相关研究文献。'] }; } } });
-  const labels = { 'mission-material': 'Mission 主服务', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
+  const labels = { 'mission-material': 'Mission 主服务', 'alpha-rsi': 'ALPHA 材料 RSI（1110）', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
   for (const [serviceKey, label] of Object.entries(labels)) {
     const result = await generator.generate({ generationMode: 'service', serviceKey, count: 1 });
     assert.equal(result.items[0].serviceKey, serviceKey);
@@ -66,13 +66,30 @@ test('按被测服务出题使用对应提示、支持选填主题并绑定目�
   assert.ok(prompt.includes('发动机合金'));
   const previousCalls = calls;
   for (const input of [
-    { generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 },
     { generationMode: 'service', serviceKey: 'literature', domainKey: 'materials-rd', count: 1 },
     { generationMode: 'service', serviceKey: 'literature', focus: 'design', count: 1 },
     { generationMode: 'other', serviceKey: 'literature', topic: '测试', count: 1 },
     { generationMode: 'service', serviceKey: 'literature', topic: null, count: 1 },
   ]) await assert.rejects(() => generator.generate(input), e => e.code === 'QUESTION_GENERATION_INVALID');
   assert.equal(calls, previousCalls);
+});
+
+test('双服务随机题同时考虑服务侧重点，不绑定题库且按较小字数上限校验', async () => {
+  let prompt = ''; let candidate = '请为航空铝合金确定组成优化目标，并提出 LPBF 成形和热处理方案及验证条件。';
+  const generator = createQuestionBankGenerationService({ llm: { model: 'test-model', isConfigured: () => true, callJson: async value => { prompt = value; return { questions: [candidate] }; } } });
+  for (const keys of [['synthesis', 'alpha-rsi'], ['alpha-rsi', 'synthesis']]) {
+    const result = await generator.generate({ generationMode: 'comparison', serviceKeys: keys, count: 1 });
+    assert.deepEqual(result, { generationMode: 'comparison', serviceKeys: keys, items: [{ question: candidate }], model: 'test-model' });
+    assert.match(prompt, /成分与性能预测/); assert.match(prompt, /制备路线和工艺/); assert.match(prompt, /最多 200 字符/);
+    assert.match(prompt, /航空铝合金/); assert.match(prompt, /不要求预测耐蚀性/); assert.match(prompt, /不要使用氧化物陶瓷/); assert.match(prompt, /不要声称两个服务具有相同工具或保证/);
+  }
+  for (const bad of [
+    { serviceKeys: ['synthesis', 'synthesis'], count: 1 }, { serviceKeys: ['synthesis', 'bad'], count: 1 },
+    { serviceKeys: ['synthesis'], count: 1 }, { serviceKeys: ['synthesis', 'alpha-rsi'], count: 2 },
+    { serviceKeys: ['synthesis', 'alpha-rsi'], count: 1, domainKey: 'materials-rd' }, { serviceKeys: ['literature', 'mission-material'], count: 1 },
+  ]) await assert.rejects(generator.generate({ generationMode: 'comparison', ...bad }), { code: 'QUESTION_GENERATION_INVALID' });
+  candidate = '过'.repeat(201);
+  await assert.rejects(generator.generate({ generationMode: 'comparison', serviceKeys: ['synthesis', 'alpha-rsi'], count: 1 }), { code: 'QUESTION_GENERATION_EMPTY' });
 });
 
 test('服务题确认保存后保留绑定，其他服务不能使用该题', async () => {
@@ -104,6 +121,33 @@ test('服务题过滤无效、重复及超长候选，模型无有效结果时�
 test('题库只接受 science_admin 连接', async () => {
   const repo = createEvalQuestionBankRepository({ pool: { query: async () => ({ rows: [{ name: 'other' }] }), connect: async () => { throw new Error('must not connect'); } } });
   await assert.rejects(() => repo.listQuestionsPaged(), /science_admin/);
+});
+
+test('双服务题库筛选校验两服务并传递长度限制', async () => {
+  let query;
+  const service = createQuestionBankService({ findMissingFixedCaseBaselines: async () => [], listQuestionsPaged: async input => { query = input; return { items: [], total: 0 }; } });
+  const valid = new URLSearchParams({ runnableFor: 'mission-material', comparisonWith: 'synthesis', maxLength: '200' });
+  assert.equal((await service.list(valid)).comparisonFiltered, true);
+  assert.equal(query.runnableFor, 'mission-material'); assert.equal(query.comparisonWith, 'synthesis'); assert.equal(query.maxLength, 200);
+  for (const params of [
+    { comparisonWith: 'synthesis' }, { runnableFor: 'synthesis', comparisonWith: 'synthesis' },
+    { runnableFor: 'synthesis', comparisonWith: 'unknown' }, { runnableFor: 'synthesis', maxLength: '0' },
+    { runnableFor: 'synthesis', maxLength: '201.5' }, { runnableFor: 'synthesis', maxLength: '501' },
+  ]) await assert.rejects(service.list(new URLSearchParams(params)), { code: 'INVALID_QUERY' });
+});
+
+test('双服务检索在数据库中同时限制两个服务、题型规则和题长', async () => {
+  let selected;
+  const repo = createEvalQuestionBankRepository({ pool: { connect: async () => { throw Error('不应写入'); }, async query(sql, params) {
+    if (sql.includes('current_database()')) return { rows: [{ name: 'science_admin' }] };
+    selected = { sql, params }; return { rows: [] };
+  } } });
+  await repo.listQuestionsPaged({ runnableFor: 'mission-material', comparisonWith: 'synthesis', maxLength: 200 });
+  assert.match(selected.sql, /service_key IS NULL OR service_key = \$2/);
+  assert.match(selected.sql, /service_key IS NULL OR service_key = \$3/);
+  assert.match(selected.sql, /criteria IS NULL/);
+  assert.match(selected.sql, /char_length\(btrim\(question\)\) <= \$4/);
+  assert.deepEqual(selected.params.slice(0, 4), ['active', 'mission-material', 'synthesis', 200]);
 });
 
 test('题库接口校验登录、读写权限、来源与写入开关', async t => {

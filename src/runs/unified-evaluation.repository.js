@@ -206,12 +206,12 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       return result.rows.map(row => ({ runId: row.id, questionId: row.question_id, datasetVersion: row.dataset_version, serviceKey: row.service_key, status: row.status, startedAt: date(row.started_at), scores: scoreSummary(row.scores) }));
     },
     async listHistory(userId) {
-      const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title
+      const result = await (await adminPool()).query(`SELECT r.id,r.question,r.status,r.started_at,h.title,to_jsonb(r)->>'comparison_group_id' AS comparison_group_id
         FROM public.unified_evaluation_runs r
         LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1
         WHERE r.origin IN ('manual','legacy') AND r.owner_user_id=$1 AND r.batch_id IS NULL AND coalesce(h.hidden,false)=false
         ORDER BY r.started_at DESC,r.id DESC LIMIT 50`, [userId]);
-      return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at) }));
+      return result.rows.map(row => ({ runId: row.id, question: row.question, title: row.title || null, status: row.status, startedAt: date(row.started_at), comparisonGroupId: row.comparison_group_id || null }));
     },
     async comparisonReady() {
       const result = await (await adminPool()).query("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='unified_evaluation_runs' AND column_name='comparison_group_id' LIMIT 1");
@@ -259,7 +259,7 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const current = await adminPool();
       const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
       const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,
-        r.batch_id, r.status, r.scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
+        r.batch_id, to_jsonb(r)->>'comparison_group_id' AS comparison_group_id, r.status, r.scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
         ORDER BY r.started_at DESC, r.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, safeSize, (safePage - 1) * safeSize]);
       return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },
