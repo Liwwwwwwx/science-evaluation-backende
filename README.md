@@ -30,6 +30,8 @@
 
 连接共享数据库的本地后端可以设置 `EVALUATION_QUEUE_RECOVERY_ENABLED=false`，避免自动恢复其他进程留下的排队任务；未设置时保留原有恢复行为。
 
+统一运行从实际派发起最多执行一小时，排队不计时；到时停止本进程的运行并记录超时，保留已输出内容，不能据此确认上游已停止。服务自身较短的超时仍然生效。写入开关开启时，后台每分钟检查当前进程不再持有且一小时未更新的运行快照并标记超时；该检查独立于队列恢复开关，本地连接共享库时应关闭运行写入。Mission 自动批次超时后仍暂停同批未派发的 Mission 任务。
+
 本地 `.env.local` 显式设置 `EVALUATION_AUTOMATION_ENABLED=false`，即使 shell 里残留 `EVALUATION_TRIAL_DATE` 也不会启动调度器。生产 `shared/backend.env` 需要夜间自动化时设置 `EVALUATION_AUTOMATION_ENABLED=true`，并同步开启对应 `EVALUATION_MISSION_DAILY_ENABLED`、`EVALUATION_DAILY_REPORT_ENABLED` 等开关。该总开关不改变手工创建运行、手工生成报告或队列恢复的独立写开关。
 
 ## 多服务随机题自动测评

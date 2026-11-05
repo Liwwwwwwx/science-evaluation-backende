@@ -87,6 +87,19 @@ test('Mission 执行超时后不派发同批排队题目', async () => {
   assert.equal(f.starts.length, 1);
 });
 
+test('统一执行时限到达后暂停同批 Mission 排队任务', async () => {
+  const f = fixture();
+  const service = createUnifiedEvaluationService({ repository:f.repository, evaluators:f.evaluators, maxActive:1, maxPerService:1, executionTimeoutMs:20, scoreWaitMs:0 });
+  const one = await service.createBatchRun(input('mission-material', '统一时限第一条 Mission 问题'), { key:'deadline-one' });
+  const two = await service.createBatchRun(input('mission-material', '统一时限第二条 Mission 问题'), { key:'deadline-two' });
+  f.releasePause();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal((await service.get(one.runId)).status, 'error');
+  assert.match((await service.get(one.runId)).error, /超时/);
+  assert.equal((await service.get(two.runId)).status, 'paused');
+  assert.equal(f.starts.length, 1);
+});
+
 test('抢占时发现数据库已暂停则展示暂停，不启动 Mission', async () => {
   const f = fixture();
   f.repository.claimQueued = async (job) => {

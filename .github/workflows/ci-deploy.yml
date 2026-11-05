@@ -74,6 +74,8 @@ jobs:
           fi
           docker exec evaluation-ownership-test createdb -h /var/run/postgresql -p 55487 -U postgres science_evaluation
           PGUSER=postgres EVALUATION_OWNERSHIP_TEST_PG_SOCKET="$socket_dir" node --test test/run-ownership-postgres.test.js
+          docker exec evaluation-ownership-test createdb -h /var/run/postgresql -p 55487 -U postgres science_admin
+          PGUSER=postgres EVALUATION_TIMEOUT_TEST_PG_SOCKET="$socket_dir" EVALUATION_TIMEOUT_TEST_PG_PORT=55487 EVALUATION_TIMEOUT_TEST_PG_DATABASE=science_admin node --test test/execution-timeout-postgres.test.js
       - run: bash -n ops/deploy.sh
       - name: Package release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

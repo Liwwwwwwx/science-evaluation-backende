@@ -120,6 +120,7 @@ if (databaseUrl) {
 createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
+  if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') manualBatches?.start();
   missionDaily?.start();
   trialScheduler?.start();
