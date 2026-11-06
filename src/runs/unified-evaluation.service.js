@@ -51,6 +51,14 @@ function recoverScoringSnapshot(value) {
 
 function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED, serviceLimits = {}, executionTimeoutMs = 60 * 60 * 1000 } = {}) {
   const runs = new Map();
+  const executionTimeouts = typeof executionTimeoutMs === 'number'
+    ? { default: executionTimeoutMs }
+    : executionTimeoutMs && typeof executionTimeoutMs === 'object' ? executionTimeoutMs : {};
+  const timeoutFor = (serviceKey) => {
+    const fallback = Number(executionTimeouts.default) || 60 * 60 * 1000;
+    const value = Number(executionTimeouts[serviceKey]);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
   const pausedMissionBatches = new Set();
   const adapters = createUnifiedEvaluationAdapters(evaluators);
   const concurrency = createConcurrency({ maxActive, maxPerKey: maxPerService, maxQueued, limitsByKey: serviceLimits });
@@ -347,13 +355,14 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         if (job.cancelRequested) job.cancel?.();
         void save(job).catch(() => { job.persistenceError = true; });
         // 只计算实际执行时间，排队不占用时间；重试也包含在同一轮时限内。
+        const serviceTimeoutMs = timeoutFor(serviceKey);
         let deadline;
         const timedOut = new Promise(resolve => {
           deadline = setTimeout(() => {
             job.executionTimedOut = true;
-            resolve({ status: 'error', error: '执行超时：超过一小时未完成，已结束本次评测；上游任务是否停止无法确认。', taskid: job.nativeRunId, details: job.run?.details || null });
+            resolve({ status: 'error', error: '执行超时：超过执行时限未完成，已结束本次评测；上游任务是否停止无法确认。', taskid: job.nativeRunId, details: job.run?.details || null });
             try { started.cancel?.(); } catch { /* 仍按超时结束本地运行。 */ }
-          }, executionTimeoutMs);
+          }, serviceTimeoutMs);
           deadline.unref?.();
         });
         const completion = Promise.race([started.completion, timedOut]).finally(() => clearTimeout(deadline));
@@ -479,12 +488,12 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (timeoutRecoveryRunning || !repository?.listStaleRunning || !repository?.timeoutStaleRunning) return;
     timeoutRecoveryRunning = true;
     try {
-      const candidates = await repository.listStaleRunning(executionTimeoutMs);
+      const candidates = await repository.listStaleRunning(executionTimeouts);
       for (const candidate of candidates) {
         const job = runs.get(candidate.runId);
         if (job && !job.settled) continue;
         if (job?.writeChain) await job.writeChain.catch(() => {});
-        const updated = await repository.timeoutStaleRunning(candidate.runId, candidate.version, executionTimeoutMs);
+        const updated = await repository.timeoutStaleRunning(candidate.runId, candidate.version, timeoutFor(candidate.serviceKey));
         // 已结束但未能持久化的内存快照不能再覆盖超时结果。
         if (updated && job?.settled && runs.get(candidate.runId) === job) runs.delete(candidate.runId);
       }

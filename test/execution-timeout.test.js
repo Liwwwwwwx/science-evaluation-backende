@@ -60,3 +60,35 @@ test('恢复超时快照时跳过当前仍由本进程执行的运行', async ()
   f.starts[0].finish({ status:'done' }); await delay(5);
   assert.equal((await f.service.get(active.runId)).status, 'done');
 });
+
+test('Mission 使用自身执行时限，不被默认时限提前截断', async () => {
+  const rows = new Map(); let cancelled = 0;
+  const repository = {
+    async findIdempotent() { return null; },
+    async createIdempotent(job) { rows.set(job.runId, structuredClone(job)); return { created: true, runId: job.runId }; },
+    async save(job) { rows.set(job.runId, structuredClone(job)); },
+    async get(id) { return structuredClone(rows.get(id)); },
+  };
+  const evaluator = { scoreMode: 'none', async startQuestionRun() { return { run: { id: 'native-mission' }, completion: new Promise(() => {}), cancel() { cancelled++; } }; }, async getRunQuality() { return { status: 'absent', quality: null, error: null }; } };
+  const service = createUnifiedEvaluationService({ repository, evaluators: { 'mission-material': evaluator }, executionTimeoutMs: { 'mission-material': 120, default: 20 }, maxActive: 1, maxQueued: 5 });
+  const run = await service.createRun({ serviceKey: 'mission-material', question: '这是用于 Mission 超时配置的测试问题' }, { scope: 'user', key: 'mission-timeout' });
+  await delay(50);
+  assert.equal((await service.get(run.runId)).status, 'running');
+  await delay(100);
+  const value = await service.get(run.runId);
+  assert.equal(value.status, 'error'); assert.match(value.error, /超时/); assert.equal(cancelled, 1);
+});
+
+test('超时恢复扫描按服务分别使用执行时限', async () => {
+  const seen = [];
+  const service = createUnifiedEvaluationService({
+    repository: {
+      async listStaleRunning(timeouts) { assert.deepEqual(timeouts, { 'mission-material': 7200000, default: 3600000 }); return [{ runId: 'm', version: '1', serviceKey: 'mission-material' }, { runId: 'l', version: '2', serviceKey: 'literature' }]; },
+      async timeoutStaleRunning(id, version, timeoutMs) { seen.push([id, timeoutMs]); },
+    },
+    evaluators: { literature: { scoreMode: 'none' } },
+    executionTimeoutMs: { 'mission-material': 7200000, default: 3600000 },
+  });
+  await service.recoverTimedOutRuns();
+  assert.deepEqual(seen, [['m', 7200000], ['l', 3600000]]);
+});

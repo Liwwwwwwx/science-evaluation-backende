@@ -80,7 +80,7 @@ if (databaseUrl) {
   const serviceAddresses = Object.fromEntries(Object.keys(TARGETS).map(key => [key, evaluators[key]?.serviceAddress || null]));
   if ((trialDate || dailyMultiService) && process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true') throw new Error('自动测评需要启用运行写入');
   const scoring = createScoringService({ rules });
-  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 } });
+  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 }, executionTimeoutMs: { 'mission-material': missionTimeoutMs(), default: 60 * 60 * 1000 } });
   batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
   batchSchemes = createBatchSchemeRepository({ pgPool: pool });

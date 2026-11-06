@@ -171,14 +171,18 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
       finally { client.release(); }
     },
-    async listStaleRunning(timeoutMs) {
-      const result = await (await adminPool()).query(`SELECT id,xmin::text AS version FROM public.unified_evaluation_runs
-        WHERE status='running' AND finished_at IS NULL AND updated_at < now() - ($1::double precision * interval '1 millisecond')
-        ORDER BY updated_at LIMIT 100`, [timeoutMs]);
-      return result.rows.map(row => ({ runId: row.id, version: row.version }));
+    async listStaleRunning(timeouts) {
+      const values = typeof timeouts === 'number' ? { default: timeouts } : timeouts || {};
+      const fallback = Number(values.default) || 60 * 60 * 1000;
+      const mission = Number(values['mission-material']) || fallback;
+      const result = await (await adminPool()).query(`SELECT id,xmin::text AS version,service_key FROM public.unified_evaluation_runs
+        WHERE status='running' AND finished_at IS NULL
+          AND updated_at < now() - (CASE WHEN service_key='mission-material' THEN $1::double precision ELSE $2::double precision END * interval '1 millisecond')
+        ORDER BY updated_at LIMIT 100`, [mission, fallback]);
+      return result.rows.map(row => ({ runId: row.id, version: row.version, serviceKey: row.service_key }));
     },
     async timeoutStaleRunning(runId, version, timeoutMs) {
-      const message = '执行超时：超过一小时未完成，已结束本次评测；上游任务是否停止无法确认。';
+      const message = '执行超时：超过执行时限未完成，已结束本次评测；上游任务是否停止无法确认。';
       const client = await (await adminPool()).connect();
       try {
         await client.query('BEGIN');
