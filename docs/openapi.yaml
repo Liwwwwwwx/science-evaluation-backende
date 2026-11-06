@@ -458,7 +458,7 @@ paths:
         需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
-        对比题传 `generationMode=comparison` 和 `serviceKeys`（合成制备与 ALPHA 材料 RSI），只生成一道候选题。
+        对比题传 `generationMode=comparison` 和 `serviceKeys`（合金材料与 ALPHA 材料 RSI），只生成一道候选题。
         旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
@@ -2112,7 +2112,7 @@ paths:
       summary: 创建对比组
       description: |
         需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`
-        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合成制备与 ALPHA 材料 RSI（1110），且两者均已接入。
+        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合金材料与 ALPHA 材料 RSI（1110），且两者均已接入。
         以同一份题面和同一份评分规则快照创建两条人工运行；分组 ID 由账号范围和幂等键确定，
         重试不会重复派发。依赖手工执行的 `migrations/012_comparison_groups.sql`，未迁移返回 503。
       parameters:
@@ -2131,10 +2131,10 @@ paths:
                   maxItems: 2
                   items:
                     type: string
-                    enum: [alpha-rsi, synthesis]
+                    enum: [alpha-rsi, alloy]
                 question:
                   type: string
-                  description: 题面；8–200 字符
+                  description: 题面；8–500 字符
                 questionId:
                   type: string
                 datasetVersion:
@@ -2888,7 +2888,7 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [alpha-rsi, synthesis]
+            enum: [alpha-rsi, alloy]
           description: comparison 模式必填，必须同时包含这两个服务，不能与 serviceKey、domainKey、topic 或 focus 同时提供
         serviceKey:
           type: string
@@ -3424,15 +3424,16 @@ components:
         synthesis: { type: integer, minimum: 0, maximum: 100 }
     BatchSchemeConfig:
       type: object
-      required: [pools, services, compareSynthesisAlpha]
-      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合成制备使用相同数量的合成题。
+      required: [pools, services]
+      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合金材料使用相同数量的题目。compareSynthesisAlpha 仅保留用于历史方案兼容。
       properties:
         pools: { $ref: '#/components/schemas/BatchSchemeCounts' }
         services:
           type: object
           required: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material, alpha-rsi]
           additionalProperties: { $ref: '#/components/schemas/BatchSchemeCounts' }
-        compareSynthesisAlpha: { type: boolean }
+        compareAlloyAlpha: { type: boolean, description: 1110 与合金材料同题对比 }
+        compareSynthesisAlpha: { type: boolean, deprecated: true, description: 旧版合成制备与 1110 同题对比，仅用于历史方案兼容 }
     BatchSummary:
       type: object
       required: [batchId, date, source, state, planned]
