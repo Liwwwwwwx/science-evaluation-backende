@@ -714,7 +714,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
     const serviceKeys = input.serviceKeys;
     if (!isSupportedComparisonPair(serviceKeys) || serviceKeys.some(value => !evaluators?.[value])) {
-      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合成制备与 ALPHA 材料 RSI（1110）');
+      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合金材料与 ALPHA 材料 RSI（1110）');
     }
     if (typeof input.question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     const text = input.question.trim();
