@@ -1,3 +1,4 @@
+const { scoreView } = require('./score-view');
 // 只接纳可在指定来源中逐字找到的引用；格式修正不能拼接或补造原文。
 function sources(input, scope = 'output') {
   const entries = [
@@ -11,8 +12,10 @@ function sources(input, scope = 'output') {
 function passages(input, scope = 'all') {
   const result = [];
   for (const source of sources(input,scope)) {
-    let offset = 0;
-    for (const line of source.text.match(/[^\n]*\n|[^\n]+$/g) || []) {
+    const ranges = source.id === 'answer' ? scoreView(source.text).ranges : [[0, source.text.length]];
+    for (const [rangeStart, rangeEnd] of ranges) {
+    let offset = rangeStart;
+    for (const line of source.text.slice(rangeStart, rangeEnd).match(/[^\n]*\n|[^\n]+$/g) || []) {
       let start = 0;
       while (start < line.length) {
         let end = Math.min(start+300,line.length);
@@ -22,6 +25,7 @@ function passages(input, scope = 'all') {
         start = end;
       }
       offset += line.length;
+    }
     }
   }
   return result;

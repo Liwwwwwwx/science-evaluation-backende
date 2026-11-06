@@ -169,10 +169,10 @@ test('批次运行列表支持服务筛选、执行状态和分数排序', async
 
 test('新批次统计1110并返回同题对比入口，旧批次不添加空服务', async () => {
   const group = 'a'.repeat(64);
-  const current = trialPlan({ items: { synthesis: ['同一道合成问题'], 'alpha-rsi': ['同一道合成问题'] } });
+  const current = trialPlan({ items: { alloy: ['同一道合金问题'], 'alpha-rsi': ['同一道合金问题'] } });
   const service = createBatchReadService({ repository: repository({ plans: [current], runs: [
-    run({ id: 's', batch_id: TRIAL, service_key: 'synthesis', question: '同一道合成问题', comparison_group_id: group }),
-    run({ id: 'a', batch_id: TRIAL, service_key: 'alpha-rsi', question: '同一道合成问题', comparison_group_id: group }),
+    run({ id: 's', batch_id: TRIAL, service_key: 'alloy', question: '同一道合金问题', comparison_group_id: group }),
+    run({ id: 'a', batch_id: TRIAL, service_key: 'alpha-rsi', question: '同一道合金问题', comparison_group_id: group }),
   ] }) });
   const detail = await service.get(TRIAL);
   assert.equal(detail.coverage.planned, 2);
@@ -197,11 +197,11 @@ test('手动批次读取与运行列表只向仓储传当前用户身份', async
 });
 
 test('出题期间依据冻结方案展示计划数量，不伪装成零次', async () => {
-  const pending = trialPlan({ source: 'manual', state: 'generating', items: null, config_snapshot: { config: { services: { synthesis: { aviation: 0, synthesis: 3 }, 'alpha-rsi': { aviation: 0, synthesis: 3 } } } } });
+  const pending = trialPlan({ source: 'manual', state: 'generating', items: null, config_snapshot: { config: { services: { alloy: { aviation: 3, synthesis: 0 }, 'alpha-rsi': { aviation: 3, synthesis: 0 } } } } });
   const service = createBatchReadService({ repository: repository({ plans: [pending] }) });
   const result = await service.get(TRIAL, 'owner');
   assert.equal(result.batch.planned, 6);
-  assert.deepEqual(result.services.map(item => item.serviceKey), ['synthesis', 'alpha-rsi']);
+  assert.deepEqual(result.services.map(item => item.serviceKey), ['alloy', 'alpha-rsi']);
   assert.equal(result.coverage.missing, 6);
 });
 
@@ -286,6 +286,8 @@ test('规则或模型来源缺失时不展示分数差，截断评分不列入�
   assert.equal(detail.services[0].lowScores.length, 0);
   const listed = await service.runs(MISSION);
   assert.equal(listed.items[0].scores.deepSeek, null);
+  assert.equal(listed.items[0].displayScores.deepSeek, 80);
+  assert.equal(listed.items[0].provisionalScores.deepSeek, true);
 });
 
 test('未结束的运行不判定为已修复或新增失败', async () => {

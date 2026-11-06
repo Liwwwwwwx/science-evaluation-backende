@@ -40,7 +40,7 @@ const SERVICE_GUIDANCE = Object.freeze({
   'new-material': '新材料服务：围绕新材料候选、设计思路或性能需求提出问题，交代应用场景与约束。',
 });
 const COMPARISON_GUIDANCE = Object.freeze({
-  synthesis: SERVICE_GUIDANCE.synthesis,
+  alloy: SERVICE_GUIDANCE.alloy,
   'alpha-rsi': 'ALPHA 材料 RSI（1110）：围绕材料组成、配方比较或优化与目标性能提出明确问题，必要时给出成分口径、温度及工艺条件。',
 });
 const COMPARISON_DIRECTIONS = ['明确材料体系与目标性能', '围绕成分或原料选择及约束', '围绕性能目标与验证条件'];
@@ -58,12 +58,12 @@ function createQuestionBankGenerationService({ llm } = {}) {
       if (input.generationMode === 'comparison') {
         const keys = input.serviceKeys;
         if (!isSupportedComparisonPair(keys) || input.count !== 1 || input.serviceKey != null || input.domainKey != null || input.focus != null || input.topic != null) {
-          throw new TeamServiceError(400, 'QUESTION_GENERATION_INVALID', '对比出题目前仅支持合成制备与 ALPHA 材料 RSI（1110）');
+          throw new TeamServiceError(400, 'QUESTION_GENERATION_INVALID', '对比出题目前仅支持合金材料与 ALPHA 材料 RSI（1110）');
         }
         const client = llm || createEvaluationLlmClient();
         if (!client.isConfigured()) throw new TeamServiceError(503, 'QUESTION_GENERATION_UNAVAILABLE', '题目生成模型未配置');
-        const max = 200;
-        const pairGuidance = '这对服务侧重点不同：1110 侧重材料成分与性能预测，合成制备侧重制备路线和工艺。选择航空铝合金研发场景，给出质量百分比 wt.% 的组分配比约束、评价温度和处理状态，并提出成形或热处理路线需求；所有组分合计应为100%。性能目标只选屈服强度、抗拉强度或延伸率，不要求预测耐蚀性、断裂韧性或疲劳裂纹扩展等未经确认的指标。不要使用氧化物陶瓷或其他未经确认的材料体系，不编造具体性能数据。不要声称两个服务具有相同工具或保证合成制备服务支持该材料和路线。避免仅要求两种已知牌号做文献式选材比较。';
+        const max = 500;
+        const pairGuidance = '这对服务侧重点不同：1110 侧重材料成分与性能预测，合金材料侧重合金成分、性能与工艺选择。选择航空铝合金或高温合金研发场景，给出质量百分比 wt.% 的组分配比约束、评价温度和处理状态；所有组分合计应为100%。性能目标只选屈服强度、抗拉强度或延伸率，不要求预测耐蚀性、断裂韧性或疲劳裂纹扩展等未经确认的指标。不要使用氧化物陶瓷或其他未经确认的材料体系，不编造具体性能数据。不要声称两个服务具有相同工具或保证合金材料服务支持该材料体系。避免仅要求两种已知牌号做文献式选材比较。';
         let data;
         try {
           data = await client.callJson(`请为科研评测平台生成一道中文双服务对比题。两个服务分别为：\n${keys.map(key => COMPARISON_GUIDANCE[key]).join('\n')}\n${pairGuidance}\n本题重点：${COMPARISON_DIRECTIONS[randomInt(COMPARISON_DIRECTIONS.length)]}。题面应直接要求被测服务给出分析或方案，不要要求被测服务出题、提问或生成问题。提供必要条件，未确定的数据明确说明为假设，不编造模型能力、实验结果或结论。题面最多 ${max} 字符，尽量简洁；只输出 JSON 对象 {"questions":["题目"]}，不输出答案。`, { temperature: 0.8, maxTokens: 2048 });

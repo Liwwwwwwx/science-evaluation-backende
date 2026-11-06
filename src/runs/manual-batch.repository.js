@@ -1,4 +1,5 @@
 const { TeamServiceError } = require('../errors');
+const { upgradeComparisonScheme } = require('./batch-scheme');
 
 function createManualBatchRepository({ pgPool, schemes } = {}) {
   async function requireStorage() { if (!await schemes.ready()) throw new TeamServiceError(503, 'BATCH_SCHEMES_NOT_MIGRATED', '手动批次存储尚未迁移'); }
@@ -19,8 +20,8 @@ function createManualBatchRepository({ pgPool, schemes } = {}) {
         }
         if (configSnapshot.scheme) {
           await client.query("SELECT pg_advisory_xact_lock(hashtext('evaluation-batch-scheme'))");
-          const selected = await client.query('SELECT id FROM evaluation_batch_schemes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL AND version=$3 AND config=$4::jsonb', [configSnapshot.scheme.id, userId, configSnapshot.scheme.version, JSON.stringify(configSnapshot.config)]);
-          if (!selected.rowCount) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
+          const selected = await client.query('SELECT config FROM evaluation_batch_schemes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL AND version=$3', [configSnapshot.scheme.id, userId, configSnapshot.scheme.version]);
+          if (!selected.rowCount || JSON.stringify(upgradeComparisonScheme(selected.rows[0].config)) !== JSON.stringify(configSnapshot.config)) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
         }
         const busy = await client.query(`SELECT
           EXISTS(SELECT 1 FROM evaluation_manual_batch_plans WHERE state IN ('generating','dispatching')) OR

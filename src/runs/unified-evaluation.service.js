@@ -18,7 +18,7 @@ const MISSION_BATCH_PAUSE_REASON = '同批次 Mission 连接中断或执行超�
 function shouldPauseMissionBatch(job, result) {
   if (job.origin !== 'automation' || job.serviceKey !== 'mission-material' || !job.batchId || result.status !== 'error') return false;
   const transport = result.details?.transport;
-  return Boolean(transport?.socketError || (Number.isInteger(transport?.closeCode) && ![1000, 1001].includes(transport.closeCode))
+  return Boolean(job.executionTimedOut || transport?.socketError || (Number.isInteger(transport?.closeCode) && ![1000, 1001].includes(transport.closeCode))
     || ['Mission WebSocket 连接错误', 'Mission WebSocket 连接失败', 'Mission 执行超时'].includes(result.error));
 }
 
@@ -49,8 +49,16 @@ function recoverScoringSnapshot(value) {
   return { ...value, scores, status: value.run.status === 'error' ? 'error' : 'done', run: { ...value.run, scoring: { ...attempt, expired: true } } };
 }
 
-function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED, serviceLimits = {} } = {}) {
+function createUnifiedEvaluationService({ evaluators, repository = null, resolveQuestion = null, scoring = null, scoreWaitMs = SCORE_WAIT_MS, scorePollMs = SCORE_POLL_MS, maxActive = MAX_ACTIVE, maxPerService = MAX_PER_SERVICE, maxQueued = MAX_QUEUED, serviceLimits = {}, executionTimeoutMs = 60 * 60 * 1000 } = {}) {
   const runs = new Map();
+  const executionTimeouts = typeof executionTimeoutMs === 'number'
+    ? { default: executionTimeoutMs }
+    : executionTimeoutMs && typeof executionTimeoutMs === 'object' ? executionTimeoutMs : {};
+  const timeoutFor = (serviceKey) => {
+    const fallback = Number(executionTimeouts.default) || 60 * 60 * 1000;
+    const value = Number(executionTimeouts[serviceKey]);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
   const pausedMissionBatches = new Set();
   const adapters = createUnifiedEvaluationAdapters(evaluators);
   const concurrency = createConcurrency({ maxActive, maxPerKey: maxPerService, maxQueued, limitsByKey: serviceLimits });
@@ -134,7 +142,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     try {
       const result = await completion;
       if (job.cancelRequested) { releaseJob(job); executionSlotReleased = true; return; }
-      job.run = { ...job.run, details: result.details || job.run?.details || null, status: result.status, verdict: result.verdict == null ? null : result.verdict, checks: result.checks || null, markdownSyntax: result.markdownSyntax || null,
+      job.run = { ...job.run, ...(job.executionTimedOut ? { executionTimeout: true } : {}), details: result.details || job.run?.details || null, status: result.status, verdict: result.verdict == null ? null : result.verdict, checks: result.checks || null, markdownSyntax: result.markdownSyntax || null,
         caseId: result.caseId || null, caseTitle: result.caseTitle || null,
         reportKey: result.reportKey || (result.report && result.report.key) || null,
         evidenceKey: result.evidenceKey || (result.evidence && result.evidence.key) || null,
@@ -157,7 +165,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         for (;;) {
           try {
             await job.writeChain.catch(() => {});
-            await repository.pauseMissionBatch(snapshot(job), MISSION_BATCH_PAUSE_REASON);
+            const saved = await repository.pauseMissionBatch(snapshot(job), MISSION_BATCH_PAUSE_REASON);
+            if (saved?.superseded) { releaseJob(job); executionSlotReleased = true; return; }
             break;
           } catch {
             if (!reported) { console.error('Mission 批次暂停保存失败，暂停派发并重试'); reported = true; }
@@ -244,7 +253,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       ...(idempotency ? { queuePayload: { version: 1, caseDef: internal.caseDef || null, scoreMode: internal.scoreMode || null } } : {}) };
     const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, comparisonGroupId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null, reservation };
     const onText = (delta) => {
-      if (job.cancelRequested || typeof delta !== 'string') return;
+      if (job.cancelRequested || job.executionTimedOut || typeof delta !== 'string') return;
       const remaining = Math.max(0, MAX_ANSWER_CHARS - job.answer.length);
       job.answer += delta.slice(0, remaining);
       if (delta.length > remaining) job.answerTruncated = true;
@@ -254,12 +263,12 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       if (outgoing) send(job, 'text', { runId: job.runId, delta: outgoing });
     };
     const onState = details => {
-      if (job.cancelRequested) return;
+      if (job.cancelRequested || job.executionTimedOut) return;
       job.run = { ...job.run, details }; scheduleSave(job);
       send(job, 'state', { runId: job.runId, run: job.run });
     };
     const onTextReset = () => {
-      if (job.cancelRequested) return;
+      if (job.cancelRequested || job.executionTimedOut) return;
       job.answer = ''; job.answerTruncated = false; scheduleSave(job);
       send(job, 'answer_reset', { runId: job.runId });
     };
@@ -345,8 +354,20 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
         job.nativeRunId = started.run.id || null; job.reply = started.reply || null; job.cancel = started.cancel || null;
         if (job.cancelRequested) job.cancel?.();
         void save(job).catch(() => { job.persistenceError = true; });
-        void finish(job, started.completion, release);
-        return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: started.completion, subscribe: (listener) => job.events.subscribe(listener) };
+        // 只计算实际执行时间，排队不占用时间；重试也包含在同一轮时限内。
+        const serviceTimeoutMs = timeoutFor(serviceKey);
+        let deadline;
+        const timedOut = new Promise(resolve => {
+          deadline = setTimeout(() => {
+            job.executionTimedOut = true;
+            resolve({ status: 'error', error: '执行超时：超过执行时限未完成，已结束本次评测；上游任务是否停止无法确认。', taskid: job.nativeRunId, details: job.run?.details || null });
+            try { started.cancel?.(); } catch { /* 仍按超时结束本地运行。 */ }
+          }, serviceTimeoutMs);
+          deadline.unref?.();
+        });
+        const completion = Promise.race([started.completion, timedOut]).finally(() => clearTimeout(deadline));
+        void finish(job, completion, release);
+        return { runId: job.runId, serviceKey, nativeSnapshot: started.run, nativeCompletion: completion, subscribe: (listener) => job.events.subscribe(listener) };
       } catch (error) {
         release();
         if (job.saveTimer) clearTimeout(job.saveTimer);
@@ -462,6 +483,28 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     recoveryTimer.unref();
   }
   function stopQueueRecovery() { if (recoveryTimer) clearInterval(recoveryTimer); recoveryTimer = null; }
+  let timeoutRecoveryTimer = null; let timeoutRecoveryRunning = false;
+  async function recoverTimedOutRuns() {
+    if (timeoutRecoveryRunning || !repository?.listStaleRunning || !repository?.timeoutStaleRunning) return;
+    timeoutRecoveryRunning = true;
+    try {
+      const candidates = await repository.listStaleRunning(executionTimeouts);
+      for (const candidate of candidates) {
+        const job = runs.get(candidate.runId);
+        if (job && !job.settled) continue;
+        if (job?.writeChain) await job.writeChain.catch(() => {});
+        const updated = await repository.timeoutStaleRunning(candidate.runId, candidate.version, timeoutFor(candidate.serviceKey));
+        // 已结束但未能持久化的内存快照不能再覆盖超时结果。
+        if (updated && job?.settled && runs.get(candidate.runId) === job) runs.delete(candidate.runId);
+      }
+    } finally { timeoutRecoveryRunning = false; }
+  }
+  function startTimeoutRecovery({ intervalMs = 60000, onError = () => {} } = {}) {
+    if (timeoutRecoveryTimer) return;
+    const tick = () => void recoverTimedOutRuns().catch(onError);
+    tick(); timeoutRecoveryTimer = setInterval(tick, intervalMs); timeoutRecoveryTimer.unref();
+  }
+  function stopTimeoutRecovery() { if (timeoutRecoveryTimer) clearInterval(timeoutRecoveryTimer); timeoutRecoveryTimer = null; }
   async function observe(runId, listener, { scope } = {}) {
     const job = runs.get(runId);
     if (!job) return { snapshot: await get(runId, { scope }), live: false, unsubscribe: () => {} };
@@ -680,7 +723,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
     const serviceKeys = input.serviceKeys;
     if (!isSupportedComparisonPair(serviceKeys) || serviceKeys.some(value => !evaluators?.[value])) {
-      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合成制备与 ALPHA 材料 RSI（1110）');
+      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合金材料与 ALPHA 材料 RSI（1110）');
     }
     if (typeof input.question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     const text = input.question.trim();
@@ -742,6 +785,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, recoverTimedOutRuns, startTimeoutRecovery, stopTimeoutRecovery, scoringEnabled: !!scoring, availableServices, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

@@ -8,7 +8,7 @@ const { createManualBatchService } = require('../src/runs/manual-batch.service')
 function small() {
   const config = structuredClone(DEFAULT_SCHEME);
   config.pools = { aviation: 0, synthesis: 3 };
-  for (const key of SERVICE_KEYS) config.services[key] = { aviation: 0, synthesis: ['synthesis', 'alpha-rsi'].includes(key) ? 3 : 0 };
+  for (const key of SERVICE_KEYS) config.services[key] = { aviation: 0, synthesis: ['alloy', 'alpha-rsi'].includes(key) ? 3 : 0 };
   return config;
 }
 function generator() { let i = 0; return { async generate(input) { return { items: Array.from({ length: input.count }, () => ({ question: `这是合成材料测评问题，第 ${++i} 题。` })) }; } }; }
@@ -28,8 +28,8 @@ test('方案校验题池、服务、对比数量和单批上限', () => {
 
 test('小批次只生成三道题并完全相同地分发给两服务', async () => {
   const result = await generateTrialQuestions({ generator: generator(), scheme: small() });
-  assert.deepEqual(Object.keys(result), ['synthesis', 'alpha-rsi']);
-  assert.equal(result.synthesis.length, 3); assert.deepEqual(result.synthesis, result['alpha-rsi']);
+  assert.deepEqual(Object.keys(result), ['alloy', 'alpha-rsi']);
+  assert.equal(result.alloy.length, 3); assert.deepEqual(result.alloy, result['alpha-rsi']);
 });
 
 test('手动批次以个人身份派发，幂等重试复用原批次和题目', async () => {
@@ -43,7 +43,7 @@ test('手动批次以个人身份派发，幂等重试复用原批次和题目',
     async submitted() { plan.state = 'submitted'; },
     async fail(id, error) { plan.state = 'failed'; plan.error = error; },
   };
-  const addresses = { synthesis: 'ws://synthesis.test', 'alpha-rsi': 'ws://alpha.test' };
+  const addresses = { alloy: 'ws://alloy.test', 'alpha-rsi': 'ws://alpha.test' };
   const evaluations = { async comparisonStorageReady() { return true; }, async createBatchRun(input, options) { calls.push({ input, options }); } };
   const trialService = createTrialBatchService({ repository: {}, evaluations, generator: generator(), serviceAddresses: addresses });
   const service = createManualBatchService({ repository, evaluations, generator: generator(), serviceAddresses: addresses, trialService, schemes: {} });
@@ -52,13 +52,13 @@ test('手动批次以个人身份派发，幂等重试复用原批次和题目',
   assert.equal(plan.state, 'submitted'); assert.equal(calls.length, 6);
   assert.ok(calls.every(call => call.input.ownerUserId === 'user-a'));
   for (let i = 0; i < 3; i++) {
-    const left = calls.find(call => call.options.key.endsWith(`:synthesis:${i}`)).input;
+    const left = calls.find(call => call.options.key.endsWith(`:alloy:${i}`)).input;
     const right = calls.find(call => call.options.key.endsWith(`:alpha-rsi:${i}`)).input;
     assert.equal(left.question, right.question); assert.equal(left.comparisonGroupId, right.comparisonGroupId);
   }
   const again = await service.create({ config: small(), userId: 'user-a', key: 'request-1' });
   assert.equal(again.batchId, first.batchId); assert.equal(again.reused, true); assert.equal(calls.length, 6);
-  const changed = small(); changed.compareSynthesisAlpha = false;
+  const changed = small(); changed.compareAlloyAlpha = false;
   await assert.rejects(service.create({ config: changed, userId: 'user-a', key: 'request-1' }), { code: 'BATCH_IDEMPOTENCY_CONFLICT' });
 });
 
@@ -72,7 +72,7 @@ test('夜间新计划保存方案快照，按原配比派发而不是硬编码32
   const config = small();
   const schemes = { async nightly() { return { id: 'scheme', name: '小批次', version: 2, config }; } };
   const evaluations = { async comparisonStorageReady() { return true; }, async createBatchRun(input) { calls.push(input); } };
-  const serviceAddresses = { synthesis: 'ws://synthesis.test', 'alpha-rsi': 'ws://alpha.test' };
+  const serviceAddresses = { alloy: 'ws://alloy.test', 'alpha-rsi': 'ws://alpha.test' };
   const service = createTrialBatchService({ repository, evaluations, generator: generator(), serviceAddresses, schemes });
   await service.prepare('2026-11-04'); config.services.synthesis.synthesis = 1;
   await service.dispatch('2026-11-04');

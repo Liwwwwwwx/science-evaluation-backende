@@ -156,9 +156,14 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('science-evaluation-mission-pause'), hashtext($1))", [job.batchId]);
         const failed = await client.query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2,status=$3,answer=$4,
           answer_truncated=$5,run=$6,scores=$7,score_error=$8,error=$9,finished_at=$10,updated_at=now()
-          WHERE id=$1 AND origin='automation' AND service_key='mission-material' AND batch_id=$11 RETURNING id`,
+          WHERE id=$1 AND origin='automation' AND service_key='mission-material' AND batch_id=$11
+            AND NOT (coalesce(run->>'executionTimeout','false')='true' AND coalesce($6::jsonb->>'executionTimeout','false') <> 'true') RETURNING id`,
         [job.runId,job.nativeRunId,job.status,job.answer,job.answerTruncated,job.run,job.scores,job.scoreError,job.error,job.finishedAt,job.batchId]);
-        if (failed.rowCount !== 1) throw new Error('无法保存触发暂停的运行');
+        if (failed.rowCount !== 1) {
+          const saved = await client.query("SELECT run->>'executionTimeout' AS timed_out FROM public.unified_evaluation_runs WHERE id=$1", [job.runId]);
+          if (saved.rows[0]?.timed_out === 'true') { await client.query('COMMIT'); return { superseded: true }; }
+          throw new Error('无法保存触发暂停的运行');
+        }
         await client.query(`UPDATE public.unified_evaluation_runs SET status='paused',error=$2,finished_at=now(),updated_at=now()
           WHERE batch_id=$1 AND origin='automation' AND service_key='mission-material'
             AND status='queued' AND native_run_id IS NULL`, [job.batchId, reason]);
@@ -166,10 +171,43 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
       finally { client.release(); }
     },
+    async listStaleRunning(timeouts) {
+      const values = typeof timeouts === 'number' ? { default: timeouts } : timeouts || {};
+      const fallback = Number(values.default) || 60 * 60 * 1000;
+      const mission = Number(values['mission-material']) || fallback;
+      const result = await (await adminPool()).query(`SELECT id,xmin::text AS version,service_key FROM public.unified_evaluation_runs
+        WHERE status='running' AND finished_at IS NULL
+          AND updated_at < now() - (CASE WHEN service_key='mission-material' THEN $1::double precision ELSE $2::double precision END * interval '1 millisecond')
+        ORDER BY updated_at LIMIT 100`, [mission, fallback]);
+      return result.rows.map(row => ({ runId: row.id, version: row.version, serviceKey: row.service_key }));
+    },
+    async timeoutStaleRunning(runId, version, timeoutMs) {
+      const message = '执行超时：超过执行时限未完成，已结束本次评测；上游任务是否停止无法确认。';
+      const client = await (await adminPool()).connect();
+      try {
+        await client.query('BEGIN');
+        const candidate = await client.query('SELECT origin,service_key,batch_id FROM public.unified_evaluation_runs WHERE id=$1', [runId]);
+        const row = candidate.rows[0];
+        const pauseMission = row?.origin === 'automation' && row.service_key === 'mission-material' && row.batch_id;
+        if (pauseMission) await client.query("SELECT pg_advisory_xact_lock(hashtext('science-evaluation-mission-pause'), hashtext($1))", [row.batch_id]);
+        const result = await client.query(`UPDATE public.unified_evaluation_runs
+          SET status='error',error=$4,run=(CASE WHEN jsonb_typeof(run)='object' THEN run ELSE '{}'::jsonb END) || jsonb_build_object('status','error','error',$4::text,'executionTimeout',true) || CASE WHEN $5::boolean THEN '{"missionBatchPaused":true}'::jsonb ELSE '{}'::jsonb END,
+            finished_at=now(),updated_at=now()
+          WHERE id=$1 AND xmin::text=$2 AND status='running' AND finished_at IS NULL
+            AND updated_at < now() - ($3::double precision * interval '1 millisecond') RETURNING id`, [runId, version, timeoutMs, message, !!pauseMission]);
+        if (result.rowCount && pauseMission) await client.query(`UPDATE public.unified_evaluation_runs
+          SET status='paused',error=$2,finished_at=now(),updated_at=now()
+          WHERE batch_id=$1 AND origin='automation' AND service_key='mission-material' AND status='queued' AND native_run_id IS NULL`, [row.batch_id, '同批次 Mission 连接中断或执行超时，上游状态未确认，本题未派发']);
+        await client.query('COMMIT');
+        return result.rowCount === 1;
+      } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+      finally { client.release(); }
+    },
     async save(job) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs SET native_run_id=$2, status=$3, answer=$4,
         answer_truncated=$5, run=$6, scores=$7, score_error=$8, error=$9, finished_at=$10, updated_at=now()
-        WHERE id=$1 AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt')`, [job.runId, job.nativeRunId, job.status, job.answer, job.answerTruncated,
+        WHERE id=$1 AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt')
+          AND NOT (coalesce(run->>'executionTimeout','false')='true' AND coalesce($6::jsonb->>'executionTimeout','false') <> 'true')`, [job.runId, job.nativeRunId, job.status, job.answer, job.answerTruncated,
         job.run, job.scores, job.scoreError, job.error, job.finishedAt]);
       if (result.rowCount !== 1) throw new Error('统一测评记录不存在');
     },
