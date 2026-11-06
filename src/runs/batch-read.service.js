@@ -45,10 +45,19 @@ function totalScore(scores, key) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
 }
 
-function usableScore(row, key) {
+function readyScore(row, key) {
   const item = row.scores?.[JUDGES[key]];
-  if (item?.status !== 'ready' || row.answer_truncated === true || item.quality?.source?.truncated === true) return null;
-  return totalScore(row.scores, key);
+  return item?.status === 'ready' ? totalScore(row.scores, key) : null;
+}
+
+function provisionalScore(row, key) {
+  const item = row.scores?.[JUDGES[key]];
+  return item?.status === 'ready' && (row.answer_truncated === true || item.quality?.source?.truncated === true);
+}
+
+function usableScore(row, key) {
+  if (provisionalScore(row, key)) return null;
+  return readyScore(row, key);
 }
 
 function executionOf(row) {
@@ -70,6 +79,8 @@ function mapRun(row) {
     status: row.status,
     execution: executionOf(row),
     scores: { deepSeek: usableScore(row, 'deepSeek'), qwen: usableScore(row, 'qwen') },
+    displayScores: { deepSeek: readyScore(row, 'deepSeek'), qwen: readyScore(row, 'qwen') },
+    provisionalScores: { deepSeek: provisionalScore(row, 'deepSeek'), qwen: provisionalScore(row, 'qwen') },
     error: row.error || null,
     startedAt: iso(row.started_at) || '',
     elapsedMs: row.elapsed_ms != null && row.elapsed_ms !== '' && Number.isFinite(Number(row.elapsed_ms)) ? Number(row.elapsed_ms) : null,
@@ -112,6 +123,11 @@ function judgeSummary(runs, key) {
 
 function lowestScore(run) {
   const values = [run.scores.deepSeek, run.scores.qwen].filter((value) => value !== null);
+  return values.length ? Math.min(...values) : null;
+}
+
+function lowestDisplayScore(run) {
+  const values = [run.displayScores?.deepSeek, run.displayScores?.qwen].filter((value) => typeof value === 'number');
   return values.length ? Math.min(...values) : null;
 }
 
@@ -432,8 +448,8 @@ function createBatchReadService({ repository } = {}) {
     items.sort((left, right) => {
       if (sort === 'startedAtAsc') return Date.parse(left.startedAt) - Date.parse(right.startedAt);
       if (sort === 'startedAtDesc') return Date.parse(right.startedAt) - Date.parse(left.startedAt);
-      const leftScore = lowestScore(left);
-      const rightScore = lowestScore(right);
+      const leftScore = lowestDisplayScore(left);
+      const rightScore = lowestDisplayScore(right);
       if (leftScore === null && rightScore === null) return Date.parse(right.startedAt) - Date.parse(left.startedAt);
       if (leftScore === null) return 1;
       if (rightScore === null) return -1;

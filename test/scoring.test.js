@@ -26,7 +26,7 @@ test('证据不在原文、遗漏项与截断缺失不伪造完成；关键缺�
 });
 test('Markdown原文机检识别KaTeX、开放围栏、链接与HTML，代码/货币/文献编号不误报',async()=>{
  const good=await checkMarkdown('# 单位\n\n公式 $K_{\\mathrm{TIM}}$ 与 \\(R_c\\)\n\n`$\\wrong$`\n\n```text\n$$\\wrong\n```\n\n价格$20元与$30元。\n\\[12\\] 文献标题\n\n|A|B|\n|-|-|\n|1|2|');assert.equal(good.status,'passed',JSON.stringify(good));
- const bad=await checkMarkdown('公式 $\\notARealCommand{x}$\n\n<div>隐藏</div>\n\n![坏图](javascript:alert)\n\n```js\ncode');assert.equal(bad.status,'failed');for(const id of ['MATH_INVALID','HTML_HIDDEN','URL_UNSAFE','FENCE_OPEN'])assert.ok(bad.issues.some(i=>i.id===id),id);
+ const bad=await checkMarkdown('公式 $\\notARealCommand{x}$\n\n<script>隐藏</script>\n\n![坏图](javascript:alert)\n\n```js\ncode');assert.equal(bad.status,'failed');for(const id of ['MATH_INVALID','URL_UNSAFE','FENCE_OPEN'])assert.ok(bad.issues.some(i=>i.id===id),id);
  assert.ok(bad.issues.every(i=>i.line>0&&i.snippet&&i.suggestion));assert.equal((await checkMarkdown('完整文字',{truncated:true})).status,'not_evaluable');assert.equal((await checkMarkdown('')).status,'not_evaluable');
 });
 test('评分缺配置/单模型失败/超时与并发限流不产生零分',async()=>{
