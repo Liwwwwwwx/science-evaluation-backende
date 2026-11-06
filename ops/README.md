@@ -6,6 +6,8 @@
 
 首次部署：管理员检查 `bootstrap.sh` 后执行。将私有配置分别放入 `shared/backend.env`、`shared/frontend.env`，属主 science-eval、权限 600。后端设置生产环境、数据库本机 5432、现有服务/模型/测试机器人配置；需要夜间自动化时在 `shared/backend.env` 设置 `EVALUATION_AUTOMATION_ENABLED=true`（本地 `.env.local` 设为 `false`）；前后端显式 `EVALUATION_ALLOW_HTTP=true`。前端 `PORT=1101`、`HOSTNAME=0.0.0.0`、`SCIENCE_EVALUATION_BACKEND_URL=http://127.0.0.1:7714`。后端 `PORT=7714`、`EVALUATION_HOST=127.0.0.1`、`EVALUATION_PUBLIC_ORIGIN=http://36.103.177.195:1101`。更换为 HTTPS 时更新 origin 并关闭 HTTP 开关。
 
+每日测评日报同时发送正式与测试机器人时，在 `shared/backend.env` 配置 Science Admin 已有的 `FEISHU_WEBHOOK_URL` 和 `MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL`，并启用 `EVALUATION_DAILY_REPORT_NOTIFY_ENABLED=true`。配置只在服务器安全传递，不输出地址、不放入仓库。更改生产配置和重启前先获用户确认并核对无活动测评；仅更新独立测评后端，不恢复 Science Admin 的自动测评，不清除旧日报通知状态或补发历史消息。无需数据库迁移。
+
 两个仓库的 `production` 环境配置 secrets `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS`，variables `DEPLOY_HOST`、`DEPLOY_USER`。部署 SSH 密钥使用独立非 root 用户；sudo 仅允许重启/停止这两个新服务。SSH 严格验证预存主机密钥。应用凭据只在服务器，不放入 GitHub 构建配置或产物。
 
 部署脚本由管理员安装到 `/usr/local/bin/science-evaluation-deploy`。CI 经 SSH 将构建包送到脚本 stdin；后端安装生产依赖，前端在 CI 校验 standalone 后传输小型源码包，在服务器用 Node 22、Yarn 1.22.22 和锁定依赖重新构建，以 standalone 运行。发布目录按提交号及随机后缀隔离，软链接切换；健康检查失败恢复上一版。目录保留供人工回滚，不自动清除。后端发现排队/运行/评分或报告生成时拒绝重启，任务结束后在 Actions 重跑。部署共用文件锁，避免前后端同时切换。

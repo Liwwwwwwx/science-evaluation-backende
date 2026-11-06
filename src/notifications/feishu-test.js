@@ -1,11 +1,15 @@
-// 仅接入旧平台的测试机器人；绝不回退到正式机器人地址。
-function createFeishuTestNotifier({ webhookUrl = process.env.MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL, fetchImpl = globalThis.fetch, timeoutMs = 10000 } = {}) {
-  let url = null;
+function normalizeFeishuWebhookUrl(webhookUrl) {
   try {
     const candidate = new URL(String(webhookUrl || '').trim());
     if (candidate.protocol === 'https:' && ['open.feishu.cn', 'open.larksuite.com'].includes(candidate.hostname)
-      && candidate.pathname.startsWith('/open-apis/bot/v2/hook/') && !candidate.username && !candidate.password && !candidate.search && !candidate.hash) url = candidate.href;
+      && candidate.pathname.startsWith('/open-apis/bot/v2/hook/') && !candidate.username && !candidate.password && !candidate.search && !candidate.hash) return candidate.href;
   } catch {}
+  return null;
+}
+
+// 默认仅接入旧平台的测试机器人；其他通道必须显式传入地址，不做回退。
+function createFeishuTestNotifier({ webhookUrl = process.env.MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL, fetchImpl = globalThis.fetch, timeoutMs = 10000 } = {}) {
+  const url = normalizeFeishuWebhookUrl(webhookUrl);
   return {
     configured: Boolean(url),
     async sendText(message) {
@@ -22,4 +26,4 @@ function createFeishuTestNotifier({ webhookUrl = process.env.MATERIAL_EVAL_DIGES
     },
   };
 }
-module.exports = { createFeishuTestNotifier };
+module.exports = { createFeishuTestNotifier, normalizeFeishuWebhookUrl };

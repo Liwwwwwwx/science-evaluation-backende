@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const {randomUUID}=require('node:crypto');
 const {snapshotOf,analysisCases,cleanAnalysis,markdownOf,nightDate,deadline,validDate}=require('../src/daily-reports/summary');
 const {createDailyReportService}=require('../src/daily-reports/service');
+const {createFeishuDailyNotifier}=require('../src/notifications/feishu-daily');
 const {createApp}=require('../src/app');
 const id=randomUUID();
 const score=(total,hash='v1')=>({runId:randomUUID(),serviceKey:'literature',status:'done',question:'导热材料文献',answer:'可用回答',finishedAt:'2026-11-02T15:00:00Z',updatedAt:'2026-11-02T15:00:00Z',run:{status:'done',elapsedMs:1000},ruleSnapshot:{hash,name:hash},scores:{deepSeekScore:{status:'ready',model:'test',quality:{total,comment:'交付清楚',taskCompletion:{status:'completed'}}}}});
@@ -51,6 +52,38 @@ test('优先千问、失败回退DeepSeek；多实例抢占一次且通知未知
   await Promise.all([make().tick(),make().tick()]);assert.equal(modelCalls,1);assert.equal(notifications,1);assert.equal((await repo.get()).provider,'deepseek');assert.equal((await repo.get()).notificationState,'unknown');
   await make().tick();assert.equal(modelCalls,1);assert.equal(notifications,1);
   source.runs.push(score(60));await make().tick();assert.equal((await repo.get()).snapshot.total,2);assert.equal(modelCalls,2);assert.equal(notifications,1);
+});
+test('日报双机器人沿用持久化去重，部分失败或重启后不重复发送已通知通道',async t=>{
+  for(const state of ['sent','failed','unknown']){
+    await t.test(state,async()=>{
+      const source={plan:null,runs:[score(80)]};
+      const repo=memoryRepo(source),calls=[],errors=[];
+      const official='https://open.feishu.cn/open-apis/bot/v2/hook/fake-official';
+      const testing='https://open.feishu.cn/open-apis/bot/v2/hook/fake-test';
+      const make=()=>createDailyReportService({repository:repo,clients:{},enabled:true,notifyEnabled:true,publicOrigin:'https://evaluation.example',
+        notifier:createFeishuDailyNotifier({officialWebhookUrl:official,testWebhookUrl:testing,fetchImpl:async(url,options)=>{
+          calls.push({url,text:JSON.parse(options.body).content.text});
+          if(url===official&&state==='unknown')throw Error('network');
+          if(url===official&&state==='failed')return {ok:false,status:503};
+          return {ok:true,json:async()=>({code:0})};
+        }}),now:()=>new Date('2026-11-02T22:00:00Z'),onError:result=>errors.push(result)});
+      // 手工生成仍不发消息；下一次自动检查对同一日报只抢占一次。
+      await make().generate('2026-11-02');
+      assert.equal(calls.length,0);
+      await Promise.all([make().tick(),make().tick()]);
+      assert.deepEqual(calls.map(call=>call.url).sort(),[official,testing].sort());
+      assert.equal(calls[0].text,calls[1].text);
+      assert.match(calls[0].text,/^【每日测评总结】\n测评日期：2026-11-02/);
+      assert.match(calls[0].text,/查看报告：https:\/\/evaluation.example\/daily-reports\/2026-11-02/);
+      assert.equal((await repo.get()).notificationState,state);
+      assert.equal(errors.length,state==='sent'?0:1);
+      await make().tick();
+      source.runs.push(score(60));
+      await make().tick();
+      assert.equal((await repo.get()).snapshot.total,2);
+      assert.equal(calls.length,2);
+    });
+  }
 });
 test('分析摘要有预算且保留不同服务覆盖',()=>{
   const cases=analysisCases([{...score(50),answer:'x'.repeat(10000)},{...score(70),serviceKey:'alloy'}],3000);
