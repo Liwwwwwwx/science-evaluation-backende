@@ -19,6 +19,7 @@ const { createAlphaRsiEvaluator } = require('./runs/alpha-rsi-evaluator');
 const { createMissionDailyRepository } = require('./runs/mission-daily.repository');
 const { createMissionDailyService } = require('./runs/mission-daily.service');
 const { createFeishuTestNotifier } = require('./notifications/feishu-test');
+const { createFeishuDailyNotifier } = require('./notifications/feishu-daily');
 const { createMissionDailyReportRepository } = require('./notifications/mission-daily-report.repository');
 const { createMissionDailyReportService } = require('./notifications/mission-daily-report.service');
 const { createQuestionBankService } = require('./question-bank/service');
@@ -100,8 +101,8 @@ if (databaseUrl) {
   const dailyReportEnabled = automation && process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
   dailyReports = createDailyReportService({ repository:createDailyReportRepository(pool, { trialEnabled: 'auto' }), preferred:process.env.EVALUATION_DAILY_REPORT_MODEL || 'deepseek',
     enabled:dailyReportEnabled && process.env.EVALUATION_RUN_WRITE_ENABLED === 'true',
-    notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier,publicOrigin,
-    onError:()=>console.error('每日测评报告暂不可用，请查看报告状态') });
+    notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier:createFeishuDailyNotifier(),publicOrigin,
+    onError:result=>console.error('每日测评报告暂不可用，请查看报告状态', result?.deliveries || '') });
   const reportRepository = createMissionDailyReportRepository({ pgPool: pool });
   missionDailyReport = createMissionDailyReportService({ repository: reportRepository, notifier,
     enabled: automation && !dailyReportEnabled && process.env.EVALUATION_MISSION_DAILY_NOTIFY_ENABLED === 'true' && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true',

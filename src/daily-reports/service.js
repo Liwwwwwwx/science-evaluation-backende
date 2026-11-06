@@ -26,8 +26,9 @@ function createDailyReportService({repository,clients=createScoringClients(),pre
     if(!await repository.claimNotification(report.date,report.sourceHash))return;
     const s=report.snapshot;
     const url=publicOrigin?`${publicOrigin}/daily-reports/${report.date}`:'';
-    const result=await notifier.sendText(`【每日测评总结（测试）】\n测评日期：${report.date}\n已记录 ${s.total} 次，完成 ${s.completed}，失败 ${s.failed}，超时 ${s.timeout}，未完成 ${s.unfinished}\n${report.analysisState==='ready'?'智能总结已生成':'统计报告已生成，智能总结暂不可用'}${url?'\n查看报告：'+url:''}`);
+    const result=await notifier.sendText(`【每日测评总结】\n测评日期：${report.date}\n已记录 ${s.total} 次，完成 ${s.completed}，失败 ${s.failed}，超时 ${s.timeout}，未完成 ${s.unfinished}\n${report.analysisState==='ready'?'智能总结已生成':'统计报告已生成，智能总结暂不可用'}${url?'\n查看报告：'+url:''}`);
     await repository.finishNotification(report.date,report.sourceHash,result.sent?'sent':result.reason==='request-failed'?'unknown':'failed');
+    if(!result.sent)onError(result);
   }
   async function generate(day,{force=false,automatic=false}={}){
     if(!validDate(day))invalid(400,'INVALID_DATE','测评日期无效');

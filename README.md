@@ -80,7 +80,9 @@
 
 `EVALUATION_DAILY_REPORT_WRITE_ENABLED=true` 开放手动生成或重试总结，不重新发题和评分。报告按日期、源摘要、数据库租约原子抢占，进程中断后租约到期可恢复，旧抢占者不能覆盖新结果。自动恢复同一摘要最多3次；模型汇总失败不会无限重试，可在页面手动重试。迟到数据更新报告时保留既有通知状态。
 
-设置 `EVALUATION_DAILY_REPORT_NOTIFY_ENABLED=true` 后，在自动汇总完成时通过现有测试机器人发送简报及平台链接。同一日期至多尝试发送一次；结果未知时不重发。新自动汇总启用后，旧Mission简报调度停用，避免两套通知重复。单独手动生成报告不发送飞书。启用调度、执行生产迁移和真实通知均需用户授权。
+设置 `EVALUATION_DAILY_REPORT_NOTIFY_ENABLED=true` 后，在自动汇总完成时向 Science Admin 现有的正式机器人（`FEISHU_WEBHOOK_URL`）和测试机器人（`MATERIAL_EVAL_DIGEST_BRIEF_WEBHOOK_URL`）分别发送同一份简报及平台链接。两个地址须配置到独立测评后端，不需要恢复 Science Admin 的自动测评。两路独立发送，单路失败不阻断另一路；配置为相同地址时只发送一次。任一地址缺失或无效时仍发送另一通道，但总体通知记为失败；仅两路均成功才记为 `sent`。失败日志只包含通道和受控错误，不含机器人地址。
+
+沿用现有按日报抢占去重，同一日期每个不同地址至多尝试发送一次；任一路网络结果未知时，总体记为 `unknown`，不自动重发，避免重复通知已收到消息的机器人。迟到结果和重启不清除已有通知状态；新增通道不会自动补发已通知过的历史日报。新自动汇总启用后，旧Mission简报调度停用，避免两套通知重复；旧Mission单服务通知仍仅使用测试机器人。单独手动生成报告不发送飞书。启用调度、执行生产迁移和真实通知均需用户授权。
 
 验证：`node --test test/daily-reports.test.js`。隔离PG使用独立新建实例及 `EVALUATION_DAILY_REPORT_TEST_PG_SOCKET=/tmp/evaluation-report-pg.XXXXXX`，端口55791、临时数据库`science_evaluation`，执行 `node --test test/daily-reports-postgres.test.js`；不得指向共享或远端生产库。
 
