@@ -31,11 +31,11 @@ test('题目快照先固定，派发异常后继续其他题并按原键恢复',
   assert.equal(f.plan.state, 'dispatching');
   assert.equal(f.created.size, 320);
   for (let i = 0; i < 50; i++) {
-    const synthesis = f.created.get(`${f.plan.id}:synthesis:${i}`);
+    const alloy = f.created.get(`${f.plan.id}:alloy:${i}`);
     const alpha = f.created.get(`${f.plan.id}:alpha-rsi:${i}`);
-    assert.equal(synthesis.question, alpha.question);
-    assert.match(synthesis.comparisonGroupId, /^[a-f0-9]{64}$/);
-    assert.equal(synthesis.comparisonGroupId, alpha.comparisonGroupId);
+    assert.equal(alloy.question, alpha.question);
+    assert.match(alloy.comparisonGroupId, /^[a-f0-9]{64}$/);
+    assert.equal(alloy.comparisonGroupId, alpha.comparisonGroupId);
   }
   await f.service.dispatch('2026-11-02');
   assert.equal(f.plan.state, 'submitted');
@@ -78,7 +78,7 @@ test('对比存储未就绪时记录失败，不出题或派发', async () => {
 test('同题快照被改动时在派发前拒绝整轮', async () => {
   const f = fixture();
   await f.service.prepare('2026-11-02');
-  f.plan.items['alpha-rsi'][0] = '一条不同的合成材料测试问题';
+  f.plan.items['alpha-rsi'][0] = '一条不同的合金材料测试问题';
   await assert.rejects(f.service.dispatch('2026-11-02'), /对比题目快照不一致/);
   assert.equal(f.created.size, 0);
 });

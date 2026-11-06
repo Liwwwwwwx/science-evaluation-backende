@@ -36,8 +36,8 @@ test('独立 PostgreSQL：方案并发、幂等、调度互斥、归属和日报
   await pool.query("CREATE TABLE auth_users(id text PRIMARY KEY,username text NOT NULL UNIQUE); INSERT INTO auth_users VALUES ('admin','admin'),('alice','alice'),('bob','bob')");
   await pool.query('CREATE TABLE eval_questions(id text,dataset_version text,domain_key text,UNIQUE(id,dataset_version))');
   for (const file of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql', '011_run_ownership.sql', '012_comparison_groups.sql', '013_batch_schemes.sql', '014_batch_scheme_ownership.sql']) await pool.query(fs.readFileSync(path.join(__dirname, '../migrations', file), 'utf8'));
-  const config = structuredClone(DEFAULT_SCHEME); config.pools = { aviation: 0, synthesis: 3 };
-  for (const key of SERVICE_KEYS) config.services[key] = { aviation: 0, synthesis: ['synthesis', 'alpha-rsi'].includes(key) ? 3 : 0 };
+  const config = structuredClone(DEFAULT_SCHEME); config.pools = { aviation: 3, synthesis: 0 };
+  for (const key of SERVICE_KEYS) config.services[key] = { aviation: ['alloy', 'alpha-rsi'].includes(key) ? 3 : 0, synthesis: 0 };
   const schemes = createBatchSchemeRepository({ pgPool: pool });
   const scheme = await schemes.save({ id: randomUUID(), name: '并发验证', config, version: 0, userId: 'admin', nightly: true });
   const updates = await Promise.allSettled(['更新甲', '更新乙'].map(name => schemes.save({ id: scheme.id, name, config, version: 1, userId: 'admin', nightly: true })));
@@ -45,11 +45,11 @@ test('独立 PostgreSQL：方案并发、幂等、调度互斥、归属和日报
   assert.equal(updates.filter(item => item.status === 'rejected' && item.reason.code === 'BATCH_SCHEME_CONFLICT').length, 1);
   const selected = await schemes.nightly(); assert.equal(selected.version, 2);
   const personal = await schemes.save({ id: randomUUID(), name: '个人验证', config, version: 0, userId: 'alice', nightly: false });
-  const addresses = { synthesis: 'ws://synthesis.invalid', 'alpha-rsi': 'ws://alpha.invalid' };
+  const addresses = { synthesis: 'ws://synthesis.invalid', alloy: 'ws://alloy.invalid', 'alpha-rsi': 'ws://alpha.invalid' };
   let releaseGeneration; const generationGate = new Promise(resolve => { releaseGeneration = resolve; }); let generated = 0;
   const generator = { async generate(input) { await generationGate; return { items: Array.from({ length: input.count }, () => ({ question: `隔离合成测评问题第 ${++generated} 题，请解释材料性能。` })) }; } };
   const evaluator = key => ({ scoreMode: 'none', serviceAddress: addresses[key], async startQuestionRun() { return { run: { id: randomUUID() }, completion: Promise.resolve({ status: 'done' }) }; }, async getRunQuality() { return { status: 'absent' }; } });
-  const evaluations = createUnifiedEvaluationService({ repository: createUnifiedEvaluationRepository({ pgPool: pool }), evaluators: { synthesis: evaluator('synthesis'), 'alpha-rsi': evaluator('alpha-rsi') } });
+  const evaluations = createUnifiedEvaluationService({ repository: createUnifiedEvaluationRepository({ pgPool: pool }), evaluators: { synthesis: evaluator('synthesis'), alloy: evaluator('alloy'), 'alpha-rsi': evaluator('alpha-rsi') } });
   const trialRepo = createTrialBatchRepository({ pgPool: pool });
   const trial = createTrialBatchService({ repository: trialRepo, evaluations, generator, serviceAddresses: addresses, schemes });
   const manualRepo = createManualBatchRepository({ pgPool: pool, schemes });
@@ -143,11 +143,11 @@ test('独立 PostgreSQL：方案并发、幂等、调度互斥、归属和日报
   await large.dispatch('2027-03-01');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE batch_id=$1', [largePlan.id])).rows[0].n, 320);
   const compareOptions = { scope: 'evaluation-user:alice', key: 'pg-comparison-retry' };
-  const compareInput = { serviceKeys: ['synthesis', 'alpha-rsi'], question: '请比较新材料的合成路线与性能依据。' };
+  const compareInput = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较两种合金的组成、性能与工艺依据。' };
   const comparisons = await Promise.all(Array.from({ length: 8 }, () => allEvaluations.createComparison(compareInput, compareOptions)));
   assert.equal(new Set(comparisons.map(item => item.runs[0].runId)).size, 1);
   assert.equal(new Set(comparisons.map(item => item.runs[1].runId)).size, 1);
-  await assert.rejects(allEvaluations.createComparison({ ...compareInput, serviceKeys: ['alpha-rsi', 'synthesis'] }, compareOptions), { code: 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT' });
+  await assert.rejects(allEvaluations.createComparison({ ...compareInput, serviceKeys: ['alpha-rsi', 'alloy'] }, compareOptions), { code: 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT' });
   const compareCount = await pool.query('SELECT count(*)::int AS n FROM unified_evaluation_runs WHERE comparison_group_id=$1', [comparisons[0].groupId]);
   assert.equal(compareCount.rows[0].n, 2);
   for (let i = 0; i < 200; i++) {

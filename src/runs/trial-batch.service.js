@@ -1,6 +1,6 @@
 const { randomUUID, createHash } = require('node:crypto');
 const { generateTrialQuestions } = require('../question-bank/trial-questions');
-const { DEFAULT_SCHEME, validateScheme } = require('./batch-scheme');
+const { DEFAULT_SCHEME, validateScheme, upgradeComparisonScheme } = require('./batch-scheme');
 const LEGACY_TARGETS = Object.freeze({ 'mission-material': 20, literature: 50, 'literature-aircraft': 50, alloy: 50, synthesis: 50, 'new-material': 50 });
 const TARGETS = Object.freeze({ ...LEGACY_TARGETS, 'alpha-rsi': 50 });
 
@@ -11,13 +11,13 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
     const id = randomUUID();
     const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
     const selected = schemes ? await schemes.nightly() : null;
-    const config = selected ? validateScheme(selected.config) : validateScheme(DEFAULT_SCHEME);
+    const config = selected ? upgradeComparisonScheme(selected.config) : validateScheme(DEFAULT_SCHEME);
     const configSnapshot = { config, scheme: selected ? { id: selected.id, name: selected.name, version: selected.version } : null };
     if (!await repository.create({ date, id, serviceAddresses, ruleSnapshot, configSnapshot })) return repository.get(date);
     try {
       const selectedKeys = Object.keys(config.services).filter(key => config.services[key].aviation + config.services[key].synthesis > 0);
       if (selectedKeys.some(key => !serviceAddresses[key])) throw Object.assign(new Error('自动测评服务配置不完整'), { code: 'TRIAL_SERVICES_MISSING' });
-      if (config.compareSynthesisAlpha && !await evaluations.comparisonStorageReady()) throw Object.assign(new Error('对比存储尚未迁移，不能创建自动对比计划'), { code: 'TRIAL_COMPARISON_UNAVAILABLE' });
+      if ((config.compareAlloyAlpha || config.compareSynthesisAlpha) && !await evaluations.comparisonStorageReady()) throw Object.assign(new Error('对比存储尚未迁移，不能创建自动对比计划'), { code: 'TRIAL_COMPARISON_UNAVAILABLE' });
       const items = await generateTrialQuestions({ generator, scheme: config });
       if (!await repository.ready(id, items)) throw new Error('试运行计划状态已变化');
     } catch (error) {
@@ -35,17 +35,20 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
   }
   async function dispatchPlan(plan, targetRepository) {
     const config = plan.configSnapshot ? validateScheme(plan.configSnapshot.config || plan.configSnapshot) : null;
-    const paired = config ? config.compareSynthesisAlpha : !!plan.items && Object.hasOwn(plan.items, 'alpha-rsi');
+    const alloyPaired = config ? config.compareAlloyAlpha : false;
+    const synthesisPaired = config ? config.compareSynthesisAlpha : !!plan.items && Object.hasOwn(plan.items, 'alpha-rsi');
+    const paired = alloyPaired || synthesisPaired;
     const targets = config ? Object.fromEntries(Object.entries(config.services).map(([key, value]) => [key, value.aviation + value.synthesis]).filter(([, count]) => count > 0)) : paired ? TARGETS : LEGACY_TARGETS;
     if (!plan.items || Object.keys(plan.items).length !== Object.keys(targets).length || Object.entries(targets).some(([key, count]) => !Array.isArray(plan.items[key]) || plan.items[key].length !== count || plan.items[key].some(question => typeof question !== 'string' || question.trim().length < 8 || question.length > (key === 'synthesis' ? 200 : 500)))) throw new Error('试运行题目快照无效');
-    if (paired && plan.items.synthesis.some((question, index) => question !== plan.items['alpha-rsi'][index])) throw new Error('对比题目快照不一致');
+    if (alloyPaired && (plan.items.alloy.length !== plan.items['alpha-rsi'].length || plan.items.alloy.some((question, index) => question !== plan.items['alpha-rsi'][index]))) throw new Error('对比题目快照不一致');
+    if (synthesisPaired && (plan.items.synthesis.length !== plan.items['alpha-rsi'].length || plan.items.synthesis.some((question, index) => question !== plan.items['alpha-rsi'][index]))) throw new Error('对比题目快照不一致');
     if (Object.keys(targets).some(key => !serviceAddresses[key] || plan.serviceAddresses?.[key] !== serviceAddresses[key])) throw new Error('服务地址已变化，试运行暂停');
     if (paired && !await evaluations.comparisonStorageReady()) throw new Error('对比存储尚未迁移，试运行暂停');
     let failed = false;
     for (const [serviceKey, questions] of Object.entries(plan.items)) {
       for (const [index, question] of questions.entries()) {
         try {
-          const comparisonGroupId = paired && (serviceKey === 'synthesis' || serviceKey === 'alpha-rsi')
+          const comparisonGroupId = paired && ((alloyPaired && (serviceKey === 'alloy' || serviceKey === 'alpha-rsi')) || (synthesisPaired && (serviceKey === 'synthesis' || serviceKey === 'alpha-rsi')))
             ? createHash('sha256').update(JSON.stringify(['trial-comparison', plan.id, index])).digest('hex') : null;
           await evaluations.createBatchRun({ serviceKey, question, batchId: plan.id, sourceType: 'random', ...(plan.ownerUserId ? { ownerUserId: plan.ownerUserId } : {}), ...(comparisonGroupId ? { comparisonGroupId } : {}) }, { key: `${plan.id}:${serviceKey}:${index}`, ruleSnapshot: plan.ruleSnapshot });
         } catch { failed = true; }

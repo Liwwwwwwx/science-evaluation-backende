@@ -1,7 +1,7 @@
 const { createHash, randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
 const { localTime } = require('./mission-daily.service');
-const { validateScheme } = require('./batch-scheme');
+const { validateScheme, upgradeComparisonScheme } = require('./batch-scheme');
 const { generateTrialQuestions } = require('../question-bank/trial-questions');
 
 function createManualBatchService({ repository, evaluations, generator, scoring, serviceAddresses, trialService, schemes, onError = () => {} } = {}) {
@@ -27,7 +27,7 @@ function createManualBatchService({ repository, evaluations, generator, scoring,
   }
   async function create({ config, userId, key, schemeId = null, schemeVersion = null }) {
     if (typeof userId !== 'string' || !userId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'BATCH_IDEMPOTENCY_INVALID', '需要有效的幂等键');
-    const scheme = validateScheme(config);
+    const scheme = upgradeComparisonScheme(config);
     const existing = await repository.find(userId, key);
     if (existing) {
       const previous = existing.configSnapshot;
@@ -40,12 +40,13 @@ function createManualBatchService({ repository, evaluations, generator, scoring,
       const catalog = await schemes.list({ userId });
       const selected = catalog.items.find(item => item.id === schemeId);
       if (!catalog.storageReady) throw new TeamServiceError(503, 'BATCH_SCHEMES_NOT_MIGRATED', '批次配置管理尚未迁移');
-      if (!selected || selected.version !== schemeVersion || JSON.stringify(validateScheme(selected.config)) !== JSON.stringify(scheme)) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
+      const selectedConfig = selected ? upgradeComparisonScheme(selected.config) : null;
+      if (!selected || selected.version !== schemeVersion || JSON.stringify(selectedConfig) !== JSON.stringify(scheme)) throw new TeamServiceError(409, 'BATCH_SCHEME_CONFLICT', '所选方案已变化，请刷新后重试');
       source = { id: selected.id, name: selected.name, version: selected.version };
     }
     const keys = Object.keys(scheme.services).filter(service => scheme.services[service].aviation + scheme.services[service].synthesis > 0);
     if (keys.some(service => !serviceAddresses[service])) throw new TeamServiceError(503, 'BATCH_SERVICES_UNAVAILABLE', '所选服务尚未配置');
-    if (scheme.compareSynthesisAlpha && !await evaluations.comparisonStorageReady()) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移');
+    if ((scheme.compareAlloyAlpha || scheme.compareSynthesisAlpha) && !await evaluations.comparisonStorageReady()) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移');
     const snapshot = { config: scheme, scheme: source };
     const requestHash = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
     const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
