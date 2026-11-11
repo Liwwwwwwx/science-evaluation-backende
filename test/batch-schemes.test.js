@@ -26,6 +26,18 @@ test('方案校验题池、服务、对比数量和单批上限', () => {
   assert.throws(() => validateScheme(invalid));
 });
 
+test('方案并发按服务校验并补全默认值，旧方案不携带并发', () => {
+  const config = small();
+  config.concurrency = { alloy: 2, 'alpha-rsi': 2 };
+  const normalized = validateScheme(config);
+  assert.equal(normalized.concurrency.alloy, 2);
+  assert.equal(normalized.concurrency['mission-material'], 5);
+  assert.equal(validateScheme(small()).concurrency, undefined);
+  assert.throws(() => validateScheme({ ...config, concurrency: { alloy: 0 } }), /1至5/);
+  assert.throws(() => validateScheme({ ...config, concurrency: { alloy: 6 } }), /1至5/);
+  assert.throws(() => validateScheme({ ...config, concurrency: { unknown: 2 } }), /并发配置无效/);
+});
+
 test('小批次只生成三道题并完全相同地分发给两服务', async () => {
   const result = await generateTrialQuestions({ generator: generator(), scheme: small() });
   assert.deepEqual(Object.keys(result), ['alloy', 'alpha-rsi']);
@@ -77,4 +89,23 @@ test('夜间新计划保存方案快照，按原配比派发而不是硬编码32
   await service.prepare('2026-11-04'); config.services.synthesis.synthesis = 1;
   await service.dispatch('2026-11-04');
   assert.equal(calls.length, 6); assert.equal(plan.configSnapshot.scheme.version, 2); assert.equal(plan.state, 'submitted');
+});
+
+test('夜间与手动派发携带方案配置的每服务并发', async () => {
+  let plan; const calls = [];
+  const repository = {
+    async create(value) { plan = { ...value, state: 'generating' }; return true; },
+    async get() { return structuredClone(plan); }, async ready(id, items) { plan.items = items; plan.state = 'dispatching'; return true; },
+    async submitted() { plan.state = 'submitted'; }, async fail(id, error) { plan.state = 'failed'; plan.error = error; },
+  };
+  const config = small();
+  config.concurrency = { alloy: 2, 'alpha-rsi': 2 };
+  const schemes = { async nightly() { return { id: 'scheme', name: '小批次', version: 2, config }; } };
+  const evaluations = { async comparisonStorageReady() { return true; }, async createBatchRun(input) { calls.push(input); } };
+  const serviceAddresses = { alloy: 'ws://alloy.test', 'alpha-rsi': 'ws://alpha.test' };
+  const service = createTrialBatchService({ repository, evaluations, generator: generator(), serviceAddresses, schemes });
+  await service.prepare('2026-11-04');
+  await service.dispatch('2026-11-04');
+  assert.equal(calls.length, 6);
+  assert.ok(calls.every(call => call.concurrencyLimits && call.concurrencyLimits.alloy === 2 && call.concurrencyLimits['alpha-rsi'] === 2));
 });

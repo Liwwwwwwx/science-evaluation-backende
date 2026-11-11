@@ -5,7 +5,7 @@ const { handleRuns } = require('./runs/http');
 const { handleBatches } = require('./runs/batch-http');
 const { handleBatchSchemes } = require('./runs/batch-scheme.http');
 const { handleRules } = require('./scoring/rule-http');
-const { handleDailyReports } = require('./daily-reports/http');
+const { handleDailyReports, handleSharedDailyReport } = require('./daily-reports/http');
 const crypto = require('node:crypto');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createStandardsService } = require('./standards/service');
@@ -46,7 +46,7 @@ const DOCS_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, nightlyEnabled = null, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, nightlyEnabled = null, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -106,6 +106,14 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
       }
     }
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/public/daily-reports' || url.pathname.startsWith('/api/public/daily-reports/')) {
+      try { return await handleSharedDailyReport({ req, res, url, reports: dailyReports, sharing: reportSharing, reply }); }
+      catch (error) {
+        const controlled = ['REPORT_SHARE_INVALID', 'REPORT_NOT_FOUND', 'REPORT_NOT_READY', 'METHOD_NOT_ALLOWED'].includes(error?.code);
+        const status = controlled && [404, 405, 409].includes(error?.status) ? error.status : 503;
+        return fail(res, status, status === 503 ? 'REPORT_SHARE_UNAVAILABLE' : error.code, status === 503 ? '分享报告暂不可用，请稍后重试' : error.message);
+      }
+    }
     const accountPath = /^\/api\/evaluation\/accounts\/([^/]+)(\/reset-password)?$/.exec(url.pathname);
     if (url.pathname === '/api/evaluation/accounts' || accountPath) {
       try {
@@ -219,9 +227,9 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
         if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
         const user = await authService.authenticate(session(req));
         if (req.method === 'GET' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有运行查看权限');
-        if (url.pathname === '/api/evaluation/unified/batch-schemes' || url.pathname.startsWith('/api/evaluation/unified/batch-schemes/')) return await handleBatchSchemes({ req, res, url, user, schemes: batchSchemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply });
+        if (url.pathname === '/api/evaluation/unified/batch-schemes' || url.pathname.startsWith('/api/evaluation/unified/batch-schemes/')) return await handleBatchSchemes({ req, res, url, user, schemes: batchSchemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply, concurrencyCaps: evaluations?.concurrencyCaps ? evaluations.concurrencyCaps() : null });
         if (url.pathname === '/api/evaluation/unified/batches' || url.pathname.startsWith('/api/evaluation/unified/batches/')) return await handleBatches({ req, res, url, user, batches, reply });
-        if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
+        if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,sharing:reportSharing,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
         return await handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply });
       } catch (error) {
         if (res.headersSent) { res.end(); return; }

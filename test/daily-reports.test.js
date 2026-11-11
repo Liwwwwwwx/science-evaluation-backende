@@ -4,6 +4,7 @@ const {randomUUID}=require('node:crypto');
 const {snapshotOf,analysisCases,cleanAnalysis,markdownOf,nightDate,deadline,validDate}=require('../src/daily-reports/summary');
 const {createDailyReportService}=require('../src/daily-reports/service');
 const {createFeishuDailyNotifier}=require('../src/notifications/feishu-daily');
+const {createDailyReportSharing}=require('../src/daily-reports/sharing');
 const {createApp}=require('../src/app');
 const id=randomUUID();
 const score=(total,hash='v1')=>({runId:randomUUID(),serviceKey:'literature',status:'done',question:'导热材料文献',answer:'可用回答',finishedAt:'2026-11-02T15:00:00Z',updatedAt:'2026-11-02T15:00:00Z',run:{status:'done',elapsedMs:1000},ruleSnapshot:{hash,name:hash},scores:{deepSeekScore:{status:'ready',model:'test',quality:{total,comment:'交付清楚',taskCompletion:{status:'completed'}}}}});
@@ -88,6 +89,22 @@ test('日报双机器人沿用持久化去重，部分失败或重启后不重�
 test('分析摘要有预算且保留不同服务覆盖',()=>{
   const cases=analysisCases([{...score(50),answer:'x'.repeat(10000)},{...score(70),serviceKey:'alloy'}],3000);
   assert.equal(cases.length,2);assert.ok(cases[0].answerExcerpt.length<=400);
+});
+test('启用分享后飞书使用带签名免登录链接，未配置时保留登录链接',async()=>{
+  for(const secret of ['', 'isolated-sharing-secret-for-notification-123']){
+    const repo=memoryRepo({plan:null,runs:[score(80)]});
+    const sharing=createDailyReportSharing({secret,publicOrigin:'https://evaluation.example',now:()=>Date.parse('2026-11-03T07:00:00+08:00')});
+    let message='';
+    const service=createDailyReportService({repository:repo,clients:{},sharing,publicOrigin:'https://evaluation.example',notifyEnabled:true,
+      notifier:{configured:true,sendText:async text=>{message=text;return{sent:true};}},now:()=>new Date('2026-11-03T07:00:00+08:00')});
+    await service.generate('2026-11-02',{automatic:true});
+    assert.doesNotMatch(message,new RegExp(secret||'never-present-service-token'));
+    if(secret){
+      assert.match(message,/免登录，30天内有效/);
+      const url=new URL(message.split('：').at(-1));
+      assert.equal(sharing.verify('2026-11-02',url.searchParams.get('expires'),url.searchParams.get('signature')),sharing.create('2026-11-02').expiresAt);
+    }else assert.match(message,/查看报告：https:\/\/evaluation.example\/daily-reports\/2026-11-02/);
+  }
 });
 test('报告HTTP鉴权、来源、写开关和Markdown下载，读取不会调用模型',async t=>{
   let calls=0;const reports={list:async()=>({items:[],total:0}),get:async()=>({status:'ready',markdown:'# 总结\n',analysisState:'ready'}),request:async()=>{calls++;return{state:'generating'};}};

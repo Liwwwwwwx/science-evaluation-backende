@@ -25,6 +25,7 @@ const { createMissionDailyReportService } = require('./notifications/mission-dai
 const { createQuestionBankService } = require('./question-bank/service');
 const { createDailyReportRepository } = require('./daily-reports/repository');
 const { createDailyReportService } = require('./daily-reports/service');
+const { createDailyReportSharing } = require('./daily-reports/sharing');
 const { validDate } = require('./daily-reports/summary');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
@@ -49,6 +50,7 @@ let batches;
 let missionDaily;
 let missionDailyReport;
 let dailyReports;
+let reportSharing;
 let rules;
 let trialScheduler;
 let batchSchemes;
@@ -99,9 +101,10 @@ if (databaseUrl) {
   }
   const notifier = createFeishuTestNotifier();
   const dailyReportEnabled = automation && process.env.EVALUATION_DAILY_REPORT_ENABLED === 'true';
+  reportSharing = createDailyReportSharing({ publicOrigin });
   dailyReports = createDailyReportService({ repository:createDailyReportRepository(pool, { trialEnabled: 'auto' }), preferred:process.env.EVALUATION_DAILY_REPORT_MODEL || 'deepseek',
     enabled:dailyReportEnabled && process.env.EVALUATION_RUN_WRITE_ENABLED === 'true',
-    notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier:createFeishuDailyNotifier(),publicOrigin,
+    notifyEnabled:process.env.EVALUATION_DAILY_REPORT_NOTIFY_ENABLED === 'true',notifier:createFeishuDailyNotifier(),sharing:reportSharing,publicOrigin,
     onError:result=>console.error('每日测评报告暂不可用，请查看报告状态', result?.deliveries || '') });
   const reportRepository = createMissionDailyReportRepository({ pgPool: pool });
   missionDailyReport = createMissionDailyReportService({ repository: reportRepository, notifier,
@@ -118,7 +121,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });

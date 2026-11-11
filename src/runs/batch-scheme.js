@@ -1,6 +1,7 @@
 const { TeamServiceError } = require('../errors');
 
 const SERVICE_KEYS = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi'];
+const MAX_CONCURRENCY = 5;
 const DEFAULT_SCHEME = Object.freeze({
   pools: { aviation: 50, synthesis: 50 },
   services: {
@@ -15,9 +16,20 @@ const DEFAULT_SCHEME = Object.freeze({
 
 function invalid(message) { throw new TeamServiceError(400, 'BATCH_SCHEME_INVALID', message); }
 function count(value) { return Number.isInteger(value) && value >= 0 && value <= 100; }
+function validateConcurrency(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !SERVICE_KEYS.includes(key))) invalid('服务并发配置无效');
+  const normalized = {};
+  for (const key of SERVICE_KEYS) {
+    const value = input[key] ?? MAX_CONCURRENCY;
+    if (!Number.isInteger(value) || value < 1 || value > MAX_CONCURRENCY) invalid(`服务并发须为1至${MAX_CONCURRENCY}的整数`);
+    normalized[key] = value;
+  }
+  return normalized;
+}
 function validateScheme(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['pools', 'services', 'compareSynthesisAlpha', 'compareAlloyAlpha'].includes(key))) invalid('方案格式无效');
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['pools', 'services', 'concurrency', 'compareSynthesisAlpha', 'compareAlloyAlpha'].includes(key))) invalid('方案格式无效');
   const { pools, services } = input;
+  const concurrency = input.concurrency === undefined ? undefined : validateConcurrency(input.concurrency);
   if (input.compareSynthesisAlpha !== undefined && typeof input.compareSynthesisAlpha !== 'boolean') invalid('同题对比配置无效');
   if (input.compareAlloyAlpha !== undefined && typeof input.compareAlloyAlpha !== 'boolean') invalid('同题对比配置无效');
   const compareAlloyAlpha = input.compareAlloyAlpha === true;
@@ -41,7 +53,7 @@ function validateScheme(input) {
   }
   if (compareSynthesisAlpha && (!normalized.synthesis.synthesis || normalized['alpha-rsi'].aviation || normalized['alpha-rsi'].synthesis !== normalized.synthesis.synthesis)) invalid('同题对比要求合成制备与1110使用相同数量的合成题');
   for (const pool of ['aviation', 'synthesis']) if (pools[pool] && !SERVICE_KEYS.some(key => normalized[key][pool])) invalid('每类生成题目都需至少分配给一个服务');
-  return { pools: { aviation: pools.aviation, synthesis: pools.synthesis }, services: normalized, compareAlloyAlpha, compareSynthesisAlpha };
+  return { pools: { aviation: pools.aviation, synthesis: pools.synthesis }, services: normalized, compareAlloyAlpha, compareSynthesisAlpha, ...(concurrency === undefined ? {} : { concurrency }) };
 }
 
 // 旧配置仍用于历史计划回放；新建批次时可在合金材料有题量的前提下升级为合金对比。
@@ -57,4 +69,4 @@ function upgradeComparisonScheme(input) {
   });
 }
 
-module.exports = { DEFAULT_SCHEME, SERVICE_KEYS, validateScheme, upgradeComparisonScheme };
+module.exports = { DEFAULT_SCHEME, SERVICE_KEYS, MAX_CONCURRENCY, validateConcurrency, validateScheme, upgradeComparisonScheme };
