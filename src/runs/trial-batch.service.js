@@ -50,7 +50,7 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
         try {
           const comparisonGroupId = paired && ((alloyPaired && (serviceKey === 'alloy' || serviceKey === 'alpha-rsi')) || (synthesisPaired && (serviceKey === 'synthesis' || serviceKey === 'alpha-rsi')))
             ? createHash('sha256').update(JSON.stringify(['trial-comparison', plan.id, index])).digest('hex') : null;
-          await evaluations.createBatchRun({ serviceKey, question, batchId: plan.id, sourceType: 'random', ...(plan.ownerUserId ? { ownerUserId: plan.ownerUserId } : {}), ...(comparisonGroupId ? { comparisonGroupId } : {}) }, { key: `${plan.id}:${serviceKey}:${index}`, ruleSnapshot: plan.ruleSnapshot });
+          await evaluations.createBatchRun({ serviceKey, question, batchId: plan.id, sourceType: 'random', ...(config?.concurrency ? { concurrencyLimits: config.concurrency } : {}), ...(plan.ownerUserId ? { ownerUserId: plan.ownerUserId } : {}), ...(comparisonGroupId ? { comparisonGroupId } : {}) }, { key: `${plan.id}:${serviceKey}:${index}`, ruleSnapshot: plan.ruleSnapshot });
         } catch { failed = true; }
       }
     }

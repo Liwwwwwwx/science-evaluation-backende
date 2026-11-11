@@ -186,3 +186,41 @@ test('完成评分在保存结束后才对读取方显示完成', async () => {
   assert.ok((await reading).run.scoring.finishedAt);
   assert.ok((await repository.get(started.runId)).run.scoring.finishedAt);
 });
+
+test('批次配置按服务收紧本批次并发，其他批次与全局上限互不影响', async () => {
+  const { repository, evaluators, pending } = fixture();
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5 });
+  const created = [];
+  for (let i = 0; i < 4; i++) created.push(await service.createBatchRun({ serviceKey: 'alloy', question: `批次并发限制测试题目编号 ${i}`, batchId: 'batch-limited', concurrencyLimits: { alloy: 2 } }, { key: `batch-limited:alloy:${i}` }));
+  const other = await service.createBatchRun({ serviceKey: 'alloy', question: '批次并发限制测试其他批次题目', batchId: 'batch-other', concurrencyLimits: { alloy: 2 } }, { key: 'batch-other:alloy:0' });
+  assert.equal(pending.size, 3);
+  assert.equal((await service.get(created[2].runId)).status, 'queued');
+  assert.equal((await service.get(created[3].runId)).status, 'queued');
+  assert.equal((await service.get(other.runId)).status, 'running');
+  assert.equal((await service.get(created[2].runId)).run.queuePayload.concurrencyLimits.alloy, 2);
+  pending.get('批次并发限制测试题目编号 0')({ status: 'done' });
+  await tick();
+  assert.equal((await service.get(created[2].runId)).status, 'running');
+  assert.equal((await service.get(created[3].runId)).status, 'queued');
+  for (const resolve of [...pending.values()]) resolve({ status: 'done' });
+  await tick();
+  assert.equal((await service.get(created[3].runId)).status, 'running');
+  pending.get('批次并发限制测试题目编号 3')({ status: 'done' });
+  await tick();
+  assert.equal((await service.get(created[3].runId)).status, 'done');
+});
+
+test('批次并发配置无效时拒绝派发', async () => {
+  const { repository, evaluators } = fixture();
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5 });
+  await assert.rejects(service.createBatchRun({ serviceKey: 'alloy', question: '批次并发无效配置测试题目', batchId: 'batch-bad', concurrencyLimits: { alloy: 0 } }, { key: 'batch-bad:alloy:0' }), { code: 'BATCH_SCHEME_INVALID' });
+  await assert.rejects(service.createBatchRun({ serviceKey: 'alloy', question: '批次并发无效配置测试题目二', batchId: 'batch-bad', concurrencyLimits: { unknown: 2 } }, { key: 'batch-bad:alloy:1' }), { code: 'BATCH_SCHEME_INVALID' });
+});
+
+test('并发上限接口返回全局与单服务限制的较小值', () => {
+  const { repository, evaluators } = fixture();
+  const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5, serviceLimits: { 'literature-aircraft': 1 } });
+  const caps = service.concurrencyCaps();
+  assert.equal(caps.alloy, 5);
+  assert.equal(caps['literature-aircraft'], 1);
+});

@@ -219,7 +219,7 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
         if (!authService) return fail(res, 503, 'AUTH_UNAVAILABLE', '登录服务尚未配置');
         const user = await authService.authenticate(session(req));
         if (req.method === 'GET' && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有运行查看权限');
-        if (url.pathname === '/api/evaluation/unified/batch-schemes' || url.pathname.startsWith('/api/evaluation/unified/batch-schemes/')) return await handleBatchSchemes({ req, res, url, user, schemes: batchSchemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply });
+        if (url.pathname === '/api/evaluation/unified/batch-schemes' || url.pathname.startsWith('/api/evaluation/unified/batch-schemes/')) return await handleBatchSchemes({ req, res, url, user, schemes: batchSchemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply, concurrencyCaps: evaluations?.concurrencyCaps ? evaluations.concurrencyCaps() : null });
         if (url.pathname === '/api/evaluation/unified/batches' || url.pathname.startsWith('/api/evaluation/unified/batches/')) return await handleBatches({ req, res, url, user, batches, reply });
         if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
         return await handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply });

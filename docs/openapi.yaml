@@ -2245,7 +2245,7 @@ paths:
     get:
       tags: [测评批次]
       summary: 查看测评方案
-      description: 返回默认配比、已保存方案、当前账号和可维护/可发起权限；未迁移时 storageReady 为 false。
+      description: 返回默认配比、已保存方案、当前账号和可维护/可发起权限；concurrencyCaps 为每服务并发上限（全局每服务上限与单服务限制的较小值）；未迁移时 storageReady 为 false。
       responses:
         '200': { description: 方案清单 }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -3425,13 +3425,17 @@ components:
     BatchSchemeConfig:
       type: object
       required: [pools, services]
-      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合金材料使用相同数量的题目。compareSynthesisAlpha 仅保留用于历史方案兼容。
+      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合金材料使用相同数量的题目。compareSynthesisAlpha 仅保留用于历史方案兼容。concurrency 可选，按服务设置该批次同时执行的运行数上限（1–5），缺省按服务默认上限执行；实际并发仍受全局每服务上限约束。
       properties:
         pools: { $ref: '#/components/schemas/BatchSchemeCounts' }
         services:
           type: object
           required: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material, alpha-rsi]
           additionalProperties: { $ref: '#/components/schemas/BatchSchemeCounts' }
+        concurrency:
+          type: object
+          description: 每服务批次并发上限；省略时不单独限流，使用全局每服务上限。
+          additionalProperties: { type: integer, minimum: 1, maximum: 5 }
         compareAlloyAlpha: { type: boolean, description: 1110 与合金材料同题对比 }
         compareSynthesisAlpha: { type: boolean, deprecated: true, description: 旧版合成制备与 1110 同题对比，仅用于历史方案兼容 }
     BatchSummary:
