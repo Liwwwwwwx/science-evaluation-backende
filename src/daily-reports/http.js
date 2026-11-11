@@ -1,6 +1,6 @@
 const {validDate}=require('./summary');
 function error(status,code,message){throw Object.assign(new Error(message),{status,code});}
-async function handleDailyReports({req,res,url,user,reports,writeEnabled,publicOrigin,readBody,reply}){
+async function handleDailyReports({req,res,url,user,reports,sharing,writeEnabled,publicOrigin,readBody,reply}){
   if(!user.permissions.includes('team-services:read'))error(403,'FORBIDDEN','没有报告查看权限');
   if(!reports)error(503,'REPORTS_UNAVAILABLE','每日报告尚未配置');
   const base='/api/evaluation/unified/daily-reports';
@@ -29,6 +29,24 @@ async function handleDailyReports({req,res,url,user,reports,writeEnabled,publicO
     if(!report.markdown||report.status!=='ready')error(409,'REPORT_NOT_READY','报告尚未生成完成');
     res.writeHead(200,{'Content-Type':'text/markdown; charset=utf-8','Content-Disposition':`attachment; filename="daily-evaluation-${day}.md"`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(report.markdown);return;
   }
-  return reply(res,200,{...report,canGenerate:writeEnabled&&user.permissions.includes('team-services:write')});
+  return reply(res,200,{...report,share:report.status==='ready'&&report.markdown?sharing?.create(day)||null:null,canGenerate:writeEnabled&&user.permissions.includes('team-services:write')});
 }
-module.exports={handleDailyReports};
+
+async function handleSharedDailyReport({req,res,url,reports,sharing,reply}){
+  res.setHeader('Referrer-Policy','no-referrer');
+  res.setHeader('X-Robots-Tag','noindex, nofollow, noarchive');
+  res.setHeader('X-Content-Type-Options','nosniff');
+  if(req.method!=='GET')error(405,'METHOD_NOT_ALLOWED','分享页面仅支持只读查看');
+  const match=/^\/api\/public\/daily-reports\/(20\d{2}-\d{2}-\d{2})$/.exec(url.pathname);
+  const parameters=[...url.searchParams.keys()];
+  const expiresAt=match&&parameters.length===2&&url.searchParams.getAll('expires').length===1&&url.searchParams.getAll('signature').length===1
+    ?sharing?.verify(match[1],url.searchParams.get('expires'),url.searchParams.get('signature')):null;
+  // 验证签名后才读取这一份报告；不查询列表，也不触发生成、评分或通知。
+  if(!expiresAt||!reports)error(404,'REPORT_SHARE_INVALID','分享链接无效或已过期');
+  const report=await reports.get(match[1]);
+  if(!report)error(404,'REPORT_NOT_FOUND','该分享报告已不可用');
+  if(report.status==='generating')error(409,'REPORT_NOT_READY','报告正在更新，请稍后刷新');
+  if(report.status!=='ready'||!report.markdown)error(503,'REPORT_SHARE_UNAVAILABLE','分享报告暂不可用，请稍后重试');
+  return reply(res,200,{date:match[1],markdown:report.markdown,updatedAt:report.updatedAt,expiresAt});
+}
+module.exports={handleDailyReports,handleSharedDailyReport};
