@@ -1,4 +1,4 @@
-const { readRunArtifact } = require('../runs/artifacts');
+const { readRunArtifact, artifactOriginAllowed } = require('../runs/artifacts');
 const { scoreView } = require('./score-view');
 
 const MAX_IMAGES = 6;
@@ -34,8 +34,8 @@ function discoverRunImages(job) {
   const details = job.run?.details || {};
   let base;
   try { base = new URL(job.run?.serviceAddress); if (base.protocol === 'ws:') base.protocol = 'http:'; if (base.protocol === 'wss:') base.protocol = 'https:'; } catch { base = undefined; }
-  const found = []; const seen = new Set(); let overflow = false;
-  function add(value) {
+  const found = []; const seen = new Set(); let overflow = false; let external = 0;
+  function add(value, { artifact = false } = {}) {
     if (typeof value !== 'string' || !value.trim()) return;
     if (/^data:image\//i.test(value.trim())) {
       const data = value.trim();
@@ -49,10 +49,11 @@ function discoverRunImages(job) {
     let url;
     if (raw.length <= 8192) try { url = new URL(raw, base); } catch {}
     const address = url && ['http:', 'https:'].includes(url.protocol) ? url.href : null;
-    // 识别到图片但地址无效时仍计入覆盖范围，不能误报“未发现图片”。
     const key = address || raw;
     if (seen.has(key)) return;
     seen.add(key);
+    // 只有运行产物和产物代理允许读取的地址属于评分输入；正文引用的外部图片只计数，不参与输入完整性判定。
+    if (!artifact && !(address && artifactOriginAllowed(job, address))) { external++; return; }
     if (found.length >= MAX_CANDIDATES) { overflow = true; return; }
     found.push({ id: `image:${found.length + 1}`, ...(address ? { url: address } : {}) });
   }
@@ -60,7 +61,7 @@ function discoverRunImages(job) {
     if (!file || typeof file !== 'object') continue;
     const url = typeof file.url === 'string' ? file.url : '';
     let path = ''; try { path = new URL(url, base).pathname; } catch {}
-    if (IMAGE_EXT.test(path) || IMAGE_EXT.test(String(file.name || '')) || /^image\//i.test(String(file.mime_type || file.contentType || ''))) add(url);
+    if (IMAGE_EXT.test(path) || IMAGE_EXT.test(String(file.name || '')) || /^image\//i.test(String(file.mime_type || file.contentType || ''))) add(url, { artifact: true });
   }
   const display = Array.isArray(details.displayEvents) ? details.displayEvents : [];
   const texts = [String(job.answer || ''), ...display.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(event => {
@@ -76,7 +77,7 @@ function discoverRunImages(job) {
       add(value);
     }
   }
-  return { candidates: found, overflow };
+  return { candidates: found, overflow, external };
 }
 
 async function readRunImages(job, discovery, { readArtifact = readRunArtifact, signal } = {}) {
