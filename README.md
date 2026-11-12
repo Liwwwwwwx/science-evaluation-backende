@@ -8,7 +8,7 @@
 
 ## 近期对话个人管理
 
-侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工及旧运行；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。
+侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工及旧运行及其服务标识；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。
 
 使用前需审核并手工执行 `migrations/010_user_run_history.sql`；不会在启动时自动迁移。侧栏存储未迁移时仍按归属过滤显示历史，但不开放管理操作；归属存储未迁移时不会公开回退。对生产数据库执行迁移或部署前必须单独获得确认。
 

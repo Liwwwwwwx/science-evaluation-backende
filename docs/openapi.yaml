@@ -1572,7 +1572,7 @@ paths:
     get:
       tags: [统一运行]
       summary: 读取当前账号的近期对话
-      description: 需要 team-services:read；只返回当前用户最近 50 条未隐藏的个人运行。侧栏存储未迁移时仍按归属过滤，并标记 storageReady 和 canManage 为 false。
+      description: 需要 team-services:read；只返回当前用户最近 50 条未隐藏的个人运行，包含 serviceKey 供侧栏显示服务。侧栏存储未迁移时仍按归属过滤，并标记 storageReady 和 canManage 为 false。
       responses:
         '200':
           description: 最近对话、存储状态及管理权限

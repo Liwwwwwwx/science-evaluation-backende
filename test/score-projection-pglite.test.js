@@ -96,4 +96,8 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   assert.equal(await unified.claimScoring('auto', null, { attemptId: 'shared-1', expiresAt: new Date(Date.now() + 60000).toISOString() }, pending), true);
   assert.equal(await unified.claimScoring('auto', null, { attemptId: 'shared-2' }, pending), false);
   assert.equal((await unified.list({ userId: 'alice' })).items.find(item => item.runId === 'auto').scoringInProgress, true);
+  await db.query("INSERT INTO unified_evaluation_runs (id,service_key,origin,owner_user_id,question,status,started_at) VALUES ('history','alpha-rsi','manual','alice','题目','done',now())");
+  const history = await unified.listHistory('alice');
+  assert.equal(history.find(item => item.runId === 'history').serviceKey, 'alpha-rsi');
+  assert.ok(!(await unified.listHistory('bob')).some(item => item.runId === 'history'));
 });
