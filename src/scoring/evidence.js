@@ -14,18 +14,15 @@ function passages(input, scope = 'all') {
   for (const source of sources(input,scope)) {
     const ranges = source.id === 'answer' ? scoreView(source.text).ranges : [[0, source.text.length]];
     for (const [rangeStart, rangeEnd] of ranges) {
-    let offset = rangeStart;
-    for (const line of source.text.slice(rangeStart, rangeEnd).match(/[^\n]*\n|[^\n]+$/g) || []) {
-      let start = 0;
-      while (start < line.length) {
-        let end = Math.min(start+300,line.length);
+      // 将相邻短行合并为连续原文片段，避免长回答产生海量片段元数据。
+      let start = rangeStart;
+      while (start < rangeEnd) {
+        let end = Math.min(start + 300, rangeEnd);
         // 不把UTF-16代理对拆成两个片段。
-        if (end < line.length && /[\uD800-\uDBFF]/.test(line[end-1]) && /[\uDC00-\uDFFF]/.test(line[end])) end--;
-        result.push({id:`${source.id}:${offset+start}`,source:source.id,text:line.slice(start,end)});
+        if (end < rangeEnd && /[\uD800-\uDBFF]/.test(source.text[end-1]) && /[\uDC00-\uDFFF]/.test(source.text[end])) end--;
+        result.push({id:`${source.id}:${start}`,source:source.id,text:source.text.slice(start,end)});
         start = end;
       }
-      offset += line.length;
-    }
     }
   }
   return result;

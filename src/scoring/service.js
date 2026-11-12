@@ -8,6 +8,9 @@ const { evidence, completeScope, passages } = require('./evidence');
 const { scoreView } = require('./score-view');
 const VERSION = 'evaluation-v1';
 const KEYS = ['deepSeekScore', 'qwenScore'];
+// 两位评委共用一份有界输入；保留空间给结构化成果，避免长正文占满整轮预算。
+const MAX_ANSWER_CHARS = 300000;
+const MAX_INPUT_CHARS = 600000;
 const dimensions = { readability: { label: '可读性', weight: 40 }, professionalism: { label: '专业性', weight: 40 }, visualAids: { label: '图文辅助', weight: 20 } };
 const short = (v, max = 1200) => typeof v === 'string' ? v.slice(0, max) : '';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -25,6 +28,11 @@ function redact(value, { preserveLength = false } = {}) {
   }
   return value;
 }
+function prefix(value, limit) {
+  let end = Math.min(value.length, limit);
+  if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
+  return value.slice(0, end);
+}
 function packInput(job) {
   const details = job.run?.details || {};
   const displayEvents = Array.isArray(details.displayEvents) ? details.displayEvents : [];
@@ -34,7 +42,8 @@ function packInput(job) {
     return typeof body === 'string' && body ? `\n\n【${title}】\n${body}` : '';
   }).join('');
   const fullAnswer = String(job.answer || '') + outputs;
-  const answer = redact(fullAnswer).slice(0, 60000);
+  const redactedAnswer = redact(fullAnswer);
+  const answer = prefix(redactedAnswer, MAX_ANSWER_CHARS);
   const inlineViewers = scoreView(answer).viewers.slice(0, 20).filter(item => JSON.stringify(item).length <= 8000);
   // 交互候选与进度不是交付成果；实际自动选择单独入证据。原始协议仍完整保存在运行中。
   const controlTypes = new Set(['progress', 'retrieval_progress', 'retrival_progress', 'stage', 'phase_start', 'phase_end', 'stage_start', 'stage_end', 'requirement_review_request', 'user_input_request', 'adaptive_refactor', 'stack_planner_prompt_request', 'equations_request', 'temporarily_suspend_request', 'checkpoint.request']);
@@ -42,7 +51,7 @@ function packInput(job) {
   const protocolFrames = (Array.isArray(details.protocolFrames) ? details.protocolFrames : []).filter(frame => !controlTypes.has(frame.type) && !(frame.type === 'result' && resultJson !== null && JSON.stringify(frame.data) === resultJson));
   const decisions = (Array.isArray(details.review) ? details.review : []).map(item => ({ requestType: item.request?.type, action: item.action, source: item.source, delivery: item.delivery, summary: item.summary, reply: item.reply }));
   const structuredRaw = JSON.stringify(redact({ result: details.result, protocolFrames, decisions, snapshot: details.snapshot, generatedFiles: details.generatedFiles, artifacts: details.artifacts, ...(inlineViewers.length ? { inlineViewers } : {}), outputStates: displayEvents.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(({ type, event_id, phase, status }) => ({ type, event_id, phase, status })), displayEvents: displayEvents.filter(event => !['display.team_output', 'display.final_answer', 'display.process.step'].includes(event.type)) }));
-  const structured = structuredRaw.slice(0, 30000);
+  const structured = prefix(structuredRaw, MAX_INPUT_CHARS - answer.length);
   const process = redact(details.process || { events: [],messages: [] });
   const messages = []; let processChars = 0; let processTruncated = process.truncated === true;
   for (const message of Array.isArray(process.messages) ? process.messages : []) {
@@ -55,7 +64,7 @@ function packInput(job) {
   const supplements = [details.autoRetry?.message, ...(Array.isArray(details.review) ? details.review : []).filter(item => item?.source === 'automatic' && item?.action === 'apply' && item?.delivery === 'sent').flatMap(item => (Array.isArray(item.answers) ? item.answers : []).map(answer => answer?.answer))].filter(item => typeof item === 'string' && item.trim());
   const automaticSupplement = supplements.length ? { source: 'automatic', message: redact(supplements.join('\n')).slice(0, 4000) } : null;
   return { answer, structured, automaticSupplement, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
-    truncated: job.answerTruncated === true || answer.length < fullAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
+    truncated: job.answerTruncated === true || answer.length < redactedAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
 }
 function normalizeRubric(value, question, model) {
   if (!Array.isArray(value?.requirements) || !value.requirements.length || value.requirements.length > 15 || typeof value.visualAidsApplicable !== 'boolean' || !short(value.visualAidsReason)) throw new Error('题目要求清单无效');
@@ -173,7 +182,7 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
   function pending() { return Object.fromEntries(KEYS.map(key => [key, { status: clients[key]?.isConfigured() ? 'pending' : 'unavailable', model: clients[key]?.model || null, quality: null, error: clients[key]?.isConfigured() ? null : '模型未配置' }])); }
   async function score(job, publish = async () => {}, { attemptId = crypto.randomUUID(), requestHash = null, history = [] } = {}) {
     const startedAt = new Date().toISOString();
-    const metadata = { version: VERSION, scoreViewVersion: 'display-v1', attemptId, requestHash, history, startedAt, finishedAt: null, expiresAt: new Date(Date.now() + timeoutMs + 30000).toISOString(), rubric: null };
+    const metadata = { version: VERSION, scoreViewVersion: 'display-v1', inputVersion: 'expanded-v1', attemptId, requestHash, history, startedAt, finishedAt: null, expiresAt: new Date(Date.now() + timeoutMs + 30000).toISOString(), rubric: null };
     const policy = job.run?.ruleSnapshot ? snapshotRule(job.run.ruleSnapshot) : null;
     if (policy) { metadata.ruleSnapshot = policy; metadata.efficiency = efficiencyReview(job.run,job.serviceKey,policy.config); }
     const scores = pending(); let markdown = { version: 'markdown-v2', status: 'not_evaluable', issues: [], coverage: 'partial' };
