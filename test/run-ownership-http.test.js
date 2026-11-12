@@ -32,7 +32,9 @@ test('运行详情、实时流、附件和写操作均按记录归属校验；�
   assert.equal((await get('b',`/runs/${a}/artifacts/0`)).status,404);
   for (const action of ['end','reply','score','rerun']) assert.equal((await post('b',`/runs/${a}/${action}`)).status,404);
   assert.equal((await get('b',`/runs/${shared}`)).status,200);
-  assert.equal((await post('b',`/runs/${shared}/score`)).status,404);
+  // 共享运行的评分权限已开放；此测试没有配置评分服务，因而返回 503。
+  assert.equal((await post('b',`/runs/${shared}/score`)).status,503);
+  for (const action of ['end','reply','rerun']) assert.equal((await post('b',`/runs/${shared}/${action}`)).status,404);
   const scores=await (await get('b',`/question-scores?items=${encodeURIComponent(JSON.stringify([{id:'q',datasetVersion:'v1'}]))}`)).json();
   assert.deepEqual(scores.items.map(row=>row.runId),[shared]);
 });

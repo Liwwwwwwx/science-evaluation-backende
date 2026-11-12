@@ -2,7 +2,7 @@
 
 ## 运行记录归属和访问
 
-个人人工及旧记录按 `owner_user_id` 限制查看和操作，自动化运行、批次和日报按团队读取权限共享；详情、实时流、附件、题目评分及侧栏历史均执行相同边界。团队自动化运行不开放个人重跑或重评。用户需先有运行读权限，操作个人运行还需写权限和现有同源及写入开关。
+个人人工及旧记录按 `owner_user_id` 限制查看和操作，自动化运行、批次和日报按团队读取权限共享；详情、实时流、附件、题目评分及侧栏历史均执行相同边界。有运行读写权限的团队成员可重新评分共享自动化运行，结果会更新团队共享记录；自动化运行仍不开放个人重新测评、回复或结束。写操作继续校验同源和运行写入开关。
 
 启用前须审核并手工执行 `migrations/011_run_ownership.sql`：先停止旧版写入并核实备份；迁移时已有的人工及 legacy 记录全部归属用户名 `admin`，自动化记录仍共享。若账号缺失或迁移已执行则整笔回滚。迁移要求旧版写入停止，因为旧版不会写入归属字段；不要将旧版与迁移后数据库混用。上线和生产迁移另行确认。未迁移时权限相关接口不可用，不回退为公开读取。
 
@@ -226,7 +226,7 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 继续使用测评会话鉴权。所有读取要求`team-services:read`；写入要求`team-services:write`、同源Origin、非cross-site及`EVALUATION_RUN_WRITE_ENABLED=true`。通过 HTTP 调用的外部自动化须带已授权会话及配置的公开 Origin；内部每日调度使用独立的服务端身份与幂等范围，不新增免登录公开接口。
 
 - `POST /api/evaluation/unified/runs`沿用原请求与幂等契约，创建执行后自动评分；GET详情或SSE获取结果。
-- `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：只对保存的完整执行结果重评，202返回`{runId,attemptId,reused}`，不调用被测服务。同轮进行中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
+- `POST /api/evaluation/unified/runs/:id/score`，请求`{}`与1–128字符`Idempotency-Key`：对本人运行或共享自动化运行的已保存输出重评，202返回`{runId,attemptId,reused}`，不调用被测服务。已取消或失败的运行有可用输出时允许显式重评，按不完整输入标记参考分，不能认定完整合格；没有可评分输出时返回明确错误，不创建新评分轮次。执行中或同轮评分中返回409；并发实例通过数据库轮次条件抢占，按用户和键去重。最多保留20轮（包含失败轮次）的评分历史，超过后拒绝继续，旧分保留。不同运行各自隔离。
 - `GET /api/evaluation/unified/runs/:id`含`canRescore`，只表示当前权限/开关/快照允许，最终POST仍校验。重启后未过期评分只返回快照；过期pending在响应中标失败供显式重评，不回写原记录、不偷偷续跑。
 - `POST /api/evaluation/unified/runs/:id/rerun` 以空对象和 `Idempotency-Key` 重新测评本人已结束的人工记录，需要读写权限、同源和运行写入开关。事务内创建同题、同服务及原规则快照的新运行，保留原运行及其回答、成果和评分。同键恢复同一新运行；自动批次、执行/评分中和原服务地址变化时拒绝。详情通过 `canRerun` 和 `rerunPreservesOutput` 表示能力，最终 POST 仍须校验。隔离数据库测试：`EVALUATION_RERUN_TEST_PG_SOCKET=/tmp/evaluation-rerun-pg.XXXXXX node --test test/rerun-postgres.test.js`，仅专用临时实例端口 55484。
 - `GET /api/evaluation/unified/runs`含两模型轻量分数/状态摘要，不返回完整评语。

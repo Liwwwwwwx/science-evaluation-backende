@@ -227,8 +227,10 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
     },
     async claimScoring(id, previousId, scoring, scores) {
       const result = await (await adminPool()).query(`UPDATE public.unified_evaluation_runs
-        SET run=jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),scores=$4,score_error=NULL,status=CASE WHEN run->>'status'='error' THEN 'error' ELSE 'scoring' END,updated_at=now()
-        WHERE id=$1 AND run->'scoring'->>'attemptId' IS NOT DISTINCT FROM $2::text AND status IN ('done','error','scoring') AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING id`, [id, previousId, scoring, scores]);
+        SET run=jsonb_set(coalesce(run,'{}'::jsonb),'{scoring}',$3::jsonb),scores=$4,score_error=NULL,
+          status=CASE WHEN status='cancelled' OR run->>'status'='cancelled' THEN 'cancelled'
+            WHEN run->>'status'='error' OR (status='error' AND run->>'status' IS DISTINCT FROM 'done') THEN 'error' ELSE 'scoring' END,updated_at=now()
+        WHERE id=$1 AND run->'scoring'->>'attemptId' IS NOT DISTINCT FROM $2::text AND status IN ('done','error','cancelled','scoring') AND NOT (coalesce(run,'{}'::jsonb) ? 'outputClearedAt') RETURNING id`, [id, previousId, scoring, scores]);
       return result.rowCount === 1;
     },
     async updateScoring(id, attemptId, value) {
@@ -304,9 +306,11 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const comparison = hasComparisonColumn ? 'r.comparison_group_id' : "to_jsonb(r)->>'comparison_group_id'";
       const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
       const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,
-        r.batch_id, ${comparison} AS comparison_group_id, r.status, ${scoreProjection('r.scores')} AS scores, r.started_at, r.finished_at, r.run->>'outputClearedAt' AS output_cleared_at, q.domain_key ${source} ${filter}
+        r.batch_id, ${comparison} AS comparison_group_id, r.status, ${scoreProjection('r.scores')} AS scores, r.started_at, r.finished_at,
+        r.run->>'outputClearedAt' AS output_cleared_at, r.run #>> '{scoring,finishedAt}' AS scoring_finished_at,
+        r.run #>> '{scoring,expiresAt}' AS scoring_expires_at, q.domain_key ${source} ${filter}
         ORDER BY r.started_at DESC, r.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, safeSize, (safePage - 1) * safeSize]);
-      return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores) })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
+      return { items: result.rows.map(row => ({ ...map(row), domainKey: row.domain_key || null, scores: scoreSummary(row.scores), scoringInProgress: !row.scoring_finished_at && Date.parse(row.scoring_expires_at) > Date.now() })), total: count.rows[0].total, page: safePage, pageSize: safeSize };
     },
   };
 }

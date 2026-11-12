@@ -65,7 +65,7 @@ function packInput(job) {
   const supplements = [details.autoRetry?.message, ...(Array.isArray(details.review) ? details.review : []).filter(item => item?.source === 'automatic' && item?.action === 'apply' && item?.delivery === 'sent').flatMap(item => (Array.isArray(item.answers) ? item.answers : []).map(answer => answer?.answer))].filter(item => typeof item === 'string' && item.trim());
   const automaticSupplement = supplements.length ? { source: 'automatic', message: redact(supplements.join('\n')).slice(0, 4000) } : null;
   return { answer, structured, automaticSupplement, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
-    truncated: job.answerTruncated === true || answer.length < redactedAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
+    truncated: job.partialExecution === true || job.answerTruncated === true || answer.length < redactedAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
 }
 function normalizeRubric(value, question, model) {
   if (!Array.isArray(value?.requirements) || !value.requirements.length || value.requirements.length > 15 || typeof value.visualAidsApplicable !== 'boolean' || !short(value.visualAidsReason)) throw new Error('题目要求清单无效');
@@ -205,15 +205,15 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
       for (const source of outputs) {
         if (!source.text.trim()) continue;
         const text = source.text.slice(0, Math.max(0, 120000 - checkedChars)); checkedChars += text.length;
-        const check = await checkMarkdown(text, { truncated: job.answerTruncated || job.run?.details?.truncated || text.length < source.text.length });
+        const check = await checkMarkdown(text, { truncated: job.partialExecution || job.answerTruncated || job.run?.details?.truncated || text.length < source.text.length });
         checks.push({ ...check, source: source.id, label: source.label });
       }
       markdown = checks.length ? { ...checks[0], status: checks.some(check => check.status === 'failed') ? 'failed' : checks.some(check => check.status === 'not_evaluable') ? 'not_evaluable' : checks.some(check => check.status === 'observe') ? 'observe' : 'passed',
-        coverage: checks.some(check => check.coverage === 'partial') ? 'partial' : 'full', checkedChars: checks.reduce((total, check) => total + check.checkedChars, 0), sourceChars: checks.reduce((total, check) => total + check.sourceChars, 0), issues: checks.flatMap(check => check.issues.map(issue => ({ ...issue, source: check.source, sourceLabel: check.label }))).slice(0, 100), sources: checks.map(({ source, label, coverage }) => ({ source, label, coverage })) } : await checkMarkdown('', { truncated: job.answerTruncated });
+        coverage: checks.some(check => check.coverage === 'partial') ? 'partial' : 'full', checkedChars: checks.reduce((total, check) => total + check.checkedChars, 0), sourceChars: checks.reduce((total, check) => total + check.sourceChars, 0), issues: checks.flatMap(check => check.issues.map(issue => ({ ...issue, source: check.source, sourceLabel: check.label }))).slice(0, 100), sources: checks.map(({ source, label, coverage }) => ({ source, label, coverage })) } : await checkMarkdown('', { truncated: job.partialExecution || job.answerTruncated });
       await emit();
       const enabled = KEYS.filter(key => clients[key]?.isConfigured());
       if (busy) throw new Error('评分并发已满，请稍后重评');
-      if (job.run?.status !== 'done' || !hasOutput(job)) {
+      if ((!job.partialExecution && job.run?.status !== 'done') || !hasOutput(job)) {
         for (const key of enabled) scores[key] = { ...scores[key], status: 'skipped', error: '执行失败或没有可评分输出，无法生成完整评分' };
       } else if (enabled.length) {
         const old = job.run?.scoring?.rubric;
@@ -268,4 +268,4 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
   }
   return { score, pending, version: VERSION, snapshotRule: () => rules ? rules.activeSnapshot() : Promise.resolve(builtinRule()) };
 }
-module.exports = { createScoringService, normalizeRubric, normalizeJudge, packInput, redact, VERSION };
+module.exports = { createScoringService, normalizeRubric, normalizeJudge, packInput, redact, hasOutput, VERSION };
