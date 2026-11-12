@@ -273,6 +273,7 @@ function comparableScores(previous, current) {
     const after = current.rawScores?.[JUDGES[key]];
     if (before?.status !== 'ready' || after?.status !== 'ready') continue;
     if (previous.answerTruncated || current.answerTruncated || before.quality?.source?.truncated === true || after.quality?.source?.truncated === true) continue;
+    if (Boolean(before.quality?.source?.imageCoverage) !== Boolean(after.quality?.source?.imageCoverage)) continue;
     if (!before.model || !after.model || before.model !== after.model) continue;
     const beforeScore = totalScore(previous.rawScores, key);
     const afterScore = totalScore(current.rawScores, key);
@@ -332,6 +333,14 @@ function models(runs) {
   return [...new Set(runs.flatMap((run) => Object.values(JUDGES).map((key) => run.rawScores?.[key]?.model)).filter((value) => typeof value === 'string' && value))].sort();
 }
 
+function compatibleImageModes(first, second) {
+  return Object.values(JUDGES).every(key => {
+    const modes = runs => new Set(runs.map(run => run.rawScores?.[key]).filter(item => item?.status === 'ready').map(item => item.quality?.source?.imageCoverage ? 'vision' : 'text'));
+    const a = modes(first); const b = modes(second);
+    return a.size <= 1 && b.size <= 1 && (!a.size || !b.size || [...a][0] === [...b][0]);
+  });
+}
+
 function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
   const base = { batchId: basePlan.id, date: planDate(basePlan), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
   if (!previousPlan) {
@@ -350,6 +359,9 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
   }
   if (baseModels.length && previousModels.length && baseModels.join('\0') !== previousModels.join('\0')) {
     return { base, previous, comparable: false, mode: 'none', reason: '两批次使用的评分模型不同，不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
+  }
+  if (!compatibleImageModes(baseRuns, previousRuns)) {
+    return { base, previous, comparable: false, mode: 'none', reason: '两批次的图片评分方式不一致，不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
   const questions = questionComparisons(baseRuns, previousRuns);
   const sameRule = baseHashes.length === 1 && previousHashes.length === 1 && baseHashes[0] === previousHashes[0];

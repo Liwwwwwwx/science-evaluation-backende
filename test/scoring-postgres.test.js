@@ -3,6 +3,15 @@ const {test}=require('node:test');const assert=require('node:assert/strict');con
 const {createUnifiedEvaluationService}=require('../src/runs/unified-evaluation.service');const {createUnifiedEvaluationRepository}=require('../src/runs/unified-evaluation.repository');const {createScoringService}=require('../src/scoring/service');
 const {CHECKS}=require('../src/scoring/delivery-review');
 const socket=process.env.EVALUATION_SCORING_TEST_PG_SOCKET||'';
+test('隔离PG：评分摘要保留图片覆盖信息并兼容历史记录', {skip:!socket},async t=>{
+ assert.match(socket,/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);
+ const pool=new Pool({host:socket,port:55481,database:'science_admin'});t.after(()=>pool.end());
+ const {scoreProjection}=require('../src/runs/score-projection');
+ const scores={deepSeekScore:{status:'ready',model:'test',quality:{total:80,source:{truncated:false,imageCoverage:{found:2,sent:1,overflow:false}}}},qwenScore:{status:'ready',model:'test',quality:{total:70,source:{truncated:false}}}};
+ const result=await pool.query(`SELECT ${scoreProjection('scores')} AS scores FROM (SELECT $1::jsonb AS scores) sample`,[JSON.stringify(scores)]);
+ assert.deepEqual(result.rows[0].scores.deepSeekScore.quality.source.imageCoverage,{found:2,sent:1,overflow:false});
+ assert.equal(result.rows[0].scores.qwenScore.quality.source.imageCoverage,null);
+});
 test('隔离PG：五服务评分/SSE、重启读取、重评幂等与并发租约、题库版本隔离', {skip:!socket},async t=>{
  assert.match(socket,/^\/tmp\/evaluation-auth-pg\.[A-Za-z0-9]+$/);const pool=new Pool({host:socket,port:55481,database:'science_admin'});t.after(()=>pool.end());await pool.query(fs.readFileSync(path.join(__dirname,'../migrations/003_evaluation_runs.sql'),'utf8'));
  await setupRunOwnership(pool);

@@ -8,7 +8,7 @@ function scoreProjection(column) {
       jsonb_build_object('quality', jsonb_build_object(
         'total', entry.value #> '{quality,total}',
         'taskCompletion', jsonb_build_object('status', entry.value #> '{quality,taskCompletion,status}'),
-        'source', jsonb_build_object('truncated', entry.value #> '{quality,source,truncated}')
+        'source', jsonb_build_object('truncated', entry.value #> '{quality,source,truncated}', 'imageCoverage', entry.value #> '{quality,source,imageCoverage}')
       ))
     ), '{}'::jsonb) FROM jsonb_each(${column}) AS entry WHERE entry.key IN ('deepSeekScore','qwenScore','quality')
   ) ELSE '{}'::jsonb END)`;

@@ -290,6 +290,15 @@ test('规则或模型来源缺失时不展示分数差，截断评分不列入�
   assert.equal(listed.items[0].provisionalScores.deepSeek, true);
 });
 
+test('图片评分与历史文字评分的批次不可直接比较', async () => {
+  const current = plan(); const previous = plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' });
+  const after = run({ id: 'current', scores: { deepSeekScore: { status: 'ready', model: 'deepseek-chat', quality: { total: 80, source: { imageCoverage: { found: 1, sent: 1, overflow: false } } } } } });
+  const before = run({ id: 'previous', batch_id: MISSION_PREVIOUS, scores: { deepSeekScore: { status: 'ready', model: 'deepseek-chat', quality: { total: 75 } } } });
+  const service = createBatchReadService({ repository: repository({ plans: [current, previous], runs: [after, before] }) });
+  const result = await service.comparison(MISSION);
+  assert.equal(result.comparable, false); assert.match(result.reason, /图片评分方式/);
+});
+
 test('未结束的运行不判定为已修复或新增失败', async () => {
   const service = createBatchReadService({ repository: repository({
     plans: [plan(), plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' })],

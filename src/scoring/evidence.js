@@ -37,6 +37,13 @@ function evidence(value, input, scope = 'output') {
   for (let item of items) {
     let source;
     let quote;
+    const imageId = typeof item === 'string' ? item : item && typeof item.ref === 'string' ? item.ref : '';
+    if (/^image:\d+$/.test(imageId)) {
+      const image = (input.images || []).find(entry => entry.id === imageId);
+      if (!image) return { text: '', refs: [], valid: false };
+      refs.push({ source: 'image', imageId, label: `图片 ${imageId.slice(6)}（视觉判断未独立核验）` });
+      continue;
+    }
     const ref = typeof item === 'string' ? knownPassages.get(item) : item && typeof item.ref === 'string' ? knownPassages.get(item.ref) : null;
     if (ref) { source=ref.source; quote=ref.text; }
     else if (typeof item === 'string') {
@@ -57,7 +64,7 @@ function evidence(value, input, scope = 'output') {
     if (!found) return { text: '', refs: [], valid: false };
     refs.push({ source: found.id, quote });
   }
-  return { text: refs.map(r => r.quote).join('\n'), refs, valid: true };
+  return { text: refs.map(r => r.quote || r.label).join('\n'), refs, valid: true };
 }
 
 function completeScope(input, scope) {

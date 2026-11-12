@@ -3,7 +3,7 @@ const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
 const CONTENT_TYPES = { avif: 'image/avif', bmp: 'image/bmp', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', glb: 'model/gltf-binary', gltf: 'model/gltf+json', stl: 'model/stl', pdf: 'application/pdf', csv: 'text/csv; charset=utf-8', tsv: 'text/tab-separated-values; charset=utf-8', json: 'application/json', md: 'text/plain; charset=utf-8', markdown: 'text/plain; charset=utf-8', log: 'text/plain; charset=utf-8', jsonl: 'text/plain; charset=utf-8', py: 'text/plain; charset=utf-8', js: 'text/plain; charset=utf-8', html: 'text/plain; charset=utf-8', jsx: 'text/plain; charset=utf-8', ts: 'text/plain; charset=utf-8', tsx: 'text/plain; charset=utf-8', css: 'text/plain; charset=utf-8', scss: 'text/plain; charset=utf-8', xml: 'text/plain; charset=utf-8', yaml: 'text/plain; charset=utf-8', yml: 'text/plain; charset=utf-8', sh: 'text/plain; charset=utf-8', sql: 'text/plain; charset=utf-8', toml: 'text/plain; charset=utf-8', ini: 'text/plain; charset=utf-8', txt: 'text/plain; charset=utf-8', cif: 'text/plain; charset=utf-8', zip: 'application/zip' };
 function fail(status, code, message) { throw new TeamServiceError(status, code, message); }
 
-async function readRunArtifact(run, index, { fetchImpl = fetch } = {}) {
+async function readRunArtifact(run, index, { fetchImpl = fetch, maxBytes = MAX_ARTIFACT_BYTES, signal } = {}) {
   const files = run.run?.details?.artifacts;
   if (!Number.isInteger(index) || index < 0 || !Array.isArray(files) || !files[index]) fail(404, 'ARTIFACT_NOT_FOUND', '产物不存在');
   const file = files[index]; let url; let service;
@@ -22,14 +22,15 @@ async function readRunArtifact(run, index, { fetchImpl = fetch } = {}) {
   const extension = filename.split('.').pop().toLowerCase(); const contentType = CONTENT_TYPES[extension];
   if (!contentType) fail(415, 'ARTIFACT_TYPE_UNSUPPORTED', '此文件类型请从原始地址下载');
   try {
-    const response = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(15000) });
+    const timeout = AbortSignal.timeout(15000);
+    const response = await fetchImpl(url, { redirect: 'error', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (!response.ok) fail(502, 'ARTIFACT_UPSTREAM_FAILED', '产物读取失败，文件可能已过期');
-    if (Number(response.headers.get('content-length')) > MAX_ARTIFACT_BYTES) { await response.body?.cancel(); fail(413, 'ARTIFACT_TOO_LARGE', '产物超过32MiB预览上限，请使用原始地址'); }
+    if (Number(response.headers.get('content-length')) > maxBytes) { await response.body?.cancel(); fail(413, 'ARTIFACT_TOO_LARGE', '产物超过读取大小上限'); }
     const reader = response.body.getReader(); const chunks = []; let length = 0;
     try {
       while (true) {
         const part = await reader.read(); if (part.done) break;
-        length += part.value.length; if (length > MAX_ARTIFACT_BYTES) fail(413, 'ARTIFACT_TOO_LARGE', '产物超过32MiB预览上限，请使用原始地址');
+        length += part.value.length; if (length > maxBytes) fail(413, 'ARTIFACT_TOO_LARGE', '产物超过读取大小上限');
         chunks.push(Buffer.from(part.value));
       }
     } finally { await reader.cancel().catch(() => {}); }

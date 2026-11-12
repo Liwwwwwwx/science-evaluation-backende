@@ -31,7 +31,7 @@ test('长 Mission 正文、团队输出与结构化结果的末尾进入两位�
   } }]));
   const result = await createScoringService({ clients }).score(job);
   assert.equal(prompts.length, 2);
-  assert.equal(result.scoring.inputVersion, 'expanded-v1');
+  assert.equal(result.scoring.inputVersion, 'vision-v1');
   for (const key of ['deepSeekScore', 'qwenScore']) {
     const score = result.scores[key];
     assert.equal(score.status, 'ready');
