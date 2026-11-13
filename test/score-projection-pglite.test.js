@@ -24,7 +24,7 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   CREATE TABLE eval_questions (id text, dataset_version text, domain_key text);
   CREATE TABLE evaluation_user_run_history (user_id text, run_id text, title text, hidden boolean);
   CREATE TABLE evaluation_trial_batch_plans (plan_date date, id text, state text, items jsonb, rule_snapshot jsonb, error text, created_at timestamptz, updated_at timestamptz);`);
-  const detailed = { deepSeekScore: { status: 'ready', model: 'judge-a', quality: { total: 80, taskCompletion: { status: 'completed', note: 'x'.repeat(100000) }, source: { truncated: false, imageCoverage: { found: 2, sent: 2, overflow: false } }, extra: 'y'.repeat(100000) } }, qwenScore: { status: 'ready', model: 'judge-b', quality: { total: 72, source: { truncated: true } } }, other: { report: 'z'.repeat(100000) } };
+  const detailed = { deepSeekScore: { status: 'ready', model: 'judge-a', quality: { total: 80, taskCompletion: { status: 'completed', note: 'x'.repeat(100000) }, source: { truncated: false, imageCoverage: { found: 2, sent: 2, overflow: false } }, extra: 'y'.repeat(100000) } }, qwenScore: { status: 'ready', model: 'judge-b', quality: { total: 72, source: { truncated: true, imagesInspected: true } } }, other: { report: 'z'.repeat(100000) } };
   const pending = { deepSeekScore: { status: 'pending', model: null }, qwenScore: null, quality: { status: 'absent' } };
   const run = { status: 'done', elapsedMs: 1200, ruleSnapshot: { hash: 'rule-1' } };
   const insert = `INSERT INTO unified_evaluation_runs (id,service_key,origin,owner_user_id,question,question_id,dataset_version,batch_id,status,scores,run,answer_truncated,started_at)
@@ -52,6 +52,7 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   assert.doesNotMatch(queries.at(-1), /to_jsonb\(unified_evaluation_runs\)/);
   assert.deepEqual(new Set(compact.map(row => row.id)), new Set(['auto', 'mine']));
   assert.deepEqual(compact.find(row => row.id === 'auto').scores.deepSeekScore.quality.source.imageCoverage, { found: 2, sent: 2, overflow: false });
+  assert.equal(compact.find(row => row.id === 'auto').scores.qwenScore.quality.source.imagesInspected, true);
   assert.ok(JSON.stringify(compact).length < 5000);
   const originalScores = { auto: detailed, mine: pending };
   const baseline = compact.map(row => ({ ...row, scores: originalScores[row.id] }));

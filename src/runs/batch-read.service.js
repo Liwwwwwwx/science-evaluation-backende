@@ -266,6 +266,12 @@ function detailOf(plan, runs) {
   };
 }
 
+function imageInputMode(score) {
+  const source = score?.quality?.source;
+  const sent = source?.imageCoverage?.sent;
+  return (Number.isFinite(sent) ? sent > 0 : source?.imagesInspected === true) ? 'vision' : 'text';
+}
+
 function comparableScores(previous, current) {
   if (previous.execution !== 'completed' || current.execution !== 'completed') return [null, null];
   for (const key of Object.keys(JUDGES)) {
@@ -273,7 +279,7 @@ function comparableScores(previous, current) {
     const after = current.rawScores?.[JUDGES[key]];
     if (before?.status !== 'ready' || after?.status !== 'ready') continue;
     if (previous.answerTruncated || current.answerTruncated || before.quality?.source?.truncated === true || after.quality?.source?.truncated === true) continue;
-    if (Boolean(before.quality?.source?.imageCoverage) !== Boolean(after.quality?.source?.imageCoverage)) continue;
+    if (imageInputMode(before) !== imageInputMode(after)) continue;
     if (!before.model || !after.model || before.model !== after.model) continue;
     const beforeScore = totalScore(previous.rawScores, key);
     const afterScore = totalScore(current.rawScores, key);
@@ -335,7 +341,7 @@ function models(runs) {
 
 function compatibleImageModes(first, second) {
   return Object.values(JUDGES).every(key => {
-    const modes = runs => new Set(runs.map(run => run.rawScores?.[key]).filter(item => item?.status === 'ready').map(item => item.quality?.source?.imageCoverage ? 'vision' : 'text'));
+    const modes = runs => new Set(runs.map(run => run.rawScores?.[key]).filter(item => item?.status === 'ready').map(imageInputMode));
     const a = modes(first); const b = modes(second);
     return a.size <= 1 && b.size <= 1 && (!a.size || !b.size || [...a][0] === [...b][0]);
   });
