@@ -462,8 +462,8 @@ paths:
         需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
-        对比题传 `generationMode=comparison` 和 `serviceKeys`（合金材料与「材料 RSI」），按配比/配方或工艺优化方向生成一道候选题。
-        批次材料题池内部使用 `focus=optimization`；优化题必须包含数值约束，并要求候选方案、比较或排序，机理解释不能作为主题。
+        对比出题已停用；旧的 comparison 请求返回 COMPARISON_DISABLED。
+        材料配比批次内部使用 `focus=composition`；题目应包含数值约束并要求候选方案或比较，机理解释不能作为主题。
         旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
@@ -604,7 +604,7 @@ paths:
                         uniqueItems: true
                         items:
                           type: string
-                          enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
                         description: 可选适用服务；用于让一条测试集题同时供多个服务执行
       responses:
         '201':
@@ -1541,7 +1541,7 @@ paths:
                       properties:
                         key:
                           type: string
-                          enum: [mission-material, alpha-rsi, literature, literature-aircraft, alloy, synthesis, new-material]
+                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
                         label:
                           type: string
                         enabled:
@@ -1746,10 +1746,10 @@ paths:
               properties:
                 serviceKey:
                   type: string
-                  enum: [mission-material, alpha-rsi, literature, literature-aircraft, alloy, synthesis, new-material]
+                  enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft]
                 question:
                   type: string
-                  description: 题面；人工提问 8–500 字符（synthesis 8–200）
+                  description: 题面；人工提问 8–500 字符
                 questionId:
                   type: string
                   description: 题库来源时必填
@@ -2200,68 +2200,12 @@ paths:
   /api/evaluation/unified/comparisons:
     post:
       tags: [对比测评]
-      summary: 创建对比组
-      description: |
-        需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`
-        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合金材料与「材料 RSI」，且两者均已接入。
-        以同一份题面和同一份评分规则快照创建两条人工运行；分组 ID 由账号范围和幂等键确定，
-        重试不会重复派发。依赖手工执行的 `migrations/012_comparison_groups.sql`，未迁移返回 503。
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [serviceKeys, question]
-              properties:
-                serviceKeys:
-                  type: array
-                  minItems: 2
-                  maxItems: 2
-                  items:
-                    type: string
-                    enum: [alpha-rsi, alloy]
-                question:
-                  type: string
-                  description: 题面；8–500 字符
-                questionId:
-                  type: string
-                datasetVersion:
-                  type: string
-                sourceType:
-                  type: string
-                  enum: [fixed, random]
+      summary: 新建对比已停用
+      description: 历史对比仍可通过对应 GET 接口读取。需要现有写权限、同源校验及运行写开关。
+      deprecated: true
       responses:
-        '201':
-          description: 对比组已创建（或幂等恢复）
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [groupId, runs]
-                properties:
-                  groupId:
-                    type: string
-                    pattern: '^[a-f0-9]{64}$'
-                  runs:
-                    type: array
-                    minItems: 2
-                    maxItems: 2
-                    items:
-                      type: object
-                      required: [runId, serviceKey]
-                      properties:
-                        runId:
-                          type: string
-                          format: uuid
-                        serviceKey:
-                          type: string
-                        reused:
-                          type: boolean
-        '400':
-          description: 服务、题目、来源或幂等键无效（COMPARISON_* / UNIFIED_EVAL_* / QUESTION_SOURCE_INVALID）
+        '410':
+          description: 新建对比已停用（COMPARISON_DISABLED）
           content:
             application/json:
               schema:
@@ -2270,18 +2214,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        '409':
-          description: 幂等键已用于不同请求（UNIFIED_EVAL_IDEMPOTENCY_CONFLICT）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: 运行写入未启用或对比存储未迁移（EVALUATION_WRITE_DISABLED / COMPARISON_STORAGE_NOT_MIGRATED）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+
   /api/evaluation/unified/comparisons/{groupId}:
     get:
       tags: [对比测评]
@@ -2980,8 +2913,8 @@ components:
       properties:
         generationMode:
           type: string
-          enum: [service, comparison]
-          description: service 按单服务出题；comparison 根据两个服务生成一道对比题，不自动保存
+          enum: [service]
+          description: service 按单服务出题；旧 comparison 模式已停用
         serviceKeys:
           type: array
           minItems: 2
@@ -2990,11 +2923,12 @@ components:
           items:
             type: string
             enum: [alpha-rsi, alloy]
-          description: comparison 模式必填，必须同时包含这两个服务，不能与 serviceKey、domainKey、topic 或 focus 同时提供
+          deprecated: true
+          description: 旧对比模式字段，当前不再使用
         serviceKey:
           type: string
-          enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
-          description: 与 domainKey 互斥；service 模式支持除 alpha-rsi 外的已列服务，旧请求须提供 topic
+          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+          description: 与 domainKey 互斥；旧服务维度请求须提供 topic
         domainKey:
           type: string
           description: 领域维度出题（与 serviceKey 互斥）
@@ -3004,7 +2938,7 @@ components:
           description: 自定义主题；focus=custom 时必填
         focus:
           type: string
-          enum: [general, principles, design, comparison, validation, diagnosis, optimization, custom]
+          enum: [general, principles, design, comparison, validation, diagnosis, optimization, composition, custom]
           default: general
           description: 出题方向；general 为综合出题，optimization 为配比/配方或工艺优化（批次材料题池使用）
         count:
@@ -3517,27 +3451,19 @@ components:
           type: string
           nullable: true
 
-    BatchSchemeCounts:
-      type: object
-      required: [aviation, synthesis]
-      properties:
-        aviation: { type: integer, minimum: 0, maximum: 100 }
-        synthesis: { type: integer, minimum: 0, maximum: 100 }
     BatchSchemeConfig:
       type: object
-      required: [pools, services]
-      description: 每个服务的题量不得超过对应题池；每批最多320次；同题对比时1110与合金材料使用相同数量的题目。compareSynthesisAlpha 仅保留用于历史方案兼容。concurrency 可选，按服务设置该批次同时执行的运行数上限（1–5），缺省按服务默认上限执行；实际并发仍受全局每服务上限约束。
+      required: [services]
+      description: 按服务独立分配题数，每批最多320次；停用服务题量和旧对比设置不用于新批次。旧配置和历史执行快照仍可读取。concurrency 可选，按服务设置批次并发上限（1–5）。
       properties:
-        pools: { $ref: '#/components/schemas/BatchSchemeCounts' }
         services:
           type: object
-          required: [mission-material, literature, literature-aircraft, alloy, synthesis, new-material, alpha-rsi]
-          additionalProperties: { $ref: '#/components/schemas/BatchSchemeCounts' }
+          additionalProperties: { type: integer, minimum: 0, maximum: 100 }
         concurrency:
           type: object
           description: 每服务批次并发上限；省略时不单独限流，使用全局每服务上限。
           additionalProperties: { type: integer, minimum: 1, maximum: 5 }
-        compareAlloyAlpha: { type: boolean, description: 1110 与合金材料同题对比 }
+        compareAlloyAlpha: { type: boolean, deprecated: true, description: 历史同题对比配置，新批次始终关闭 }
         compareSynthesisAlpha: { type: boolean, deprecated: true, description: 旧版合成制备与 1110 同题对比，仅用于历史方案兼容 }
     BatchSummary:
       type: object

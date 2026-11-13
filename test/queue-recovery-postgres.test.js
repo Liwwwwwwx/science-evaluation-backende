@@ -89,4 +89,17 @@ test('隔离 PostgreSQL：进程退出后恢复未派发任务，竞争和不确
   assert.equal(starts, 1);
   assert.equal((await repository.get(legacy.runId)).status, 'queued');
   assert.equal((await repository.get(changed.runId)).status, 'queued');
+
+  // 旧对比队列要保留，但不能恢复，也不能占满正常队列的读取上限。
+  one.stopQueueRecovery(); two.stopQueueRecovery();
+  await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/012_comparison_groups.sql'), 'utf8'));
+  const afterMigration = createUnifiedEvaluationRepository({ pgPool: pool });
+  const queueRun = { serviceAddress: 'ws://service.example/start', queuePayload: { version: 1, caseDef: null, scoreMode: 'none' } };
+  const grouped = { ...template, runId: require('node:crypto').randomUUID(), comparisonGroupId: 'a'.repeat(64), startedAt: '2020-01-01T00:00:00.000Z', run: queueRun };
+  const normal = { ...template, runId: require('node:crypto').randomUUID(), startedAt: '2021-01-01T00:00:00.000Z', run: queueRun };
+  await afterMigration.createIdempotent(grouped, 'evaluation-user:test', 'grouped', 'grouped-hash');
+  await afterMigration.createIdempotent(normal, 'evaluation-user:test', 'normal', 'normal-hash');
+  const recoverable = await afterMigration.listRecoverableQueued(['literature'], 1, { literature: 'ws://service.example/start' });
+  assert.deepEqual(recoverable.map(row => row.runId), [normal.runId]);
+  assert.equal((await afterMigration.get(grouped.runId)).status, 'queued');
 });

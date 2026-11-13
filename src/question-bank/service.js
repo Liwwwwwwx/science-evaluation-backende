@@ -4,7 +4,7 @@ const { fingerprintOf, fixedDatasetVersionOf, fixedQuestionId, randomQuestionId 
 const cases = require('./builtin-cases.json');
 const { DOMAINS } = require('./domains');
 
-const services = new Set(['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
+const services = new Set(['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
 function fail(status, code, message) { throw new TeamServiceError(status, code, message); }
 function validateQuestion(value, serviceKey) {
   const max = serviceKey === 'synthesis' ? 200 : 500;

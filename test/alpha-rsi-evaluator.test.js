@@ -27,6 +27,21 @@ function createHarness(overrides = {}) {
   return { socket, evaluator };
 }
 
+test('1109 可作为独立 RSI 使用，模拟交互保留自己的任务标识和结果', async () => {
+  const socket = new FakeSocket(); let target;
+  const evaluator = createAlphaRsiEvaluator({ url: 'ws://127.0.0.1:1109/start', label: '配比+制备 RSI', taskPrefix: 'evaluation-alpha-combined-rsi',
+    createSocket: url => { target = url; return socket; }, endSettleMs: 10, timeoutMs: 1000 });
+  const chunks = [];
+  const started = await evaluator.startQuestionRun({ question: '请提出材料配比并说明可用制备条件。' }, { onText: text => chunks.push(text) });
+  socket.open();
+  assert.equal(target, 'ws://127.0.0.1:1109/start');
+  assert.equal(socket.sent[0].idea, '请提出材料配比并说明可用制备条件。');
+  assert.match(socket.sent[0].taskid, /^evaluation-alpha-combined-rsi-/);
+  socket.message('[start]模拟配比和制备结果[end]');
+  assert.equal((await started.completion).status, 'done');
+  assert.equal(chunks.join(''), '模拟配比和制备结果');
+});
+
 test('1110 发送 idea 首帧，流式正文去掉起止标记', async () => {
   const { socket, evaluator } = createHarness();
   const chunks = [];
@@ -217,6 +232,64 @@ test('收集结果、产物与进度，不把协议对象混入正文', async ()
   assert.equal(result.details.generatedFiles.length, 1);
   assert.equal(result.details.artifacts.length, 1);
   assert.equal(result.details.artifacts[0].url, 'http://111.14.140.20:1110/download/report');
+});
+
+test('1109 结束标记后的失败结果与终止帧不会被当作成功或自动重试', async () => {
+  const sockets = [];
+  const evaluator = createAlphaRsiEvaluator({
+    url: 'ws://127.0.0.1:1109/start', label: '配比+制备 RSI', endSettleMs: 40, timeoutMs: 1000,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    generateSupplement: async () => { assert.fail('失败的任务不应生成补充或重试'); },
+  });
+  const chunks = [];
+  const started = await evaluator.startQuestionRun({ question: '请设计材料配比和制备条件。' }, { onText: text => chunks.push(text) });
+  const socket = sockets[0]; socket.open();
+  socket.message('[start]当前任务无法回答。[end]');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  socket.message(JSON.stringify({ type: 'result', data: { taskid: started.run.id, status: 'failed', user_conclusion: '当前任务无法回答。' } }));
+  socket.message(JSON.stringify({ type: 'turn_error', message: '材料任务未完成，请查看本轮结果中的具体原因。' }));
+  socket.message(JSON.stringify({ type: 'turn_complete', status: 'failed' }));
+  const result = await started.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /配比\+制备 RSI 返回失败/);
+  assert.equal(result.details.result.status, 'failed');
+  assert.equal(result.details.transport.state, 'failed');
+  assert.equal(chunks.join(''), '当前任务无法回答。');
+  assert.ok(result.details.protocolFrames.some(frame => frame.type === 'turn_error'));
+  assert.equal(sockets.length, 1);
+});
+
+test('仅结果失败或仅终止帧失败时仍标记失败', async () => {
+  for (const frame of [
+    { type: 'result', data: { status: 'failed' } },
+    { type: 'turn_error', message: '执行失败' },
+    { type: 'turn_complete', status: 'failed' },
+  ]) {
+    const { socket, evaluator } = createHarness();
+    const started = await evaluator.startQuestionRun({ question: '请设计材料配比。' });
+    socket.open(); socket.message(JSON.stringify(frame)); socket.message('[start]任务未完成[end]');
+    const result = await started.completion;
+    assert.equal(result.status, 'error', frame.type);
+    assert.match(result.error, /返回失败/);
+  }
+});
+
+test('等待补充结果同时伴随终止失败时不自动重试', async () => {
+  const sockets = [];
+  const evaluator = createAlphaRsiEvaluator({
+    url: 'ws://example.test/start', endSettleMs: 10, timeoutMs: 1000,
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    generateSupplement: async () => { assert.fail('明确失败后不应生成补充'); },
+  });
+  const started = await evaluator.startQuestionRun({ question: '请设计材料配比。' });
+  sockets[0].open();
+  sockets[0].message(JSON.stringify({ type: 'result', data: { status: 'waiting_for_input', user_conclusion: '请补充条件' } }));
+  sockets[0].message(JSON.stringify({ type: 'turn_complete', status: 'failed' }));
+  sockets[0].message('[start]任务未完成[end]');
+  const result = await started.completion;
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /返回失败/);
+  assert.equal(sockets.length, 1);
 });
 
 test('未支持的交互、错误帧与超时都明确结束', async () => {

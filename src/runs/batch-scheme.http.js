@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
-const { DEFAULT_SCHEME, validateScheme } = require('./batch-scheme');
+const { DEFAULT_SCHEME, upgradeComparisonScheme } = require('./batch-scheme');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 async function handleBatchSchemes({ req, res, url, user, schemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply, concurrencyCaps = null }) {
@@ -10,8 +10,9 @@ async function handleBatchSchemes({ req, res, url, user, schemes, manualBatches,
   if (url.pathname === base && req.method === 'GET') {
     const canWrite = runWriteEnabled && user.permissions.includes('team-services:write');
     const data = await schemes.list({ userId: String(user.id), admin: user.username === 'admin' });
+    const items = Array.isArray(data.items) ? data.items.map(item => ({ ...item, config: upgradeComparisonScheme(item.config, { allowEmpty: true }) })) : data.items;
     const nightly = data.nightly !== undefined ? data.nightly : data.storageReady && typeof schemes.nightly === 'function' ? await schemes.nightly() : null;
-    return reply(res, 200, { ...data, nightly: nightly ? { id: nightly.id, name: nightly.name, version: nightly.version } : null, nightlyEnabled: typeof nightlyEnabled === 'boolean' ? nightlyEnabled : null, userId: String(user.id), defaultConfig: DEFAULT_SCHEME, canManage: canWrite, canSetNightly: canWrite && user.username === 'admin', canRun: canWrite, concurrencyCaps });
+    return reply(res, 200, { ...data, items, nightly: nightly ? { id: nightly.id, name: nightly.name, version: nightly.version } : null, nightlyEnabled: typeof nightlyEnabled === 'boolean' ? nightlyEnabled : null, userId: String(user.id), defaultConfig: DEFAULT_SCHEME, canManage: canWrite, canSetNightly: canWrite && user.username === 'admin', canRun: canWrite, concurrencyCaps });
   }
   if (req.method !== 'POST') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
   if (!user.permissions.includes('team-services:write')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
@@ -35,6 +36,6 @@ async function handleBatchSchemes({ req, res, url, user, schemes, manualBatches,
   const id = input.id || randomUUID();
   if (!name || name.length > 80 || !UUID.test(id) || !Number.isInteger(input.version) || input.version < 0 || typeof input.isNightly !== 'boolean') throw new TeamServiceError(400, 'BATCH_SCHEME_INVALID', '方案名称、版本或夜间状态无效');
   if (input.isNightly && user.username !== 'admin') throw new TeamServiceError(403, 'FORBIDDEN', '仅管理员可设置夜间方案');
-  return reply(res, 200, { item: await schemes.save({ id, name, config: validateScheme(input.config), version: input.version, userId: String(user.id), nightly: input.isNightly }) });
+  return reply(res, 200, { item: await schemes.save({ id, name, config: upgradeComparisonScheme(input.config), version: input.version, userId: String(user.id), nightly: input.isNightly }) });
 }
 module.exports = { handleBatchSchemes };

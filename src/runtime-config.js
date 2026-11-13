@@ -4,6 +4,10 @@ function automationEnabled(env = process.env) {
   return !['development', 'test'].includes(env.NODE_ENV);
 }
 
+function timeoutRecoveryEnabled(env = process.env) {
+  return env.EVALUATION_RUN_WRITE_ENABLED === 'true' && env.EVALUATION_TIMEOUT_RECOVERY_ENABLED !== 'false';
+}
+
 function httpSettings(env = process.env) {
   const publicOrigin = env.EVALUATION_PUBLIC_ORIGIN;
   if (!publicOrigin) throw new Error('EVALUATION_PUBLIC_ORIGIN is required when authentication is enabled');
@@ -21,4 +25,4 @@ function missionTimeoutMs(env = process.env) {
   if (!Number.isInteger(value) || value < 60 * 1000 || value > 24 * 60 * 60 * 1000) throw new Error('EVALUATION_MISSION_TIMEOUT_MS must be an integer between 60000 and 86400000 milliseconds');
   return value;
 }
-module.exports = { automationEnabled, httpSettings, missionTimeoutMs };
+module.exports = { automationEnabled, timeoutRecoveryEnabled, httpSettings, missionTimeoutMs };

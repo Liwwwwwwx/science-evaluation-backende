@@ -19,7 +19,7 @@ const { createMissionDailyRepository } = require('../src/runs/mission-daily.repo
 const { createDailyReportRepository } = require('../src/daily-reports/repository');
 const { createApp } = require('../src/app');
 
-test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对、归属与互斥', { skip: !process.env.PGLITE_PACKAGE }, async t => {
+test('隔离 PostgreSQL 兼容库：方案版本、独立批次、归属与互斥', { skip: !process.env.PGLITE_PACKAGE }, async t => {
   const { PGlite } = require(process.env.PGLITE_PACKAGE);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'science-batch-pglite-'));
   let db = new PGlite(root);
@@ -36,23 +36,23 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
   await db.exec('CREATE TABLE eval_questions(id text,dataset_version text,domain_key text,UNIQUE(id,dataset_version))');
   for (const name of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '007_daily_evaluation_reports.sql', '008_trial_batch_plans.sql', '011_run_ownership.sql', '012_comparison_groups.sql', '013_batch_schemes.sql', '014_batch_scheme_ownership.sql']) await db.exec(fs.readFileSync(path.join(__dirname, '../migrations', name), 'utf8'));
   const schemes = createBatchSchemeRepository({ pgPool: pool });
-  const config = structuredClone(DEFAULT_SCHEME); config.pools = { aviation: 3, synthesis: 0 };
-  for (const key of SERVICE_KEYS) config.services[key] = { aviation: ['alloy', 'alpha-rsi'].includes(key) ? 3 : 0, synthesis: 0 };
+  const config = structuredClone(DEFAULT_SCHEME);
+  for (const key of SERVICE_KEYS) config.services[key] = ['alpha-rsi', 'alpha-combined-rsi'].includes(key) ? 3 : 0;
   const scheme = await schemes.save({ id: randomUUID(), name: '隔离测试方案', config, version: 0, userId: 'admin', nightly: true });
   const aliceScheme = await schemes.save({ id: randomUUID(), name: '个人方案', config, version: 0, userId: 'alice', nightly: false });
   assert.equal((await schemes.nightly()).version, 1);
   await assert.rejects(schemes.save({ id: scheme.id, name: '冲突', config, version: 0, userId: 'admin', nightly: true }), { code: 'BATCH_SCHEME_CONFLICT' });
-  const addresses = { alloy: 'ws://alloy.test', 'alpha-rsi': 'ws://alpha.test' };
+  const addresses = { 'alpha-combined-rsi': 'ws://combined.test', 'alpha-rsi': 'ws://alpha.test' };
   let n = 0;
   const generator = { async generate(input) { return { items: Array.from({ length: input.count }, () => ({ question: `请分析合成材料测试案例第 ${++n} 题。` })) }; } };
   const evaluator = key => ({ scoreMode: 'none', serviceAddress: addresses[key], async startQuestionRun() { return { run: { id: randomUUID() }, completion: Promise.resolve({ status: 'done' }) }; }, async getRunQuality() { return { status: 'absent' }; } });
-  const evaluations = createUnifiedEvaluationService({ repository: createUnifiedEvaluationRepository({ pgPool: pool }), evaluators: { alloy: evaluator('alloy'), 'alpha-rsi': evaluator('alpha-rsi') } });
+  const evaluations = createUnifiedEvaluationService({ repository: createUnifiedEvaluationRepository({ pgPool: pool }), evaluators: { 'alpha-combined-rsi': evaluator('alpha-combined-rsi'), 'alpha-rsi': evaluator('alpha-rsi') } });
   const trialRepo = createTrialBatchRepository({ pgPool: pool });
   const trial = createTrialBatchService({ repository: trialRepo, evaluations, generator, serviceAddresses: addresses, schemes });
   const manualRepo = createManualBatchRepository({ pgPool: pool, schemes });
   const manual = createManualBatchService({ repository: manualRepo, evaluations, generator, serviceAddresses: addresses, trialService: trial, schemes });
   await assert.rejects(manual.create({ config, userId: 'bob', key: 'foreign-scheme', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version }), { code: 'BATCH_SCHEME_CONFLICT' });
-  const changedConfig = structuredClone(config); changedConfig.compareAlloyAlpha = false;
+  const changedConfig = structuredClone(config); changedConfig.services['alpha-rsi'] = 2;
   await assert.rejects(manual.create({ config: changedConfig, userId: 'alice', key: 'changed-scheme', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version }), { code: 'BATCH_SCHEME_CONFLICT' });
   const first = await manual.create({ config, userId: 'alice', key: 'same-request', schemeId: aliceScheme.id, schemeVersion: aliceScheme.version });
   let manualFinished = 0;
@@ -65,8 +65,8 @@ test('隔离 PostgreSQL 兼容库：方案版本、手动批次、同题配对�
   const records = await pool.query('SELECT origin,owner_user_id,question,comparison_group_id FROM unified_evaluation_runs WHERE batch_id=$1', [first.batchId]);
   assert.equal(records.rows.length, 6);
   assert.ok(records.rows.every(row => row.origin === 'manual' && row.owner_user_id === 'alice'));
-  for (const group of new Set(records.rows.map(row => row.comparison_group_id))) assert.equal(new Set(records.rows.filter(row => row.comparison_group_id === group).map(row => row.question)).size, 1);
-  assert.equal(new Set(records.rows.map(row => row.comparison_group_id)).size, 3);
+  assert.ok(records.rows.every(row => row.comparison_group_id === null));
+  assert.equal(new Set(records.rows.map(row => row.question)).size, 6);
   const read = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   assert.equal((await read.get(first.batchId, 'alice')).batch.planned, 6);
   await assert.rejects(read.get(first.batchId, 'bob'), { code: 'BATCH_NOT_FOUND' });
@@ -147,4 +147,25 @@ test('隔离数据库：个人配置归属、软删除与管理员切换夜间�
   assert.equal((await schemes.list({ userId: 'alice' })).items.length, 0);
   await assert.rejects(schemes.save({ id: legacyId, name: '不能复活', config: DEFAULT_SCHEME, version: 0, userId: 'bob', nightly: false }), { code: 'BATCH_SCHEME_NOT_FOUND' });
   assert.equal((await query('SELECT count(*)::int AS n FROM evaluation_batch_scheme_history WHERE scheme_id=$1', [legacyId])).rows[0].n, 4);
+});
+
+test('隔离兼容库：旧对比队列保留且不挤占新运行恢复名额', { skip: !process.env.PGLITE_PACKAGE }, async t => {
+  const { PGlite } = require(process.env.PGLITE_PACKAGE);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'science-retired-queue-'));
+  let db = new PGlite(root);
+  await db.exec('CREATE DATABASE science_evaluation'); await db.close();
+  db = new PGlite(root, { database: 'science_evaluation' }); t.after(() => db.close());
+  await db.exec("CREATE TABLE auth_users(id text PRIMARY KEY,username text NOT NULL UNIQUE); INSERT INTO auth_users VALUES ('admin','admin')");
+  for (const name of ['003_evaluation_runs.sql', '011_run_ownership.sql', '012_comparison_groups.sql']) await db.exec(fs.readFileSync(path.join(__dirname, '../migrations', name), 'utf8'));
+  const pool = { async query(sql, args = []) { const result = await db.query(sql, args); return { ...result, rowCount: result.rowCount ?? result.affectedRows }; } };
+  const repository = createUnifiedEvaluationRepository({ pgPool: pool });
+  const common = { serviceKey: 'alpha-rsi', origin: 'manual', question: '测试题：材料配比和目标性能。', questionId: null, datasetVersion: null, questionSourceType: null, batchId: null, status: 'queued', run: { serviceAddress: 'ws://alpha.test/start', queuePayload: { version: 1, caseDef: null, scoreMode: 'none' } } };
+  const old = { ...common, runId: randomUUID(), comparisonGroupId: 'a'.repeat(64), startedAt: '2020-01-01T00:00:00.000Z' };
+  const current = { ...common, runId: randomUUID(), startedAt: '2021-01-01T00:00:00.000Z' };
+  await repository.createIdempotent(old, 'evaluation-user:admin', 'old', 'old-hash');
+  await repository.createIdempotent(current, 'evaluation-user:admin', 'current', 'current-hash');
+  const pending = await repository.listRecoverableQueued(['alpha-rsi'], 1, { 'alpha-rsi': 'ws://alpha.test/start' });
+  assert.deepEqual(pending.map(row => row.runId), [current.runId]);
+  const preserved = await repository.get(old.runId);
+  assert.equal(preserved.status, 'queued'); assert.equal(preserved.comparisonGroupId, old.comparisonGroupId);
 });

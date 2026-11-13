@@ -1,6 +1,6 @@
 const { TeamServiceError } = require('../errors');
 
-const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi'];
+const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi'];
 const SERVICE_LABELS = {
   'mission-material': 'Mission 主服务',
   literature: '文献检索',
@@ -8,7 +8,8 @@ const SERVICE_LABELS = {
   alloy: '合金材料',
   synthesis: '合成制备',
   'new-material': '新材料',
-  'alpha-rsi': '材料 RSI',
+  'alpha-rsi': '材料配比 RSI',
+  'alpha-combined-rsi': '配比+制备 RSI',
 };
 const JUDGES = { deepSeek: 'deepSeekScore', qwen: 'qwenScore' };
 const THRESHOLD_POINTS = 5;
@@ -33,8 +34,8 @@ function servicePlans(plan) {
     const items = plan.items && typeof plan.items === 'object' && !Array.isArray(plan.items) ? plan.items : {};
     const counts = plan.item_counts && typeof plan.item_counts === 'object' ? plan.item_counts : null;
     const config = plan.config_snapshot?.config;
-    const expected = key => counts && typeof counts[key] === 'number' ? counts[key] : Array.isArray(items[key]) ? items[key].length : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
-    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && key !== 'alpha-rsi' || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
+    const expected = key => counts && typeof counts[key] === 'number' ? counts[key] : Array.isArray(items[key]) ? items[key].length : typeof config?.services?.[key] === 'number' ? config.services[key] : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
+    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && !['alpha-rsi', 'alpha-combined-rsi'].includes(key) || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
   return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: typeof plan.item_count === 'number' ? plan.item_count : Array.isArray(plan.items) ? plan.items.length : 0 }];
 }

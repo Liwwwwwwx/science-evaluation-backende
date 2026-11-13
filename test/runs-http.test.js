@@ -118,7 +118,7 @@ test('服务可用性按各自适配器、写开关和用户权限确定，1108�
     if (!token) throw Object.assign(Error('请登录'), { status: 401 });
     return { id: token, permissions: token === 'reader' ? ['team-services:read'] : ['team-services:read', 'team-services:write'] };
   } };
-  for (const keys of [[], ['mission-material'], ['literature'], ['literature-aircraft'], ['literature', 'literature-aircraft'], ['alloy'], ['synthesis'], ['new-material'], ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material']]) {
+  for (const keys of [[], ['alpha-rsi'], ['alpha-combined-rsi'], ['mission-material'], ['literature'], ['literature-aircraft'], ['literature', 'literature-aircraft'], ['alloy'], ['synthesis'], ['new-material'], ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material']]) {
     const evaluator = { startQuestionRun: () => { throw Error('不能触发被测服务'); } };
     const evaluations = createUnifiedEvaluationService({ evaluators: Object.fromEntries(keys.map(key => [key, evaluator])) });
     for (const write of [false, true]) {
@@ -130,10 +130,10 @@ test('服务可用性按各自适配器、写开关和用户权限确定，1108�
         const response = await fetch(url, { headers: { cookie: `evaluation_session=${user}` } });
         assert.equal(response.status, 200);
         const { items } = await response.json();
-        assert.deepEqual(items.filter(item => item.enabled).map(item => item.key), write && user === 'writer' ? keys : []);
+        assert.deepEqual(items.filter(item => item.enabled).map(item => item.key), write && user === 'writer' ? ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'literature', 'literature-aircraft'].filter(key => keys.includes(key)) : []);
         assert.ok(items.every(item => item.scoring === 'absent'));
       }
-      for (const key of ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'].filter(key => !keys.includes(key))) {
+      for (const key of ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material'].filter(key => !keys.includes(key) || ['alloy', 'synthesis', 'new-material'].includes(key))) {
         const response = await fetch(url.replace('/services', '/runs'), { method: 'POST',
           headers: { cookie: 'evaluation_session=writer', origin: 'http://localhost', 'content-type': 'application/json', 'Idempotency-Key': 'unconfigured' },
           body: JSON.stringify({ serviceKey: key, question: '请检索航空热防护材料相关文献。' }) });

@@ -61,169 +61,36 @@ function serviceWith(repository, snapshots = []) {
   });
 }
 
-test('自动批次同题对比保留组和规则，重复派发复用原运行', async () => {
-  const repository = createRepository(); const service = serviceWith(repository);
-  const group = 'a'.repeat(64);
-  const ruleSnapshot = { id: 'rule-1', version: 3, name: '默认规则', hash: 'hash-1', config: {} };
-  const question = '请比较两种材料在 900°C 下的强度并说明依据。';
-  for (const key of ['synthesis', 'alpha-rsi']) {
-    const input = { serviceKey: key, question, batchId: 'batch-1', sourceType: 'random', comparisonGroupId: group };
-    const options = { key: `batch-1:${key}:0`, ruleSnapshot };
-    const first = await service.createBatchRun(input, options);
-    const again = await service.createBatchRun(input, options);
-    assert.equal(again.runId, first.runId); assert.equal(again.reused, true);
-  }
-  await new Promise(resolve => setImmediate(resolve));
-  const comparison = await service.getComparison(group, 'reader');
-  assert.equal(comparison.runs.length, 2);
-  assert.ok(comparison.runs.every(run => run.question === question && run.run.ruleSnapshot.hash === 'hash-1'));
+test('停用新建对比，保留历史对比的读取和访问控制', async () => {
+  const repository = createRepository(); const service = serviceWith(repository); const group = 'a'.repeat(64);
+  await assert.rejects(service.createComparison({ serviceKeys: ['alloy', 'alpha-rsi'], question: '比较材料强度和温度条件' }, { scope: 'evaluation-user:u1', key: 'new' }), { code: 'COMPARISON_DISABLED' });
+  await assert.rejects(service.createBatchRun({ serviceKey: 'alpha-rsi', question: '比较材料强度和温度条件', batchId: 'batch', comparisonGroupId: group }, { key: 'batch:alpha:1' }), { code: 'COMPARISON_DISABLED' });
+  assert.equal(repository.rows.size, 0);
+  for (const [index, serviceKey] of ['alloy', 'alpha-rsi'].entries()) repository.rows.set(`legacy-${index}`, { runId: `legacy-${index}`, serviceKey, comparisonGroupId: group, ownerScope: 'evaluation-user:u1', origin: 'manual', status: 'done' });
+  assert.deepEqual((await service.getComparison(group, 'u1')).runs.map(row => row.serviceKey), ['alloy', 'alpha-rsi']);
+  await assert.rejects(service.getComparison(group, 'u2'), { code: 'COMPARISON_NOT_FOUND' });
 });
 
-test('手动组合批次保留个人归属，不允许其他账号读取对比组', async () => {
-  const repository = createRepository(); const service = serviceWith(repository); const group = 'b'.repeat(64);
-  for (const serviceKey of ['synthesis', 'alpha-rsi']) await service.createBatchRun({ serviceKey, question: '请分析材料的合成条件与性能变化。', batchId: 'batch-2', ownerUserId: 'alice', comparisonGroupId: group }, { key: `batch-2:${serviceKey}:0` });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal((await service.getComparison(group, 'alice')).runs.length, 2);
-  await assert.rejects(service.getComparison(group, 'bob'), { code: 'COMPARISON_NOT_FOUND' });
-  assert.ok([...repository.rows.values()].every(row => row.origin === 'manual' && row.ownerScope === 'evaluation-user:alice'));
-});
-
-test('对比组用一份规则快照创建两条运行，并按幂等键恢复', async () => {
-  const repository = createRepository();
-  const snapshots = [];
-  const service = serviceWith(repository, snapshots);
-  const input = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较两种材料在 900°C 下的强度并说明依据。' };
-  const first = await service.createComparison(input, { scope: 'evaluation-user:u1', key: 'compare-1' });
-  assert.equal(first.runs.length, 2);
-  assert.match(first.groupId, /^[a-f0-9]{64}$/);
-  assert.notEqual(first.runs[0].runId, first.runs[1].runId);
-  assert.deepEqual(first.runs.map((item) => item.serviceKey), ['alloy', 'alpha-rsi']);
-  assert.equal(snapshots.length, 1);
-  await new Promise((resolve) => setImmediate(resolve));
-  const left = await service.get(first.runs[0].runId);
-  const right = await service.get(first.runs[1].runId);
-  assert.equal(left.comparisonGroupId, first.groupId);
-  assert.equal(right.comparisonGroupId, first.groupId);
-  assert.equal(left.run.ruleSnapshot.id, 'rule-1');
-  assert.equal(right.run.ruleSnapshot.id, 'rule-1');
-
-  const second = await service.createComparison(input, { scope: 'evaluation-user:u1', key: 'compare-1' });
-  assert.equal(second.groupId, first.groupId);
-  assert.deepEqual(second.runs.map((item) => item.runId), first.runs.map((item) => item.runId));
-  assert.ok(second.runs.every((item) => item.reused === true));
-  assert.equal(repository.keys.size, 2);
-});
-
-test('新建对比仅允许已接入的合金材料与 1110，支持两种顺序', async () => {
-  const service = serviceWith(createRepository());
-  const question = '请比较两种材料在 900°C 下的强度并说明依据。';
-  for (const serviceKeys of [['mission-material', 'alpha-rsi'], ['alloy', 'alloy'], ['alloy'], ['alloy', 'literature']]) {
-    await assert.rejects(service.createComparison({ serviceKeys, question }, { scope: 'evaluation-user:u1', key: 'invalid' }), { code: 'COMPARISON_SERVICES_INVALID' });
-  }
-  const reverse = await service.createComparison({ serviceKeys: ['alpha-rsi', 'alloy'], question }, { scope: 'evaluation-user:u1', key: 'reverse' });
-  assert.deepEqual(reverse.runs.map(item => item.serviceKey), ['alpha-rsi', 'alloy']);
-  const missing = createUnifiedEvaluationService({ evaluators: { 'alpha-rsi': evaluator() }, repository: createRepository() });
-  await assert.rejects(missing.createComparison({ serviceKeys: ['alloy', 'alpha-rsi'], question }, { scope: 'evaluation-user:u1', key: 'missing' }), { code: 'COMPARISON_SERVICES_INVALID' });
-});
-
-test('题库对比在创建前校验两个服务并给两条运行保留同一题目版本', async () => {
-  const repository = createRepository(); const checks = [];
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), 'alpha-rsi': evaluator() }, repository,
-    resolveQuestion: async input => { checks.push(input.serviceKey); if (input.questionId === 'bound' && input.serviceKey === 'alpha-rsi') throw Object.assign(Error('不适用'), { code: 'QUESTION_NOT_RUNNABLE' }); } });
-  const input = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较两种材料的强度并说明选择依据。', questionId: 'shared', datasetVersion: 'v1', sourceType: 'fixed' };
-  const result = await service.createComparison(input, { scope: 'evaluation-user:u1', key: 'shared' });
-  assert.deepEqual(checks, ['alloy', 'alpha-rsi']);
-  for (const item of result.runs) { const run = repository.rows.get(item.runId); assert.equal(run.questionId, 'shared'); assert.equal(run.datasetVersion, 'v1'); assert.equal(run.questionSourceType, 'fixed'); }
-  const count = repository.rows.size;
-  await assert.rejects(service.createComparison({ ...input, questionId: 'bound' }, { scope: 'evaluation-user:u1', key: 'bound' }), { code: 'QUESTION_NOT_RUNNABLE' });
-  assert.equal(repository.rows.size, count);
-});
-
-test('对比题目长度按两个服务的上限校验', async () => {
-  const service = createUnifiedEvaluationService({ evaluators: { 'alpha-rsi': evaluator(), alloy: evaluator() }, repository: createRepository() });
-  await assert.rejects(service.createComparison({ serviceKeys: ['alpha-rsi', 'alloy'], question: '这是一个足够长的题目。' + '甲'.repeat(500) }, { scope: 'evaluation-user:u1', key: 'k1' }), (error) => error.code === 'UNIFIED_EVAL_QUESTION_INVALID');
-  await assert.rejects(service.createComparison({ serviceKeys: ['alpha-rsi', 'alloy'], question: '太短' }, { scope: 'evaluation-user:u1', key: 'k2' }), (error) => error.code === 'UNIFIED_EVAL_QUESTION_INVALID');
-});
-
-test('对比组读取只返回当前账号的运行', async () => {
-  const repository = createRepository();
+test('历史自动对比对团队可读，非法标识仍被拒绝', async () => {
+  const repository = createRepository(); const group = 'b'.repeat(64);
+  repository.rows.set('legacy-auto', { runId: 'legacy-auto', serviceKey: 'synthesis', comparisonGroupId: group, origin: 'automation', status: 'done' });
   const service = serviceWith(repository);
-  const created = await service.createComparison({ serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较两种材料在 900°C 下的强度并说明依据。' }, { scope: 'evaluation-user:u1', key: 'compare-1' });
-  await new Promise((resolve) => setImmediate(resolve));
-  const mine = await service.getComparison(created.groupId, 'u1');
-  assert.equal(mine.runs.length, 2);
-  await assert.rejects(service.getComparison(created.groupId, 'u2'), (error) => error.status === 404);
-  await assert.rejects(service.getComparison('not-a-group', 'u1'), (error) => error.code === 'COMPARISON_ID_INVALID');
+  assert.equal((await service.getComparison(group, 'reader')).runs[0].serviceKey, 'synthesis');
+  await assert.rejects(service.getComparison('invalid', 'reader'), { code: 'COMPARISON_ID_INVALID' });
 });
 
-test('其他组合的历史对比仍可读取', async () => {
-  const repository = createRepository(); const groupId = 'a'.repeat(64);
-  repository.rows.set('legacy-1', { runId: 'legacy-1', serviceKey: 'mission-material', comparisonGroupId: groupId, ownerScope: 'evaluation-user:u1', origin: 'manual', status: 'done' });
-  repository.rows.set('legacy-2', { runId: 'legacy-2', serviceKey: 'alpha-rsi', comparisonGroupId: groupId, ownerScope: 'evaluation-user:u1', origin: 'manual', status: 'done' });
-  assert.deepEqual((await serviceWith(repository).getComparison(groupId, 'u1')).runs.map(item => item.serviceKey), ['mission-material', 'alpha-rsi']);
-});
-
-test('同一对比幂等键绑定完整服务组合和题目', async () => {
-  const repository = createRepository();
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), 'alpha-rsi': evaluator(), literature: evaluator() }, repository, scoring: scoring([]) });
-  const options = { scope: 'evaluation-user:u1', key: 'whole-request' };
-  const original = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
-  await service.createComparison(original, options);
-  for (const changed of [ { ...original, serviceKeys: ['alpha-rsi', 'alloy'] }, { ...original, question: '请比较材料在低温下的性能并说明理由。' } ]) {
-    await assert.rejects(service.createComparison(changed, options), e => e.code === 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT');
+test('停用服务不能新建或自动恢复，旧对比排队记录也不会被恢复', async () => {
+  let recoveredKeys; let claims = 0;
+  const repository = {
+    async listRecoverableQueued(keys) { recoveredKeys = keys; return [{ runId: 'old', comparisonGroupId: 'a'.repeat(64) }]; },
+    async claimQueued() { claims++; },
+  };
+  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), synthesis: evaluator(), 'new-material': evaluator(), 'alpha-rsi': evaluator(), 'alpha-combined-rsi': evaluator() }, repository });
+  for (const serviceKey of ['alloy', 'synthesis', 'new-material']) {
+    await assert.rejects(service.start({ serviceKey, question: '请分析材料的组成和目标性能。' }), { code: 'UNIFIED_EVAL_SERVICE_INVALID' });
   }
-  assert.equal(repository.keys.size, 2);
-});
-
-test('部分创建后规则变化，重试仍使用首条运行的原始快照', async () => {
-  const repository = createRepository();
-  const create = repository.createIdempotent;
-  let fail = true;
-  repository.createIdempotent = async (...args) => { if (args[0].serviceKey === 'alpha-rsi' && fail) { fail = false; throw new Error('模拟中断'); } return create(...args); };
-  let version = 1;
-  const judge = scoring([]);
-  judge.snapshotRule = async () => ({ id: 'rule', version, name: '规则', hash: `hash-${version}` });
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), 'alpha-rsi': evaluator() }, repository, scoring: judge });
-  const input = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
-  const options = { scope: 'evaluation-user:u1', key: 'retry-rule' };
-  await assert.rejects(service.createComparison(input, options), /模拟中断/);
-  version = 2;
-  const result = await service.createComparison(input, options);
-  assert.equal((await repository.get(result.runs[0].runId)).run.ruleSnapshot.version, 1);
-  assert.equal((await repository.get(result.runs[1].runId)).run.ruleSnapshot.version, 1);
-});
-
-test('并发使用同一键但不同组合时只允许一个完整对比组', async () => {
-  const repository = createRepository();
-  let version = 0;
-  const judge = scoring([]);
-  judge.snapshotRule = async () => ({ id: 'rule', version: ++version, hash: `hash-${version}` });
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), 'alpha-rsi': evaluator(), literature: evaluator() }, repository, scoring: judge });
-  const options = { scope: 'evaluation-user:u1', key: 'concurrent' };
-  const question = '请比较材料在高温下的性能并说明理由。';
-  const attempts = await Promise.allSettled([
-    service.createComparison({ serviceKeys: ['alloy', 'alpha-rsi'], question }, options),
-    service.createComparison({ serviceKeys: ['alpha-rsi', 'alloy'], question }, options),
-  ]);
-  assert.equal(attempts.filter(item => item.status === 'fulfilled').length, 1);
-  assert.equal(attempts.find(item => item.status === 'rejected').reason.code, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT');
-  const group = attempts.find(item => item.status === 'fulfilled').value;
-  assert.equal(repository.keys.size, 2);
-  const left = await repository.get(group.runs[0].runId), right = await repository.get(group.runs[1].runId);
-  assert.equal(left.run.ruleSnapshot.hash, right.run.ruleSnapshot.hash);
-});
-
-test('并发重复请求共享首条运行的规则快照', async () => {
-  const repository = createRepository();
-  let version = 0;
-  const judge = scoring([]);
-  judge.snapshotRule = async () => ({ id: 'rule', version: ++version, hash: `hash-${version}` });
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), 'alpha-rsi': evaluator() }, repository, scoring: judge });
-  const input = { serviceKeys: ['alloy', 'alpha-rsi'], question: '请比较材料在高温下的性能并说明理由。' };
-  const options = { scope: 'evaluation-user:u1', key: 'concurrent-same' };
-  const results = await Promise.all(Array.from({ length: 8 }, () => service.createComparison(input, options)));
-  assert.equal(new Set(results.map(item => item.runs[0].runId)).size, 1);
-  assert.equal(new Set(results.map(item => item.runs[1].runId)).size, 1);
-  const left = await repository.get(results[0].runs[0].runId), right = await repository.get(results[0].runs[1].runId);
-  assert.equal(left.run.ruleSnapshot.hash, right.run.ruleSnapshot.hash);
+  assert.deepEqual(service.availableServices(), ['alpha-rsi', 'alpha-combined-rsi']);
+  await service.recoverQueued();
+  assert.deepEqual(recoveredKeys, ['alpha-rsi', 'alpha-combined-rsi']);
+  assert.equal(claims, 0);
 });

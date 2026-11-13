@@ -97,13 +97,15 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       finally { client.release(); }
     },
     async listRecoverableQueued(serviceKeys, limit = 300, addresses = {}) {
-      const result = await (await adminPool()).query(`SELECT * FROM public.unified_evaluation_runs
+      const current = await adminPool();
+      const result = await current.query(`SELECT * FROM public.unified_evaluation_runs
         WHERE status='queued' AND native_run_id IS NULL AND idempotency_key IS NOT NULL
           AND ((origin='manual' AND idempotency_scope LIKE 'evaluation-user:%')
             OR (origin='automation' AND idempotency_scope IN ('evaluation-automation:mission-material','evaluation-automation:batch')))
           AND run->'queuePayload'->>'version' = '1'
           AND service_key=ANY($1::text[])
           AND run->>'serviceAddress' IS NOT DISTINCT FROM ($3::jsonb->>service_key)
+          ${hasComparisonColumn ? 'AND comparison_group_id IS NULL' : ''}
         ORDER BY started_at, id LIMIT $2`, [serviceKeys, limit, JSON.stringify(addresses)]);
       return result.rows.map(row => ({ ...map(row), ownerScope: row.owner_user_id ? `evaluation-user:${row.owner_user_id}` : row.idempotency_scope }));
     },

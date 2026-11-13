@@ -106,12 +106,12 @@ test('异常成果路径不会挂起统一运行，并保留正文及释放执�
     createSocket: () => socketFor((_, socket) => { calls++; frame(socket, '[start]已有回答[end]'); }),
     fetchImpl: async () => Response.json({ artifacts: { presentation: { assets: [{ path: calls === 1 ? 'broken\ud800.glb' : 'valid.glb' }] } } }),
   });
-  const service = createUnifiedEvaluationService({ evaluators: { 'new-material': evaluator }, maxActive: 1 });
-  const first = await service.start({ serviceKey: 'new-material', question: '异常产物也需要结束并保留已有正文。' });
+  const service = createUnifiedEvaluationService({ evaluators: { 'alpha-combined-rsi': evaluator }, maxActive: 1 });
+  const first = await service.start({ serviceKey: 'alpha-combined-rsi', question: '异常产物也需要结束并保留已有正文。' });
   const result = await first.nativeCompletion;
   assert.equal(result.status, 'done'); assert.match(result.details.artifactError, /路径无效/);
   await new Promise(resolve => setImmediate(resolve));
   const saved = await service.get(first.runId); assert.equal(saved.status, 'done'); assert.equal(saved.answer, '[start]已有回答[end]');
-  const next = await service.start({ serviceKey: 'new-material', question: '后续运行仍能正常使用执行容量。' });
+  const next = await service.start({ serviceKey: 'alpha-combined-rsi', question: '后续运行仍能正常使用执行容量。' });
   const nextResult = await next.nativeCompletion; assert.equal(nextResult.status, 'done'); assert.equal(nextResult.details.artifacts.length, 1);
 });

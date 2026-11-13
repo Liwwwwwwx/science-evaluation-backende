@@ -11,11 +11,10 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const writable = runWriteEnabled && user.permissions.includes('team-services:write');
     return reply(res, 200, { items: [
       { key: 'mission-material', label: 'Mission_ScienceMaterial' },
-      { key: 'alpha-rsi', label: '材料 RSI' },
+      { key: 'alpha-rsi', label: '材料配比 RSI' },
+      { key: 'alpha-combined-rsi', label: '配比+制备 RSI' },
       { key: 'literature', label: '文献检索' },
       { key: 'literature-aircraft', label: '航空文献' },
-      { key: 'alloy', label: '合金材料' },
-      { key: 'synthesis', label: '合成制备' },
       { key: 'new-material', label: '新材料' },
     ].map(item => ({ ...item, enabled: writable && configured.includes(item.key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent' })) });
   }

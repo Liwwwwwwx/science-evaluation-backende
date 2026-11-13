@@ -32,7 +32,7 @@ function fixture() {
     starts.push({ key, question }); let resolve; const completion = new Promise(done => { resolve = done; }); completions.set(question, resolve);
     return { run: { id: `native-${question}` }, completion };
   }, async getRunQuality() { return { status: 'absent', quality: null, error: null }; } });
-  const evaluators = { 'mission-material': evaluator('mission-material'), alloy: evaluator('alloy') };
+  const evaluators = { 'mission-material': evaluator('mission-material'), 'alpha-combined-rsi': evaluator('alpha-combined-rsi') };
   return { rows, repository, evaluators, starts, completions, releasePause };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -45,7 +45,7 @@ test('Mission 异常断连时先暂停同批队列；持久化等待期间不派
   const one = await service.createBatchRun(input('mission-material', '第一条 Mission 问题'), { key: 'one' });
   await service.createBatchRun(input('mission-material', '第二条 Mission 问题'), { key: 'two' });
   const queued = await service.createBatchRun(input('mission-material', '第三条 Mission 问题'), { key: 'three' });
-  const other = await service.createBatchRun(input('alloy', '合金材料对比问题'), { key: 'alloy' });
+  const other = await service.createBatchRun(input('alpha-combined-rsi', '合金材料对比问题'), { key: 'alpha-combined-rsi' });
   assert.equal(f.starts.length, 3);
   f.completions.get('第一条 Mission 问题')({ status: 'error', error: 'Mission 连接中断（关闭码 1006）', details: { transport: { closeCode: 1006 } } });
   await until(() => f.rows.get(queued.runId).status === 'paused');

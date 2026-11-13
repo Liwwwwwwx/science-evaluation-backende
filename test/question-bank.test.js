@@ -54,7 +54,7 @@ test('按领域生成候选，不绑定服务且拒绝未知领域', async () =>
 test('按被测服务出题使用对应提示、支持选填主题并绑定目标服务', async () => {
   let prompt = ''; let calls = 0;
   const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { calls++; prompt = value; return { questions: ['请检索并归纳航空发动机高温合金相关研究文献。'] }; } } });
-  const labels = { 'mission-material': 'Mission 主服务', 'alpha-rsi': '材料 RSI', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
+  const labels = { 'mission-material': 'Mission 主服务', 'alpha-rsi': '材料配比 RSI', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
   for (const [serviceKey, label] of Object.entries(labels)) {
     const result = await generator.generate({ generationMode: 'service', serviceKey, count: 1 });
     assert.equal(result.items[0].serviceKey, serviceKey);
@@ -74,46 +74,48 @@ test('按被测服务出题使用对应提示、支持选填主题并绑定目�
   assert.equal(calls, previousCalls);
 });
 
-test('双服务随机题同时考虑服务侧重点，不绑定题库且按字数上限校验', async () => {
-  let prompt = ''; let options = null; let candidate = '请为航空铝合金支架提出 2–3 组 wt.% 配比候选，在屈服强度≥350 MPa、延伸率≥8% 的约束下比较工艺窗口并排序。';
-  const generator = createQuestionBankGenerationService({ llm: { model: 'test-model', isConfigured: () => true, callJson: async (value, callOptions) => { prompt = value; options = callOptions; return { questions: [candidate] }; } } });
-  for (const keys of [['alloy', 'alpha-rsi'], ['alpha-rsi', 'alloy']]) {
-    const result = await generator.generate({ generationMode: 'comparison', serviceKeys: keys, count: 1 });
-    assert.deepEqual(result, { generationMode: 'comparison', serviceKeys: keys, items: [{ question: candidate }], model: 'test-model' });
-    assert.match(prompt, /成分与性能预测/); assert.match(prompt, /成分、性能与工艺选择/); assert.match(prompt, /最多 500 字符/);
-    assert.match(prompt, /航空铝合金/); assert.match(prompt, /不要求预测耐蚀性/); assert.match(prompt, /不要使用氧化物陶瓷/); assert.match(prompt, /不要声称两个服务具有相同工具或保证/);
-    assert.match(prompt, /禁止以解释机理、原理或机制作为题目主体/); assert.match(prompt, /至少一个明确的数值约束/);
-    assert.match(prompt, /正例/); assert.match(prompt, /反例/);
-    assert.equal(options.temperature, 0.6);
-  }
-  for (const bad of [
-    { serviceKeys: ['alloy', 'alloy'], count: 1 }, { serviceKeys: ['alloy', 'bad'], count: 1 },
-    { serviceKeys: ['alloy'], count: 1 }, { serviceKeys: ['alloy', 'alpha-rsi'], count: 2 },
-    { serviceKeys: ['alloy', 'alpha-rsi'], count: 1, domainKey: 'materials-rd' }, { serviceKeys: ['literature', 'mission-material'], count: 1 },
-  ]) await assert.rejects(generator.generate({ generationMode: 'comparison', ...bad }), { code: 'QUESTION_GENERATION_INVALID' });
-  candidate = '过'.repeat(501);
-  await assert.rejects(generator.generate({ generationMode: 'comparison', serviceKeys: ['alloy', 'alpha-rsi'], count: 1 }), { code: 'QUESTION_GENERATION_EMPTY' });
+test('配比+制备按四个示例随机出题，指定其他主题时仍可使用模型', async () => {
+  const prompts = []; const exampleCalls = [];
+  const generator = createQuestionBankGenerationService({
+    caseExamples: async keys => { exampleCalls.push(keys); return ['旧配比服务参考案例']; },
+    llm: { isConfigured: () => true, callJson: async prompt => {
+      prompts.push(prompt);
+      return { questions: ['请以铸态预测 IN625（wt.%）：Ni 60–67、Cr 20–23、Mo 8–10、Nb 3–4，总和100%，优化900℃屈服强度，给出最多20组候选及 LPBF_heat_treatment 共享工艺参考。'] };
+    } },
+  });
+  const result = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', count: 4 });
+  assert.equal(result.items.length, 4);
+  assert.ok(result.items.every(item => item.serviceKey === 'alpha-combined-rsi'));
+  for (const material of ['IN625', 'CuCrZr', 'IN718', 'GRCop-84']) assert.ok(result.items.some(item => item.question.includes(material)));
+  assert.deepEqual(prompts, []);
+  assert.deepEqual(exampleCalls, []);
+  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: '高温材料与制备', count: 1 });
+  const prompt = prompts.at(-1);
+  for (const material of ['IN625', 'CuCrZr', 'IN718', 'GRCop-84']) assert.ok(prompt.includes(material));
+  for (const route of ['LPBF_heat_treatment', 'LPBF_solution_aging', 'LPBF_HIP_heat_treatment']) assert.ok(prompt.includes(route));
+  assert.match(prompt, /铸态是性能预测条件，LPBF 工艺路线是另行请求的共享参考/);
+  assert.match(prompt, /保证存在总和为100%的可行配比/);
+  assert.ok(!prompt.includes('旧配比服务参考案例'));
+
+  const named = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: 'IN625', count: 2 });
+  assert.ok(named.items.every(item => item.question.includes('IN625')));
+  assert.equal(prompts.length, 1);
+  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 });
+  assert.deepEqual(exampleCalls, [['alpha-rsi']]);
+  assert.ok(prompts.at(-1).includes('旧配比服务参考案例'));
+  assert.ok(!prompts.at(-1).includes('LPBF_solution_aging'));
 });
 
-test('对比随机题拒绝机理解释题并自动重试为配比优化题', async () => {
-  const prompts = []; let calls = 0;
-  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async prompt => {
-    prompts.push(prompt); calls++;
-    return { questions: [calls === 1 ? '请解释镍基高温合金中γ′相沉淀强化的机制。' : '某高温合金要求700℃抗拉强度≥800 MPa，请提出 2–3 组 wt.% 配比候选并排序。'] };
-  } } });
-  const result = await generator.generate({ generationMode: 'comparison', serviceKeys: ['alloy', 'alpha-rsi'], count: 1 });
-  assert.equal(calls, 2);
-  assert.match(prompts[1], /不符合要求/);
-  assert.match(prompts[1], /不能以解释机理、原理或机制为主题/);
-  assert.match(result.items[0].question, /配比/);
-});
-
-test('对比随机题连续生成机理题时明确失败，不返回跑偏题目', async () => {
+test('对比出题已停用且不调用模型', async () => {
   let calls = 0;
-  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async () => { calls++; return { questions: ['请解释镍基高温合金中γ′相沉淀强化的机制。'] }; } } });
-  await assert.rejects(generator.generate({ generationMode: 'comparison', serviceKeys: ['alloy', 'alpha-rsi'], count: 1 }), { code: 'QUESTION_GENERATION_EMPTY' });
-  assert.equal(calls, 2);
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async () => { calls++; return {}; } } });
+  await assert.rejects(generator.generate({ generationMode: 'comparison', serviceKeys: ['alloy', 'alpha-rsi'], count: 1 }), { code: 'COMPARISON_DISABLED' });
+  assert.equal(calls, 0);
 });
+
+
+
+
 
 test('批次优化出题只保留带具体数值约束并要求候选比较的题目', async () => {
   let prompt = '';
@@ -159,20 +161,16 @@ test('测试集题标记适用服务后可被两个材料服务使用', async ()
   await assert.rejects(() => limited({ ...base, serviceKey: 'alpha-rsi' }), e => e.code === 'QUESTION_NOT_RUNNABLE');
 });
 
-test('合金与材料 RSI 出题会参考测试集案例', async () => {
-  let prompt = '';
+test('两个 RSI 独立出题，不共用题库参考案例', async () => {
+  let prompt = ''; const requested = [];
   const generator = createQuestionBankGenerationService({
-    caseExamples: async keys => { assert.deepEqual(keys, ['alloy', 'alpha-rsi']); return ['案例：某高温合金要求700℃、抗拉强度≥800 MPa，请给出 2–3 组 wt.% 配比候选并排序。']; },
-    llm: { isConfigured: () => true, callJson: async value => { prompt = value; return { questions: ['某高温合金要求700℃、抗拉强度≥800 MPa，请给出 2–3 组 wt.% 配比候选并排序。'] }; } },
+    caseExamples: async keys => { requested.push(keys); return ['案例：某高温合金要求700℃、抗拉强度≥800 MPa，请给出配比候选并排序。']; },
+    llm: { isConfigured: () => true, callJson: async value => { prompt = value; return { questions: ['某高温合金要求700℃、抗拉强度≥800 MPa，请给出配比候选并排序。'] }; } },
   });
-  await generator.generate({ generationMode: 'comparison', serviceKeys: ['alloy', 'alpha-rsi'], count: 1 });
+  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 });
   assert.match(prompt, /参考案例/); assert.match(prompt, /不要照抄或复述原题/);
-  const serviceGenerator = createQuestionBankGenerationService({
-    caseExamples: async keys => { assert.deepEqual(keys, ['alpha-rsi']); return ['案例：某高温合金要求700℃、抗拉强度≥800 MPa，请给出 2–3 组 wt.% 配比候选并排序。']; },
-    llm: { isConfigured: () => true, callJson: async value => { prompt = value; return { questions: ['某高温合金要求700℃、抗拉强度≥800 MPa，请给出 2–3 组 wt.% 配比候选并排序。'] }; } },
-  });
-  await serviceGenerator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 });
-  assert.match(prompt, /参考案例/);
+  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', count: 1 });
+  assert.deepEqual(requested, [['alpha-rsi']]);
 });
 
 test('服务题过滤无效、重复及超长候选，模型无有效结果时返回错误', async () => {  let candidates = ['请说明适合该材料的制备条件和验证方法。', '请说明适合该材料的制备条件和验证方法。', '太短', '过'.repeat(201)];
@@ -261,4 +259,18 @@ test('随机题保存校验并沿用旧系统身份，按批次拒绝重复', as
   assert.equal(result.items[0].datasetVersion, 'gen-v1');
   await assert.rejects(() => service.saveRandom({ items: [item, item] }), e => e.code === 'RANDOM_QUESTION_DUPLICATE');
   await assert.rejects(() => service.saveRandom({ items: [] }), e => e.code === 'RANDOM_QUESTION_ITEMS_INVALID');
+});
+
+test('材料成分配比出题拒绝纯工艺题，只保留带 wt.% 的成分题', async () => {
+  let prompt = '';
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { prompt = value; return { questions: [
+    '请优化镍基高温合金的固溶与时效工艺，要求晶粒≤50μm，比较三组温度/时间方案并排序。',
+    '设计航空发动机粉末高温合金盘件成分，要求室温屈服≥1000MPa、密度≤8.3g/cm³，给出2–3组Co、Cr、W、Al、Ti、Ta配比（合计100wt.%）并排序。',
+  ] }; } } });
+  const result = await generator.generate({ serviceKey: 'literature-aircraft', focus: 'composition', topic: '航空高温合金成分配比', count: 2 });
+  assert.equal(result.items.length, 1);
+  assert.match(result.items[0].question, /成分/);
+  assert.match(prompt, /材料成分配比设计任务/);
+  assert.match(prompt, /不要以工艺优化/);
+  assert.match(prompt, /合计 100%/);
 });
