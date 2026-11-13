@@ -241,16 +241,17 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
       try {
         if (!authService || !questionBank) return fail(res, 503, 'QUESTION_BANK_UNAVAILABLE', '题库服务尚未配置');
         const action = url.pathname.slice('/api/question-bank/'.length);
-        const methods = { access: 'GET', questions: 'GET', question: 'GET', import: 'POST', 'random-save': 'POST', generate: 'POST', domain: 'PUT', update: 'PUT', delete: 'DELETE' };
+        const methods = { access: 'GET', questions: 'GET', question: 'GET', 'test-sets': 'GET', import: 'POST', 'random-save': 'POST', generate: 'POST', domain: 'PUT', update: 'PUT', delete: 'DELETE' };
         if (!Object.hasOwn(methods, action) || req.method !== methods[action]) return fail(res, 404, 'NOT_FOUND', 'Not found');
         const user = await authService.authenticate(session(req));
         const write = methods[action] !== 'GET';
-        if (['questions', 'question'].includes(action) && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
+        if (['questions', 'question', 'test-sets'].includes(action) && !user.permissions.includes('team-services:read')) return fail(res, 403, 'FORBIDDEN', '没有题库查看权限');
         if (write && !user.permissions.includes('team-services:write')) return fail(res, 403, 'FORBIDDEN', '没有题库操作权限');
         if (write && (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site')) return fail(res, 403, 'INVALID_ORIGIN', '请求来源无效');
         if (write && action !== 'generate' && !questionBankWriteEnabled) return fail(res, 503, 'QUESTION_BANK_WRITE_DISABLED', '题库写入尚未启用');
         if (action === 'access') return reply(res, 200, { access: { permissions: user.permissions } });
         if (action === 'questions') return reply(res, 200, await questionBank.list(url.searchParams));
+        if (action === 'test-sets') return reply(res, 200, await questionBank.testSets());
         if (action === 'question') return reply(res, 200, { question: await questionBank.get(url.searchParams.get('id'), url.searchParams.get('datasetVersion')) });
         const input = await readBody(req, 256 * 1024);
         if (action === 'generate') return reply(res, 200, await generator.generate(input));

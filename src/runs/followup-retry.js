@@ -7,7 +7,10 @@ function waitingDetails(result) {
   const title = [value.user_conclusion, interpretation.confirmation_message, value.message].find(item => typeof item === 'string' && item.trim())?.trim().slice(0, 500) || '';
   const candidates = [interpretation.questions_to_confirm, value.questions_to_confirm, interpretation.missing_required_inputs].flatMap(item => Array.isArray(item) ? item : []);
   const questions = [...new Set(candidates.map(item => typeof item === 'string' ? item : item && typeof item === 'object' ? item.question || item.label : '').filter(item => typeof item === 'string' && item.trim()).map(item => item.trim().slice(0, 500)))].slice(0, 20);
-  return { title, questions };
+  const inputError = [interpretation.input_error, value.input_error]
+    .map(item => typeof item === 'string' ? item : item && typeof item === 'object' ? item.message : '')
+    .find(item => typeof item === 'string' && item.trim())?.trim().slice(0, 1000) || '';
+  return { title, questions, inputError };
 }
 
 function abortableSupplement(generate, input, signal) {
@@ -32,10 +35,17 @@ function withWaitingRetry(single, { generateSupplement = createAlphaRsiSupplemen
         const initial = await first.completion;
         const result = initial.details?.snapshot?.data?.status ? initial.details.snapshot.data : initial.details?.result;
         if (cancelled || result?.status !== 'waiting_for_input' || (initial.status !== 'done' && initial.error !== '服务返回等待补充信息，但未提供可回复的交互请求，本轮未完成。')) return initial;
-        const { title, questions } = waitingDetails(result);
+        const { title, questions, inputError } = waitingDetails(result);
         const retry = { state: 'generating', source: 'automatic', title, questions, previousResult: result, previousReview: initial.details.review, previousAnswer: firstText.slice(0, 64000), previousAnswerTruncated: firstText.length > 64000, message: null, model: null, taskId: null };
         const publish = details => { try { onState({ ...details, autoRetry: structuredClone(retry) }); } catch {} };
         publish(initial.details);
+        // 服务未发起追问、而是返回失败/输入校验错误时，视为不支持修改问题后继续回答；
+        // 不生成补充、不重发，直接保留服务错误。
+        const errorLike = !questions.length && /无法回答|无法完成|执行失败|输入校验|invalid_input|must use/i.test(title);
+        if (inputError || errorLike) {
+          retry.state = 'unsupported'; retry.title = inputError || title; publish(initial.details);
+          return { ...initial, status: 'error', error: `该服务不支持修改问题后继续回答：${retry.title}`, details: { ...initial.details, autoRetry: retry } };
+        }
         if (!title && !questions.length) {
           retry.state = 'unavailable'; publish(initial.details);
           return { ...initial, status:'error', error: '服务要求补充，但未说明需要什么信息，无法自动重新发起。', details: { ...initial.details, autoRetry: retry } };

@@ -73,3 +73,19 @@ test('大量短行保持原文与证据偏移，不让片段数量随行数膨�
   const last = parts.at(-1);
   assert.match(evidence([last.id], input).text, /末尾证据/);
 });
+
+test('超大服务快照只保留关键字段摘要，不把完整输入误判为截断', () => {
+  const job = { answer: '正文'.repeat(1000), run: { status: 'done', details: { snapshot: { ok: true, data: {
+    status: 'done', user_conclusion: '最终结论', requirement_assessment: { ok: true },
+    all_candidates: Array.from({ length: 20 }, (_, index) => ({ id: `c${index}`, blob: 'x'.repeat(50000) })),
+    review_delivery: { blob: 'y'.repeat(300000) },
+  } } } } };
+  const input = packInput(job);
+  assert.equal(input.truncated, false);
+  assert.equal(input.snapshotSummarized, true);
+  assert.ok(input.structured.length < 600000);
+  const parsed = JSON.parse(input.structured);
+  assert.match(JSON.stringify(parsed.snapshot), /最终结论/);
+  assert.ok(parsed.snapshot.data.all_candidates._summary);
+  assert.ok(parsed.snapshot.data._summarizedFields.includes('review_delivery'));
+});

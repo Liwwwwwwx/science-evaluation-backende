@@ -58,3 +58,46 @@ test('包装器保留人工答复并转发到当前活动的重试任务', async
   await started.completion;
   assert.deepEqual(calls, [[{ requestId: 'first' }], [{ requestId: 'second' }]]);
 });
+
+test('服务输入校验失败时不生成自动补充或重发', async () => {
+  let starts = 0; let supplements = 0;
+  const single = { startQuestionRun: async () => {
+    starts += 1;
+    return { run: { id: 'task-input-error' }, completion: Promise.resolve({ status: 'done', details: { result: {
+      status: 'waiting_for_input', user_conclusion: '当前任务无法回答。',
+      requirement_interpretation: { input_error: { code: 'invalid_input', message: 'heat_treatment must use explicit solution/precipitation stage fields; otherwise supply native process_history' }, questions_to_confirm: [] },
+    } } }) };
+  } };
+  const wrapped = withWaitingRetry(single, { generateSupplement: async () => { supplements += 1; return { message: '假设测试温度为室温。' }; } });
+  const started = await wrapped.startQuestionRun({ question: '测试题面' });
+  const result = await started.completion;
+  assert.equal(starts, 1);
+  assert.equal(supplements, 0);
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /该服务不支持修改问题后继续回答/);
+  assert.match(result.error, /heat_treatment/);
+  assert.equal(result.details.autoRetry.state, 'unsupported');
+  assert.equal(result.details.autoRetry.message, null);
+});
+
+test('等待结论明确为失败且无具体追问时不生成自动补充', async () => {
+  let starts = 0; let supplements = 0;
+  const single = { startQuestionRun: async () => {
+    starts += 1;
+    return { run: { id: 'task-service-failed' }, completion: Promise.resolve({ status: 'done', details: { result: {
+      status: 'waiting_for_input',
+      user_conclusion: '当前任务无法回答。\n\nheat_treatment must use explicit solution/precipitation stage fields; otherwise supply native process_history',
+      sampling: { generated: 0, feasible: 0 },
+    } } }) };
+  } };
+  const wrapped = withWaitingRetry(single, { generateSupplement: async () => { supplements += 1; return { message: '假设测试温度为室温。' }; } });
+  const started = await wrapped.startQuestionRun({ question: '测试题面' });
+  const result = await started.completion;
+  assert.equal(starts, 1);
+  assert.equal(supplements, 0);
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /该服务不支持修改问题后继续回答/);
+  assert.match(result.error, /heat_treatment/);
+  assert.equal(result.details.autoRetry.state, 'unsupported');
+  assert.equal(result.details.autoRetry.message, null);
+});

@@ -8,7 +8,7 @@ const SERVICE_LABELS = {
   alloy: '合金材料',
   synthesis: '合成制备',
   'new-material': '新材料',
-  'alpha-rsi': 'ALPHA 材料 RSI（1110）',
+  'alpha-rsi': '材料 RSI',
 };
 const JUDGES = { deepSeek: 'deepSeekScore', qwen: 'qwenScore' };
 const THRESHOLD_POINTS = 5;

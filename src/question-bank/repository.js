@@ -1,4 +1,5 @@
 const { fingerprintOf } = require('./identity');
+const { isOptimizationQuestion } = require('./optimization');
 
 function parseJson(value) {
   if (value == null) return null;
@@ -26,6 +27,8 @@ function mapQuestionRow(row) {
     criteriaVersion: row.criteria_version || null,
     datasetVersion: row.dataset_version,
     status: row.status,
+    testSet: row.test_set || null,
+    applicableServices: Array.isArray(row.applicable_services) ? row.applicable_services : null,
     retiredReason: row.retired_reason || null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
   };
@@ -351,8 +354,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
           throw duplicate;
         }
         const result = await client.query(
-          `INSERT INTO eval_questions (id, layer, service_key, source_type, question, fingerprint, criteria, criteria_version, dataset_version, status, domain_key)
-           VALUES ($1, 'base', $2, 'fixed', $3, $4, $5::jsonb, $6, $7, 'active', $8)
+          `INSERT INTO eval_questions (id, layer, service_key, source_type, question, fingerprint, criteria, criteria_version, dataset_version, status, domain_key, test_set, applicable_services)
+           VALUES ($1, 'base', $2, 'fixed', $3, $4, $5::jsonb, $6, $7, 'active', $8, $9, $10::text[])
            ON CONFLICT (id, dataset_version) DO NOTHING
            RETURNING *`,
           [
@@ -364,6 +367,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
             input.criteriaVersion || null,
             String(input.datasetVersion),
             input.domainKey || null,
+            input.testSet || null,
+            Array.isArray(input.applicableServices) && input.applicableServices.length ? input.applicableServices : null,
           ],
         );
         if (!result.rows[0]) {
@@ -479,8 +484,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
       const insertedResult = await client.query(
         `INSERT INTO eval_questions (
            id, layer, service_key, source_type, question, fingerprint,
-           criteria, criteria_version, dataset_version, status, domain_key
-         ) VALUES ($1, 'base', $2, $9, $3, $4, $5::jsonb, $6, $7, 'active', $8)
+           criteria, criteria_version, dataset_version, status, domain_key, test_set, applicable_services
+         ) VALUES ($1, 'base', $2, $9, $3, $4, $5::jsonb, $6, $7, 'active', $8, $10, $11::text[])
          RETURNING *`,
         [
           String(id),
@@ -492,6 +497,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
           newDatasetVersion,
           current.domain_key || null,
           sourceType,
+          current.test_set || null,
+          Array.isArray(current.applicable_services) ? current.applicable_services : null,
         ],
       );
       if (!insertedResult.rows[0]) {
@@ -604,8 +611,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
       const insertedResult = await client.query(
         `INSERT INTO eval_questions (
            id, layer, service_key, source_type, question, fingerprint,
-           criteria, criteria_version, dataset_version, status, domain_key
-         ) VALUES ($1, 'base', $2, 'fixed', $3, $4, $5::jsonb, $6, $7, 'active', $8)
+           criteria, criteria_version, dataset_version, status, domain_key, test_set, applicable_services
+         ) VALUES ($1, 'base', $2, 'fixed', $3, $4, $5::jsonb, $6, $7, 'active', $8, $9, $10::text[])
          RETURNING *`,
         [
           questionId,
@@ -616,6 +623,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
           current.criteria_version || null,
           newDatasetVersion,
           current.domain_key || null,
+          current.test_set || null,
+          Array.isArray(current.applicable_services) ? current.applicable_services : null,
         ],
       );
       if (!insertedResult.rows[0]) {
@@ -1022,18 +1031,24 @@ function createEvalQuestionBankRepository({ pool } = {}) {
   }
 
   // 分页检索（管理端题库页）：筛选 + 题面搜索 + 总数。
-  async function listQuestionsPaged({ serviceKey, domainKey, runnableFor, comparisonWith, maxLength, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
+  async function listQuestionsPaged({ serviceKey, domainKey, testSet, runnableFor, comparisonWith, maxLength, layer, sourceType, status = 'active', search, limit = 20, offset = 0 } = {}) {
     const where = ['1 = 1'];
     const params = [];
     if (status) { params.push(status); where.push(`status = $${params.length}`); }
     if (serviceKey) { params.push(serviceKey); where.push(`service_key = $${params.length}`); }
     if (domainKey === 'unclassified') where.push('domain_key IS NULL');
     else if (domainKey) { params.push(domainKey); where.push(`domain_key = $${params.length}`); }
+    if (testSet) { params.push(testSet); where.push(`test_set = $${params.length}`); }
     if (runnableFor) {
-      params.push(runnableFor); where.push(`(service_key IS NULL OR service_key = $${params.length})`);
+      params.push(runnableFor); const index = params.length;
+      // 服务绑定题默认只给本服务；带 applicable_services 的测试集题可同时给多个服务使用。
+      where.push(`(service_key = $${index} OR applicable_services @> ARRAY[$${index}]::text[] OR (service_key IS NULL AND (applicable_services IS NULL OR cardinality(applicable_services) = 0)))`);
       where.push("layer = 'base' AND source_type IN ('fixed', 'random') AND (criteria IS NULL OR criteria = 'null'::jsonb)");
     }
-    if (comparisonWith) { params.push(comparisonWith); where.push(`(service_key IS NULL OR service_key = $${params.length})`); }
+    if (comparisonWith) {
+      params.push(comparisonWith); const index = params.length;
+      where.push(`(service_key = $${index} OR applicable_services @> ARRAY[$${index}]::text[] OR (service_key IS NULL AND (applicable_services IS NULL OR cardinality(applicable_services) = 0)))`);
+    }
     if (maxLength != null) { params.push(maxLength); where.push(`char_length(btrim(question)) <= $${params.length}`); }
     if (layer) { params.push(layer); where.push(`layer = $${params.length}`); }
     if (sourceType) { params.push(sourceType); where.push(`source_type = $${params.length}`); }
@@ -1087,6 +1102,45 @@ function createEvalQuestionBankRepository({ pool } = {}) {
     }
   }
 
+  // 题库页与选题器的测试集筛选项；只统计固定题。
+  async function listTestSets() {
+    try {
+      const result = await getPool().query(
+        `SELECT test_set AS name, count(*)::int AS count
+         FROM eval_questions
+         WHERE status = 'active' AND source_type = 'fixed' AND test_set IS NOT NULL AND btrim(test_set) <> ''
+         GROUP BY test_set
+         ORDER BY test_set`,
+      );
+      return result.rows.map(row => ({ name: row.name, count: Number(row.count) }));
+    } catch (error) {
+      throw normalizeFixedCaseStorageError(error);
+    }
+  }
+
+  // 出题参考：从指定测试集随机取少量题面；对比时要求案例同时适用于两个服务。
+  async function listTestSetExamples({ testSet, serviceKeys, limit = 3 } = {}) {
+    const keys = Array.isArray(serviceKeys) ? [...new Set(serviceKeys.filter(key => typeof key === 'string' && key))] : [];
+    if (!testSet || !keys.length) return [];
+    const condition = keys.length > 1
+      ? 'applicable_services @> $2::text[]'
+      : '(service_key = ANY($2::text[]) OR applicable_services @> $2::text[])';
+    try {
+      const result = await getPool().query(
+        `SELECT question FROM eval_questions
+         WHERE status = 'active' AND source_type = 'fixed' AND test_set = $1 AND ${condition}
+         ORDER BY random()
+         LIMIT 20`,
+        [testSet, keys],
+      );
+      return result.rows.map(row => row.question)
+        .filter(question => isOptimizationQuestion(question))
+        .slice(0, Math.min(Math.max(Number(limit) || 3, 1), 5));
+    } catch {
+      return [];
+    }
+  }
+
   // 题目详情：不指定版本时取该 ID 的最新数据集版本。
   async function getQuestionLatest(id) {
     try {
@@ -1129,6 +1183,8 @@ function createEvalQuestionBankRepository({ pool } = {}) {
     getQuestionLatest,
     listQuestions,
     listQuestionsPaged,
+    listTestSets,
+    listTestSetExamples,
     setQuestionDomain,
     findActiveByFingerprint,
     retireQuestion,

@@ -1,4 +1,5 @@
 const { randomUUID, createHash } = require('node:crypto');
+const WebSocket = require('ws');
 const { publicServiceAddress } = require('./service-address');
 const { createProcessRecorder } = require('../scoring/process-review');
 const { createConversationEvents } = require('./conversation-events');
@@ -16,9 +17,14 @@ const MAX_CHECKPOINTS = 200;
 // 服务达到并发上限时会把提示当作最终正文返回；不能把它当成可评分回答。
 const SERVICE_LIMIT_RE = /active session limit|Try again when another session finishes/i;
 
+// ws 等待接收缓冲处理完成后再结束，避免原生客户端漏掉末尾帧和正常关闭帧。
+function createMissionSocket(url) {
+  return new WebSocket(url, { maxPayload: MAX_MESSAGE_BYTES, perMessageDeflate: true });
+}
+
 // Mission 的确认卡可能携带下游 taskid；只能在收到该卡的连接内答复。
 // 默认 60 分钟，可由 EVALUATION_MISSION_TIMEOUT_MS 覆盖；服务端启动时校验并注入。
-function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket = target => new WebSocket(target), generateSupplement = createAlphaRsiSupplement(), generateAnswers } = {}) {
+function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket = createMissionSocket, generateSupplement = createAlphaRsiSupplement(), generateAnswers } = {}) {
   const target = new URL(url);
   if (!['ws:', 'wss:'].includes(target.protocol)) throw new Error('Mission 主服务必须配置 WebSocket 地址');
   return {
@@ -36,7 +42,7 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
       const seen = new Set();
       const automaticReviews = new Map(); const followupAbort = new AbortController();
       const openSummaries = new Set(); const completedSummaries = new Set();
-      let socket; let timer; let errorTimer; let settled = false; let text = ''; let messageChain = Promise.resolve(); let frameCount = 0; let stateBytes = 0; let emitTimer; let received = false;
+      let socket; let timer; let errorTimer; let settled = false; let text = ''; let messageChain = Promise.resolve(); let frameCount = 0; let stateBytes = 0; let emitTimer; let received = false; let messageTooLarge = false;
       let resolveCompletion;
       const completion = new Promise(resolve => { resolveCompletion = resolve; });
       const emit = () => { clearTimeout(emitTimer); emitTimer = null; details.truncated ||= conversation.data.truncated; onState(structuredClone(details)); };
@@ -214,13 +220,22 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
           transport.closeCode = Number.isInteger(event?.code) ? event.code : null;
           transport.wasClean = typeof event?.wasClean === 'boolean' ? event.wasClean : null;
           void messageChain.then(() => {
+            if (messageTooLarge) return finish('Mission 数据帧超过接收上限（8 MiB）');
             const incomplete = openSummaries.size > 0;
             const visible = text.replace(/\[start\]|\[end\]/g, '').trim();
             const error = !received ? 'Mission 连接未返回业务输出' : ![1000, 1001].includes(transport.closeCode) ? `Mission 连接中断（关闭码 ${transport.closeCode ?? '未知'}）${visible ? `：${visible.slice(-160)}` : ''}` : incomplete ? 'Mission 最终总结未收到结束帧' : null;
             finish(error);
           });
         });
-        socket.addEventListener('error', () => { if (!settled) { transport.socketError = true; errorTimer = setTimeout(() => { void messageChain.finally(() => finish('Mission WebSocket 连接错误')); }, 50); } });
+        socket.addEventListener('error', event => {
+          if (settled) return;
+          if (event?.error?.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
+            messageTooLarge = true; transport.maxFrameBytes = MAX_MESSAGE_BYTES;
+            void messageChain.finally(() => finish('Mission 数据帧超过接收上限（8 MiB）'));
+            return;
+          }
+          transport.socketError = true; errorTimer = setTimeout(() => { void messageChain.finally(() => finish('Mission WebSocket 连接错误')); }, 50);
+        });
         timer = setTimeout(() => finish('Mission 执行超时'), timeoutMs);
       } catch { finish('Mission WebSocket 连接失败'); }
       return { run: { id: taskid }, completion, cancel: () => finish('本次运行已结束') };
@@ -228,4 +243,4 @@ function createMissionEvaluator({ url, timeoutMs = 60 * 60 * 1000, createSocket 
     async getRunQuality() { return { status: 'absent', quality: null, error: null }; },
   };
 }
-module.exports = { createMissionEvaluator };
+module.exports = { createMissionEvaluator, createMissionSocket };

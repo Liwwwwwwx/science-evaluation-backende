@@ -12,6 +12,7 @@ const KEYS = ['deepSeekScore', 'qwenScore'];
 // 两位评委共用一份有界输入；保留空间给结构化成果，避免长正文占满整轮预算。
 const MAX_ANSWER_CHARS = 300000;
 const MAX_INPUT_CHARS = 600000;
+const MAX_SNAPSHOT_CHARS = 120000;
 const dimensions = { readability: { label: '可读性', weight: 40 }, professionalism: { label: '专业性', weight: 40 }, visualAids: { label: '图文辅助', weight: 20 } };
 const short = (v, max = 1200) => typeof v === 'string' ? v.slice(0, max) : '';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -34,6 +35,38 @@ function prefix(value, limit) {
   if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
   return value.slice(0, end);
 }
+const jsonSize = value => { try { return JSON.stringify(value)?.length || 0; } catch { return 0; } };
+// 服务快照可能包含全部候选和评审交付明细（可达 1MB+），评分只需要关键字段。
+// 超限时保留小字段，并把大字段折叠为有限摘要，避免整段 JSON 被截断成不可读内容。
+function compactSnapshot(value, budget = MAX_SNAPSHOT_CHARS) {
+  if (jsonSize(value) <= budget) return { value, summarized: false };
+  if (Array.isArray(value)) {
+    const kept = []; let used = 2;
+    for (const item of value) {
+      const size = jsonSize(item);
+      if (kept.length >= 2 || used + size > budget) break;
+      kept.push(item); used += size;
+    }
+    return { value: { _summary: `共 ${value.length} 项，仅保留前 ${kept.length} 项`, _items: kept }, summarized: true };
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value); const out = {}; const summarized = []; let used = 2;
+    for (const [key, item] of entries) {
+      const size = jsonSize(item);
+      if (size <= 8000 && used + size <= budget) { out[key] = item; used += size; }
+    }
+    for (const [key, item] of entries) {
+      if (Object.hasOwn(out, key)) continue;
+      const remaining = budget - used;
+      if (remaining <= 300) { summarized.push(key); continue; }
+      const tiny = compactSnapshot(item, Math.min(remaining - 100, budget));
+      out[key] = tiny.value; used += jsonSize(tiny.value); summarized.push(key);
+    }
+    if (summarized.length) out._summarizedFields = summarized;
+    return { value: out, summarized: summarized.length > 0 };
+  }
+  return { value: prefix(String(value), budget), summarized: true };
+}
 function packInput(job) {
   const details = job.run?.details || {};
   const displayEvents = Array.isArray(details.displayEvents) ? details.displayEvents : [];
@@ -51,7 +84,8 @@ function packInput(job) {
   const resultJson = details.result == null ? null : JSON.stringify(details.result);
   const protocolFrames = (Array.isArray(details.protocolFrames) ? details.protocolFrames : []).filter(frame => !controlTypes.has(frame.type) && !(frame.type === 'result' && resultJson !== null && JSON.stringify(frame.data) === resultJson));
   const decisions = (Array.isArray(details.review) ? details.review : []).map(item => ({ requestType: item.request?.type, action: item.action, source: item.source, delivery: item.delivery, summary: item.summary, reply: item.reply }));
-  const structuredRaw = JSON.stringify(redact({ result: details.result, protocolFrames, decisions, snapshot: details.snapshot, generatedFiles: details.generatedFiles, artifacts: details.artifacts, ...(inlineViewers.length ? { inlineViewers } : {}), outputStates: displayEvents.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(({ type, event_id, phase, status }) => ({ type, event_id, phase, status })), displayEvents: displayEvents.filter(event => !['display.team_output', 'display.final_answer', 'display.process.step'].includes(event.type)) }));
+  const snapshot = compactSnapshot(details.snapshot);
+  const structuredRaw = JSON.stringify(redact({ result: details.result, protocolFrames, decisions, snapshot: snapshot.value, generatedFiles: details.generatedFiles, artifacts: details.artifacts, ...(inlineViewers.length ? { inlineViewers } : {}), outputStates: displayEvents.filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(({ type, event_id, phase, status }) => ({ type, event_id, phase, status })), displayEvents: displayEvents.filter(event => !['display.team_output', 'display.final_answer', 'display.process.step'].includes(event.type)) }));
   const structured = prefix(structuredRaw, MAX_INPUT_CHARS - answer.length);
   const process = redact(details.process || { events: [],messages: [] });
   const messages = []; let processChars = 0; let processTruncated = process.truncated === true;
@@ -64,7 +98,7 @@ function packInput(job) {
   }
   const supplements = [details.autoRetry?.message, ...(Array.isArray(details.review) ? details.review : []).filter(item => item?.source === 'automatic' && item?.action === 'apply' && item?.delivery === 'sent').flatMap(item => (Array.isArray(item.answers) ? item.answers : []).map(answer => answer?.answer))].filter(item => typeof item === 'string' && item.trim());
   const automaticSupplement = supplements.length ? { source: 'automatic', message: redact(supplements.join('\n')).slice(0, 4000) } : null;
-  return { answer, structured, automaticSupplement, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null,
+  return { answer, structured, automaticSupplement, process: { messages, truncated: processTruncated, recorded: Boolean(details.process) }, elapsedMs: typeof job.run?.elapsedMs === 'number' && Number.isFinite(job.run.elapsedMs) ? job.run.elapsedMs : null, snapshotSummarized: snapshot.summarized,
     truncated: job.partialExecution === true || job.answerTruncated === true || answer.length < redactedAnswer.length || structured.length < structuredRaw.length || details.truncated === true, imagesInspected: false };
 }
 function normalizeRubric(value, question, model) {
@@ -127,7 +161,7 @@ function normalizeJudge(value, rubric, input, markdown, policy = null) {
   const uncertain = input.truncated || status === 'unclear' || evaluationIssues.length > 0 || requirements.some(r=>r.critical && r.status === 'unclear') || (policy?.config.markdownGate && markdown.status === 'not_evaluable');
   const qualification = policy ? { status: input.truncated ? 'unclear' : confirmedFailure ? 'not_qualified' : uncertain ? 'unclear' : qualified ? 'qualified' : 'unclear',passScore:policy.config.passScore,markdownGate:policy.config.markdownGate } : undefined;
   const imagesSent = input.imageCoverage?.sent || 0;
-  return { version: VERSION, evidenceVersion:'source-v2', evaluationIssues, total: roundedTotal, dimensions: normalized, comment: short(value.comment), highlights: strings(value.highlights), gaps: strings(value.gaps), suggestions: strings(value.suggestions), taskCompletion: { status, qualified, requirements }, ...delivery, ...(qualification ? {qualification} : {}), scientificValidation: 'not_verified', limitations: ['模型判断未做独立科学核验。', imagesSent ? '已向本评委提供部分或全部已发现图片；视觉判断未做独立核验，其他附件未检查。' : '图片与附件仅核对已保存的描述和元信息，未检查图像内容及文件执行结果。', ...(input.imageCoverage?.external ? [`正文另引用了 ${input.imageCoverage.external} 张外部图片，未纳入评分；这些图片的内容未检查。`] : []), ...(policy ? ['过程体验仅覆盖实际保存的文字，未保存的用户界面与过程不能判断。'] : []), ...(evaluationIssues.length ? ['评委证据或要求条目未通过校验，本轮需要复核；不把引用错误视为回答内容缺失。'] : []), ...(input.truncated ? ['评分输入不完整，仅供参考；无法确认完整任务合格。'] : [])], source: { truncated: input.truncated, answerChars: input.answer.length, structuredChars: input.structured.length, imagesInspected: imagesSent > 0, ...(input.imageCoverage ? { imageCoverage: input.imageCoverage } : {}) }, markdownStatus: markdown.status };
+  return { version: VERSION, evidenceVersion:'source-v2', evaluationIssues, total: roundedTotal, dimensions: normalized, comment: short(value.comment), highlights: strings(value.highlights), gaps: strings(value.gaps), suggestions: strings(value.suggestions), taskCompletion: { status, qualified, requirements }, ...delivery, ...(qualification ? {qualification} : {}), scientificValidation: 'not_verified', limitations: ['模型判断未做独立科学核验。', imagesSent ? '已向本评委提供部分或全部已发现图片；视觉判断未做独立核验，其他附件未检查。' : '图片与附件仅核对已保存的描述和元信息，未检查图像内容及文件执行结果。', ...(input.imageCoverage?.external ? [`正文另引用了 ${input.imageCoverage.external} 张外部图片，未纳入评分；这些图片的内容未检查。`] : []), ...(policy ? ['过程体验仅覆盖实际保存的文字，未保存的用户界面与过程不能判断。'] : []), ...(input.snapshotSummarized ? ['服务结构化快照过大，评分只读取关键字段和摘要；未展开的候选明细未检查。'] : []), ...(evaluationIssues.length ? ['评委证据或要求条目未通过校验，本轮需要复核；不把引用错误视为回答内容缺失。'] : []), ...(input.truncated ? ['评分输入不完整，仅供参考；无法确认完整任务合格。'] : [])], source: { truncated: input.truncated, answerChars: input.answer.length, structuredChars: input.structured.length, imagesInspected: imagesSent > 0, ...(input.snapshotSummarized ? { snapshotSummarized: true } : {}), ...(input.imageCoverage ? { imageCoverage: input.imageCoverage } : {}) }, markdownStatus: markdown.status };
 }
 function hasOutput(job) {
   const raw = String(job.answer || '');

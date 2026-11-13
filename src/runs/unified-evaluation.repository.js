@@ -25,12 +25,15 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
   const pool = () => pgPool;
   let verified;
   let hasComparisonColumn = false;
+  let hasHistoryTable = false;
   async function adminPool() {
     const current = pool();
     if (!verified) verified = current.query(`SELECT current_database() AS name,
-      EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.unified_evaluation_runs') AND attname='comparison_group_id' AND attnum>0 AND NOT attisdropped) AS has_comparison`).then((result) => {
+      EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.unified_evaluation_runs') AND attname='comparison_group_id' AND attnum>0 AND NOT attisdropped) AS has_comparison,
+      EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='evaluation_user_run_history') AS has_history`).then((result) => {
       if (!['science_admin', 'science_evaluation'].includes(result.rows[0]?.name)) throw new Error('统一评测记录只能使用 science_admin 或 science_evaluation 数据库');
       hasComparisonColumn = result.rows[0]?.has_comparison === true;
+      hasHistoryTable = result.rows[0]?.has_history === true;
       return current;
     }).catch((error) => { verified = null; throw error; });
     return verified;
@@ -278,6 +281,20 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
         WHERE $4 OR NOT evaluation_user_run_history.hidden RETURNING run_id`, [userId, runId, title || null, action === 'remove']);
       return result.rowCount === 1;
     },
+    async hideAvailable() {
+      await adminPool();
+      return hasHistoryTable;
+    },
+    async hideRuns(userId, runIds) {
+      await adminPool();
+      if (!hasHistoryTable) throw Object.assign(new Error('运行隐藏存储尚未迁移'), { code: '42P01' });
+      const result = await (await adminPool()).query(`INSERT INTO public.evaluation_user_run_history (user_id,run_id,title,hidden)
+        SELECT $1,r.id,NULL,true FROM public.unified_evaluation_runs r
+        WHERE r.id = ANY($2::uuid[]) AND (r.origin='automation' OR r.owner_user_id=$1) AND r.status NOT IN ('queued','running','scoring')
+        ON CONFLICT (user_id,run_id) DO UPDATE SET hidden=true, updated_at=now()
+        RETURNING run_id`, [userId, runIds]);
+      return result.rows.map(row => row.run_id);
+    },
     async list({ origin = null, page = 1, pageSize = 20, q = '', domain = '', questionId = '', datasetVersion = '', from = '', to = '', userId = null } = {}) {
       const requestedPage = Number(page);
       const requestedSize = Number(pageSize);
@@ -287,13 +304,15 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       const domainFilter = typeof domain === 'string' ? domain.trim() : '';
       const fromDate = typeof from === 'string' ? from.trim() : '';
       const toDate = typeof to === 'string' ? to.trim() : '';
+      const current = await adminPool();
+      const hiddenJoin = hasHistoryTable ? 'LEFT JOIN public.evaluation_user_run_history h ON h.run_id=r.id AND h.user_id=$1' : '';
       const source = `FROM public.unified_evaluation_runs r
         LEFT JOIN LATERAL (
           SELECT domain_key FROM eval_questions
           WHERE id = r.question_id AND dataset_version = r.dataset_version
           LIMIT 1
-        ) q ON true`;
-      const where = ["(r.origin='automation' OR r.owner_user_id=$1)"]; const params = [userId];
+        ) q ON true ${hiddenJoin}`;
+      const where = ["(r.origin='automation' OR r.owner_user_id=$1)", ...(hasHistoryTable ? ['coalesce(h.hidden,false)=false'] : [])]; const params = [userId];
       if (origin) { params.push(origin); where.push(`r.origin=$${params.length}`); }
       if (questionId) { params.push(questionId); where.push(`r.question_id=$${params.length}`); }
       if (datasetVersion) { params.push(datasetVersion); where.push(`r.dataset_version=$${params.length}`); }
@@ -302,7 +321,6 @@ function createUnifiedEvaluationRepository({ pgPool } = {}) {
       if (fromDate) { params.push(fromDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date >= $${params.length}::date`); }
       if (toDate) { params.push(toDate); where.push(`(r.started_at AT TIME ZONE 'Asia/Shanghai')::date <= $${params.length}::date`); }
       const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
-      const current = await adminPool();
       const comparison = hasComparisonColumn ? 'r.comparison_group_id' : "to_jsonb(r)->>'comparison_group_id'";
       const count = await current.query(`SELECT count(*)::int AS total ${source} ${filter}`, params);
       const result = await current.query(`SELECT r.id, r.service_key, r.origin, r.question, r.question_id, r.dataset_version, r.question_source_type,

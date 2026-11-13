@@ -670,6 +670,20 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     catch (error) { if (error.code === '42P01') throw new TeamServiceError(503, 'HISTORY_STORAGE_UNAVAILABLE', '对话管理存储尚未迁移'); throw error; }
     return { ok: true };
   }
+  async function hideAvailable() {
+    try { return !!(repository?.hideAvailable && await repository.hideAvailable()); } catch { return false; }
+  }
+  async function hideRuns(userId, runIds) {
+    if (!repository?.hideRuns) throw new TeamServiceError(503, 'HISTORY_UNAVAILABLE', '运行隐藏存储尚未配置');
+    if (!Array.isArray(runIds) || runIds.length < 1 || runIds.length > 100) throw new TeamServiceError(400, 'INVALID_INPUT', '一次可移除 1–100 条运行');
+    try {
+      const hidden = await repository.hideRuns(userId, runIds);
+      return { hidden, requested: runIds.length };
+    } catch (error) {
+      if (error.code === '42P01') throw new TeamServiceError(503, 'HISTORY_STORAGE_UNAVAILABLE', '运行隐藏存储尚未迁移');
+      throw error;
+    }
+  }
 
   async function runScoring(job, options = null, reservedRelease = null) {
     const endedStatus = job.status === 'cancelled' ? 'cancelled' : job.run?.status === 'error' || job.status === 'error' ? 'error' : 'done';
@@ -765,7 +779,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
     const serviceKeys = input.serviceKeys;
     if (!isSupportedComparisonPair(serviceKeys) || serviceKeys.some(value => !evaluators?.[value])) {
-      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合金材料与 ALPHA 材料 RSI（1110）');
+      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合金材料与「材料 RSI」');
     }
     if (typeof input.question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     const text = input.question.trim();
@@ -827,6 +841,6 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
 
   function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
-  return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, recoverTimedOutRuns, startTimeoutRecovery, stopTimeoutRecovery, scoringEnabled: !!scoring, availableServices, concurrencyCaps, runAutomation, beginAutomation, startLegacy };
+  return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, hideAvailable, hideRuns, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, recoverTimedOutRuns, startTimeoutRecovery, stopTimeoutRecovery, scoringEnabled: !!scoring, availableServices, concurrencyCaps, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };

@@ -367,10 +367,14 @@ paths:
           in: query
           schema: { type: string }
           description: 领域 key；`unclassified` 表示未分类
+        - name: testSet
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: 按测试集过滤（例如「材料研发测试案例集」）
         - name: runnableFor
           in: query
           schema: { type: string }
-          description: 返回可被该服务执行的基础层题目（服务无关领域题 + 该服务题）
+          description: 返回可被该服务执行的基础层题目（服务无关领域题、测试集中声明适用该服务的题，以及该服务题）
         - name: status
           in: query
           schema: { type: string, enum: [active] }
@@ -458,7 +462,8 @@ paths:
         需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
-        对比题传 `generationMode=comparison` 和 `serviceKeys`（合金材料与 ALPHA 材料 RSI），只生成一道候选题。
+        对比题传 `generationMode=comparison` 和 `serviceKeys`（合金材料与「材料 RSI」），按配比/配方或工艺优化方向生成一道候选题。
+        批次材料题池内部使用 `focus=optimization`；优化题必须包含数值约束，并要求候选方案、比较或排序，机理解释不能作为主题。
         旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
@@ -532,6 +537,33 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/question-bank/test-sets:
+    get:
+      tags: [题库]
+      summary: 固定题测试集列表
+      description: 需要 `team-services:read`。返回当前 active 固定题使用的测试集名称和题目数量，供题库页与选题器筛选。
+      responses:
+        '200':
+          description: 测试集列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, count]
+                      properties:
+                        name: { type: string }
+                        count: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /api/question-bank/import:
     post:
       tags: [题库]
@@ -562,6 +594,18 @@ paths:
                       question:
                         type: string
                         description: 题面，8–500 字符（synthesis 服务 8–200）
+                      testSet:
+                        type: string
+                        maxLength: 100
+                        description: 可选测试集名称；固定题可按测试集筛选
+                      applicableServices:
+                        type: array
+                        minItems: 1
+                        uniqueItems: true
+                        items:
+                          type: string
+                          enum: [mission-material, alpha-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+                        description: 可选适用服务；用于让一条测试集题同时供多个服务执行
       responses:
         '201':
           description: 已导入
@@ -1815,6 +1859,9 @@ paths:
                     type: integer
                   pageSize:
                     type: integer
+                  canHide:
+                    type: boolean
+                    description: 当前账号是否可删除（按账号隐藏）运行记录
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1827,6 +1874,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/evaluation/unified/runs/hide:
+    post:
+      tags: [统一运行]
+      summary: 按当前账号隐藏运行记录
+      description: 仅从当前账号的运行记录和侧栏中隐藏，不删除运行、题目、回答、评分或他人记录。执行中的运行不可隐藏。要求读写权限、同源和运行写开关。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [runIds]
+              properties:
+                runIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已隐藏的运行
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hidden, requested]
+                properties:
+                  hidden:
+                    type: array
+                    items: { type: string, format: uuid }
+                  requested:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: 运行隐藏存储尚未迁移或运行写入未启用
 
   /api/evaluation/unified/runs/{runId}:
     get:
@@ -2114,7 +2203,7 @@ paths:
       summary: 创建对比组
       description: |
         需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`
-        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合金材料与 ALPHA 材料 RSI（1110），且两者均已接入。
+        和 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。仅允许合金材料与「材料 RSI」，且两者均已接入。
         以同一份题面和同一份评分规则快照创建两条人工运行；分组 ID 由账号范围和幂等键确定，
         重试不会重复派发。依赖手工执行的 `migrations/012_comparison_groups.sql`，未迁移返回 503。
       parameters:
@@ -2867,6 +2956,16 @@ components:
         status:
           type: string
           description: active / retired 等
+        testSet:
+          type: string
+          nullable: true
+          description: 固定题所属测试集
+        applicableServices:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: 该题额外适用的服务；用于测试集题跨服务执行
         retiredReason:
           type: string
           nullable: true
@@ -2905,9 +3004,9 @@ components:
           description: 自定义主题；focus=custom 时必填
         focus:
           type: string
-          enum: [general, principles, design, comparison, validation, diagnosis, custom]
+          enum: [general, principles, design, comparison, validation, diagnosis, optimization, custom]
           default: general
-          description: 出题方向；general 为综合出题
+          description: 出题方向；general 为综合出题，optimization 为配比/配方或工艺优化（批次材料题池使用）
         count:
           type: integer
           minimum: 1
