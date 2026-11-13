@@ -21,14 +21,14 @@ function fixture(comparisonReady = true) {
   return { service: createTrialBatchService({ repository, evaluations, generator, serviceAddresses }), get plan() { return plan; }, get generated() { return generated; }, created, calls };
 }
 
-test('新批次冻结独立题目，派发异常后按原键恢复', async () => {
+test('新批次冻结共同题目，派发异常后按原键恢复', async () => {
   const f = fixture(); await f.service.prepare('2026-11-02');
-  assert.equal(f.generated, 220);
-  await f.service.prepare('2026-11-02'); assert.equal(f.generated, 220);
+  assert.equal(f.generated, 170);
+  await f.service.prepare('2026-11-02'); assert.equal(f.generated, 170);
   await assert.rejects(f.service.dispatch('2026-11-02'), /派发状态未知/);
   assert.equal(f.plan.state, 'dispatching'); assert.equal(f.created.size, 220);
   assert.ok([...f.created.values()].every(item => !item.comparisonGroupId && !['alloy', 'synthesis', 'new-material'].includes(item.serviceKey)));
-  assert.notEqual(f.created.get(`${f.plan.id}:alpha-rsi:0`).question, f.created.get(`${f.plan.id}:alpha-combined-rsi:0`).question);
+  assert.equal(f.created.get(`${f.plan.id}:alpha-rsi:0`).question, f.created.get(`${f.plan.id}:alpha-combined-rsi:0`).question);
   await f.service.dispatch('2026-11-02');
   assert.equal(f.plan.state, 'submitted'); assert.equal(f.created.size, 220); assert.equal(f.calls.length, 440);
 });
@@ -55,7 +55,7 @@ test('旧批次包含停用服务时不派发并保留原快照', async () => {
 
 test('新批次不依赖历史对比存储', async () => {
   const f = fixture(false); await f.service.prepare('2026-11-02');
-  assert.equal(f.plan.state, 'dispatching'); assert.equal(f.generated, 220);
+  assert.equal(f.plan.state, 'dispatching'); assert.equal(f.generated, 170);
 });
 
 test('题目快照被删改时在派发前拒绝整轮', async () => {

@@ -104,6 +104,18 @@ test('自动批次同一个幂等键只创建一次，并保留失败原因', as
   assert.equal((await service.get(first.runId)).error, '模拟服务连接断开');
 });
 
+test('批次运行保存制备专项标记并按题型校验', async () => {
+  const { service, pending } = fixture();
+  const input = { serviceKey: 'alpha-combined-rsi', question: '制备专项题目与结果标识测试', batchId: 'batch-kind', questionKind: 'manufacturing' };
+  const started = await service.createBatchRun(input, { key: 'batch-kind:1' });
+  assert.equal((await service.get(started.runId)).run.questionKind, 'manufacturing');
+  const retry = await service.createBatchRun(input, { key: 'batch-kind:1' });
+  assert.equal(retry.runId, started.runId);
+  await assert.rejects(service.createBatchRun({ ...input, serviceKey: 'alpha-rsi' }, { key: 'batch-kind:2' }), { code: 'BATCH_RUN_INVALID' });
+  pending.get(input.question)({ status: 'done' }); await tick();
+  assert.equal((await service.get(started.runId)).run.questionKind, 'manufacturing');
+});
+
 test('每服务五个运行，第六个排队；其他服务可运行，结果不串扰', async () => {
   const { service, pending } = fixture(); const created = [];
   const create = (serviceKey, n) => service.createRun({ serviceKey, question: `独立并发测试题目编号 ${serviceKey}-${n}` }, { scope: 'user', key: `${serviceKey}-${n}` });

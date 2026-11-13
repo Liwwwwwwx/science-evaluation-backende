@@ -139,6 +139,8 @@ Cookie 在生产或 HTTPS 下启用 Secure；必须经 HTTPS 同源反向代理�
 
 题库使用既有 `eval_questions` 和 `eval_fixed_case_overrides` 表，依赖管理端迁移 039、040 及其内置题基线；本进程不会自动创建或迁移这些表。`GET /api/question-bank/access` 返回当前权限；`GET /api/question-bank/questions` 支持服务、题目类型、测试集、状态、搜索与分页；`GET /api/question-bank/question?id=&datasetVersion=` 返回单个题目版本，供独立详情页读取；`POST /api/question-bank/generate` 生成候选；`POST /api/question-bank/random-save` 保存确认后的随机题；`POST /api/question-bank/import`、`PUT /api/question-bank/update`、`DELETE /api/question-bank/delete` 管理固定题和随机题；`PUT /api/question-bank/domain` 调整领域。随机题改题面以 `gen-edit-vN` 追加版本，旧版本退休且历史引用保留；删除为软删除。领域纠错不更换题目 ID，目标领域已有相同题目时拒绝操作。随机题使用既有 `rnd:服务:指纹` 身份与 `gen-v1` 版本，同服务同指纹优先复用已有活跃随机题；返回新增和复用数量。前端服务端代理将测评会话传给后端；列表要求 `team-services:read`，生成和修改要求 `team-services:write`。写请求校验来源。
 
+新批次的 `alpha-rsi`（1110）与 `alpha-combined-rsi`（1109）复用同一组配比题，题量不同时共同题数取较小值，各次运行独立记录。可通过方案的 `rsiManufacturingCount` 另行设置 1109 制备专项题数，省略时为 0；两类题共用 1109 的并发上限，合计最多 100 次。已生成的历史批次及其题目快照不变。单题生成可对两个 RSI 指定 `questionKind: "composition"`，对 1109 指定 `"manufacturing"`。
+
 迁移 `015_question_test_sets.sql` 为题目增加 `test_set` 和 `applicable_services`：固定题可按测试集筛选，一条测试集题可声明同时适用于多个服务；历史题目的适用关系保留。`GET /api/question-bank/test-sets` 返回测试集名称与数量。「材料研发测试案例集」现有 01–23 已回填；其余材料配比题可执行 `node --env-file-if-exists=.env.local scripts/import-material-case-set.js` 幂等补导。材料配比 RSI 按服务出题可参考该测试集中的材料案例；配比+制备 RSI 使用上述四个参考例题。
 
 随机题保存、固定题导入、编辑和删除默认关闭，需明确设置 `EVALUATION_QUESTION_BANK_WRITE_ENABLED=true` 才能使用；生产环境开启前须先获得用户确认。出题只返回候选、不写入题库；除 1109 默认随机题外，模型出题会调用已配置的模型。用户在前端确认后才保存。编辑保留旧版本，删除只退休记录。题目数据、固定题覆盖及历史版本与旧管理端共用，不能擅自迁移或修改生产数据。内置题清单来自迁移时的旧后端版本；如旧管理端变更基线，需要同步核对清单和版本。

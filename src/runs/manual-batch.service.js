@@ -51,9 +51,10 @@ function createManualBatchService({ repository, evaluations, generator, scoring,
       source = { id: selected.id, name: selected.name, version: selected.version };
     }
     const keys = Object.keys(scheme.services).filter(service => scheme.services[service] > 0);
+    if (scheme.rsiManufacturingCount && !keys.includes('alpha-combined-rsi')) keys.push('alpha-combined-rsi');
     if (keys.some(service => !serviceAddresses[service])) throw new TeamServiceError(503, 'BATCH_SERVICES_UNAVAILABLE', '所选服务尚未配置');
     if ((scheme.compareAlloyAlpha || scheme.compareSynthesisAlpha) && !await evaluations.comparisonStorageReady()) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移');
-    const snapshot = { config: scheme, scheme: source };
+    const snapshot = { config: scheme, scheme: source, rsiQuestionLayout: 'shared-v1' };
     const requestHash = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
     const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
     const result = await repository.create({ id: randomUUID(), date: localTime(new Date()).date, userId, requestKey: key, requestHash, configSnapshot: snapshot, serviceAddresses, ruleSnapshot });

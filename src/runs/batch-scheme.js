@@ -10,6 +10,7 @@ const DEFAULT_SCHEME = Object.freeze({
     'mission-material': 20, literature: 50, 'literature-aircraft': 50, alloy: 0,
     synthesis: 0, 'new-material': 0, 'alpha-rsi': 50, 'alpha-combined-rsi': 50,
   },
+  rsiManufacturingCount: 0,
   compareAlloyAlpha: false,
   compareSynthesisAlpha: false,
 });
@@ -48,7 +49,7 @@ function normalizeLegacy(input) {
 
 function validateScheme(input) {
   const source = normalizeLegacy(input);
-  if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).some(key => !['services', 'concurrency', 'compareSynthesisAlpha', 'compareAlloyAlpha'].includes(key))) invalid('方案格式无效');
+  if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).some(key => !['services', 'concurrency', 'compareSynthesisAlpha', 'compareAlloyAlpha', 'rsiManufacturingCount'].includes(key))) invalid('方案格式无效');
   const { services } = source;
   const concurrency = source.concurrency === undefined ? undefined : validateConcurrency(source.concurrency);
   if (source.compareSynthesisAlpha !== undefined && typeof source.compareSynthesisAlpha !== 'boolean') invalid('同题对比配置无效');
@@ -63,13 +64,16 @@ function validateScheme(input) {
     if (!count(value)) invalid('服务题量须为0至100的整数');
     normalized[key] = value; total += value;
   }
+  const rsiManufacturingCount = source.rsiManufacturingCount ?? 0;
+  if (!count(rsiManufacturingCount) || normalized['alpha-combined-rsi'] + rsiManufacturingCount > 100) invalid('1109 配比题与制备专项合计须为0至100题');
+  total += rsiManufacturingCount;
   if (!total || total > 320) invalid('每批运行次数须为1至320次');
   if (compareAlloyAlpha) {
     if (!normalized.alloy) invalid('同题对比要求合金材料至少分配一道题');
     if (normalized['alpha-rsi'] !== normalized.alloy) invalid('同题对比要求1110与合金材料使用相同数量的题目');
   }
   if (compareSynthesisAlpha && (!normalized.synthesis || normalized['alpha-rsi'] !== normalized.synthesis)) invalid('同题对比要求合成制备与1110使用相同数量的题目');
-  return { services: normalized, compareAlloyAlpha, compareSynthesisAlpha, ...(concurrency === undefined ? {} : { concurrency }) };
+  return { services: normalized, rsiManufacturingCount, compareAlloyAlpha, compareSynthesisAlpha, ...(concurrency === undefined ? {} : { concurrency }) };
 }
 
 // 只投影新批次使用的配置，不修改数据库中的旧配置或已生成的批次快照。
@@ -86,7 +90,7 @@ function upgradeComparisonScheme(input, { allowEmpty = false } = {}) {
     compareAlloyAlpha: false,
     ...(concurrency ? { concurrency } : {}),
   };
-  if (allowEmpty && !Object.values(services).some(Boolean)) return current;
+  if (allowEmpty && !Object.values(services).some(Boolean) && !current.rsiManufacturingCount) return current;
   return validateScheme(current);
 }
 

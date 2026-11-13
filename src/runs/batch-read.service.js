@@ -34,7 +34,13 @@ function servicePlans(plan) {
     const items = plan.items && typeof plan.items === 'object' && !Array.isArray(plan.items) ? plan.items : {};
     const counts = plan.item_counts && typeof plan.item_counts === 'object' ? plan.item_counts : null;
     const config = plan.config_snapshot?.config;
-    const expected = key => counts && typeof counts[key] === 'number' ? counts[key] : Array.isArray(items[key]) ? items[key].length : typeof config?.services?.[key] === 'number' ? config.services[key] : (Number(config?.services?.[key]?.aviation) || 0) + (Number(config?.services?.[key]?.synthesis) || 0);
+    const expected = key => {
+      if (counts && typeof counts[key] === 'number') return counts[key];
+      if (Array.isArray(items[key])) return items[key].length;
+      const value = config?.services?.[key];
+      const base = typeof value === 'number' ? value : (Number(value?.aviation) || 0) + (Number(value?.synthesis) || 0);
+      return base + (key === 'alpha-combined-rsi' ? Number(config?.rsiManufacturingCount) || 0 : 0);
+    };
     return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && !['alpha-rsi', 'alpha-combined-rsi'].includes(key) || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
   return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: typeof plan.item_count === 'number' ? plan.item_count : Array.isArray(plan.items) ? plan.items.length : 0 }];
@@ -77,6 +83,7 @@ function mapRun(row) {
     question: String(row.question || ''),
     comparisonGroupId: row.comparison_group_id || null,
     serviceKey: row.service_key,
+    ...(['composition', 'manufacturing'].includes(row.question_kind) ? { questionKind: row.question_kind } : {}),
     status: row.status,
     execution: executionOf(row),
     scores: { deepSeek: usableScore(row, 'deepSeek'), qwen: usableScore(row, 'qwen') },
@@ -226,6 +233,8 @@ function serviceDetails(plan, runs) {
       serviceKey: service.key,
       label: service.label,
       expected: service.expected,
+      ...(service.key === 'alpha-combined-rsi' && plan.config_snapshot?.rsiQuestionLayout === 'shared-v1' && plan.config_snapshot?.config?.rsiManufacturingCount > 0
+        ? { manufacturingExpected: plan.config_snapshot.config.rsiManufacturingCount } : {}),
       totals: totalsOf(rows, service.expected),
       scores: batchScores(rows),
       maxElapsedMs: elapsed.length ? Math.max(...elapsed) : null,

@@ -150,6 +150,26 @@ test('批次详情聚合服务指标，低分和失败列表只返回公开运�
   assert.equal(value.links.comparison, `/batches/${TRIAL}/comparison`);
 });
 
+test('新批次详情计入制备专项，运行列表返回题型且旧记录保持原样', async () => {
+  const config = { services: { 'alpha-rsi': 1, 'alpha-combined-rsi': 1 }, rsiManufacturingCount: 1 };
+  const items = { 'alpha-rsi': ['同一道配比问题'], 'alpha-combined-rsi': ['同一道配比问题', '另一道制备专项问题'] };
+  const service = createBatchReadService({ repository: repository({
+    plans: [trialPlan({ items, config_snapshot: { config, rsiQuestionLayout: 'shared-v1' } })],
+    runs: [
+      run({ id: 'a', batch_id: TRIAL, service_key: 'alpha-rsi', question_kind: 'composition' }),
+      run({ id: 'b', batch_id: TRIAL, service_key: 'alpha-combined-rsi', question_kind: 'manufacturing' }),
+      run({ id: 'old', batch_id: TRIAL, service_key: 'alpha-combined-rsi' }),
+    ],
+  }) });
+  const detail = await service.get(TRIAL);
+  assert.equal(detail.batch.planned, 3);
+  assert.equal(detail.services.find(item => item.serviceKey === 'alpha-combined-rsi').manufacturingExpected, 1);
+  const rows = (await service.runs(TRIAL)).items;
+  assert.equal(rows.find(item => item.runId === 'b').questionKind, 'manufacturing');
+  assert.equal(rows.find(item => item.runId === 'a').questionKind, 'composition');
+  assert.equal(Object.hasOwn(rows.find(item => item.runId === 'old'), 'questionKind'), false);
+});
+
 test('批次运行列表支持服务筛选、执行状态和分数排序', async () => {
   const service = createBatchReadService({ repository: repository({
     plans: [trialPlan()],

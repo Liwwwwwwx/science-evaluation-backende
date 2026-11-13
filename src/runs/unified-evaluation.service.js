@@ -241,7 +241,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       }
     } finally { job.settled = true; job.reply = null; if (!executionSlotReleased) releaseJob(job); prune(); }
   }
-  async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null, comparisonGroupId = null } = {}, internal = null) {
+  async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null, comparisonGroupId = null, questionKind = null } = {}, internal = null) {
     if (typeof serviceKey !== 'string' || !ACTIVE_SERVICE_KEYS.includes(serviceKey) || !evaluators || !evaluators[serviceKey]) throw new TeamServiceError(400, 'UNIFIED_EVAL_SERVICE_INVALID', '不支持该测评服务');
     if (typeof question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     // 已验证的固定案例和随机批次保留原服务约束；不能把自定义提问长度限制套到案例上。
@@ -283,6 +283,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     }
     const initialRun = { ...(evaluators[serviceKey]?.serviceAddress ? { serviceAddress: evaluators[serviceKey].serviceAddress, serviceAddressSource: 'run' } : {}),
       ...(ruleSnapshot ? { ruleSnapshot } : {}),
+      ...(questionKind ? { questionKind } : {}),
       ...(internal?.rerun ? { previousRunId: internal.rerun.runId } : {}),
       ...(idempotency ? { queuePayload: { version: 1, caseDef: internal.caseDef || null, scoreMode: internal.scoreMode || null, concurrencyLimits: internal.concurrencyLimits || null } } : {}) };
     const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, comparisonGroupId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null, reservation, batchReservation };
@@ -480,9 +481,10 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   async function createBatchRun(input, { key, ruleSnapshot } = {}) {
     if (!input || typeof input.batchId !== 'string' || !input.batchId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '批次测评任务参数无效');
     if (input.comparisonGroupId) throw new TeamServiceError(410, 'COMPARISON_DISABLED', '新建对比测评已停用，历史对比仍可查看');
+    if (input.questionKind != null && (!['composition', 'manufacturing'].includes(input.questionKind) || !['alpha-rsi', 'alpha-combined-rsi'].includes(input.serviceKey) || (input.questionKind === 'manufacturing' && input.serviceKey !== 'alpha-combined-rsi'))) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '材料测评题型无效');
     const safe = { serviceKey: input.serviceKey, question: input.question, origin: input.ownerUserId ? 'manual' : 'automation', questionId: input.questionId || null,
       datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null, batchId: input.batchId,
-      ...(input.comparisonGroupId ? { comparisonGroupId: input.comparisonGroupId } : {}) };
+      ...(input.comparisonGroupId ? { comparisonGroupId: input.comparisonGroupId } : {}), ...(input.questionKind ? { questionKind: input.questionKind } : {}) };
     const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
     return start(safe, { idempotency: { scope: input.ownerUserId ? `evaluation-user:${input.ownerUserId}` : 'evaluation-automation:batch', key, hash }, caseDef: null, scoreMode: evaluators?.[safe.serviceKey]?.scoreMode, ruleSnapshot,
       ...(input.concurrencyLimits != null ? { concurrencyLimits: validateConcurrency(input.concurrencyLimits) } : {}) });

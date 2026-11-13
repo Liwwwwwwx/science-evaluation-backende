@@ -459,11 +459,11 @@ paths:
       tags: [题目生成]
       summary: AI 生成候选题（不写库）
       description: |
-        需要 `team-services:write`。只调用已配置的出题模型生成候选，不写数据库；
+        需要 `team-services:write`。生成候选题，不写数据库；
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
         对比出题已停用；旧的 comparison 请求返回 COMPARISON_DISABLED。
-        材料配比批次内部使用 `focus=composition`；题目应包含数值约束并要求候选方案或比较，机理解释不能作为主题。
+        RSI 服务可传 `questionKind=composition` 出共同配比题；1109 可传 `manufacturing` 出制备专项题。内置牌号使用随机约束生成，其他主题由出题模型生成。
         旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
@@ -2929,6 +2929,10 @@ components:
           type: string
           enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
           description: 与 domainKey 互斥；旧服务维度请求须提供 topic
+        questionKind:
+          type: string
+          enum: [composition, manufacturing]
+          description: 按服务出题时适用；composition 支持两个 RSI，manufacturing 仅支持配比+制备 RSI。
         domainKey:
           type: string
           description: 领域维度出题（与 serviceKey 互斥）
@@ -3454,11 +3458,17 @@ components:
     BatchSchemeConfig:
       type: object
       required: [services]
-      description: 按服务独立分配题数，每批最多320次；停用服务题量和旧对比设置不用于新批次。旧配置和历史执行快照仍可读取。concurrency 可选，按服务设置批次并发上限（1–5）。
+      description: 1110 与 1109 的配比题共用题面并独立执行，题量不同时共同题取较小值；1109 制备专项可另设。每批最多 320 次，1109 两类题合计最多 100 次。旧配置和历史执行快照仍可读取。
       properties:
         services:
           type: object
           additionalProperties: { type: integer, minimum: 0, maximum: 100 }
+        rsiManufacturingCount:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 0
+          description: 1109 单独制备专项题数；与 1109 配比题共用服务并发上限。
         concurrency:
           type: object
           description: 每服务批次并发上限；省略时不单独限流，使用全局每服务上限。
