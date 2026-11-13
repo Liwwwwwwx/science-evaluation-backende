@@ -8,13 +8,14 @@ const CASES = Object.freeze([
   { material: 'GRCop-84', balance: 'Cu', components: [['Cr', 550, 700, 10], ['Nb', 500, 650, 10]], objective: '最大化500℃屈服强度', route: 'LPBF_HIP_heat_treatment' },
 ]);
 
-function renderQuestion(item, ranges) {
+function renderQuestion(item, ranges, questionKind = 'composition') {
   const composition = item.components.map(([name], i) => `${name} ${ranges[i][0] / 100}–${ranges[i][1] / 100}`);
   if (item.balance) composition.push(`${item.balance}余量`);
-  return `请${item.cast ? '以铸态为性能预测条件' : ''}优化 ${item.material}（wt.%）：${composition.join('、')}，总和100%，${item.objective}，给出最多20组候选，并提供该牌号的 ${item.route} 共享工艺参考。`;
+  const preparation = questionKind === 'manufacturing' ? `，并提供该牌号的 ${item.route} 共享工艺参考` : '';
+  return `请${item.cast ? '以铸态为性能预测条件' : ''}优化 ${item.material}（wt.%）：${composition.join('、')}，总和100%，${item.objective}，给出最多20组候选${preparation}。`;
 }
 
-const examples = CASES.map(item => renderQuestion(item, item.components.map(([, min, max]) => [min, max])));
+const examples = CASES.map(item => renderQuestion(item, item.components.map(([, min, max]) => [min, max]), 'manufacturing'));
 
 function rangesFor(item, random) {
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -29,14 +30,14 @@ function rangesFor(item, random) {
   throw new Error('未能生成满足总和100%的配比区间');
 }
 
-function generateCombinedRsiQuestions(count, { material = '', random = randomInt } = {}) {
+function generateCombinedRsiQuestions(count, { material = '', questionKind = 'composition', random = randomInt } = {}) {
   const matches = material ? CASES.filter(item => item.material.toLowerCase() === material.trim().toLowerCase()) : CASES;
   if (!matches.length) return null;
   const offset = random(matches.length); const seen = new Set(); const questions = [];
   for (let i = 0; i < count; i++) {
     const item = matches[(offset + i) % matches.length];
     for (let attempt = 0; attempt < 100; attempt++) {
-      const question = renderQuestion(item, rangesFor(item, random));
+      const question = renderQuestion(item, rangesFor(item, random), questionKind);
       if (seen.has(question)) continue;
       seen.add(question); questions.push(question); break;
     }

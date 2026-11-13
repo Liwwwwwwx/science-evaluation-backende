@@ -13,7 +13,7 @@ const specifications = {
 test('四种材料的随机区间保持在示例范围内且可满足总和100%', async () => {
   const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => false } });
   for (const [material, spec] of Object.entries(specifications)) {
-    const result = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: material, count: 10 });
+    const result = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing', topic: material, count: 10 });
     assert.equal(new Set(result.items.map(item => item.question)).size, 10);
     for (const { question } of result.items) {
       assert.ok(question.includes(material));
@@ -39,8 +39,18 @@ test('四种材料的随机区间保持在示例范围内且可满足总和100%'
 
 test('批量随机出题能够生成 100 道不重复的配比+制备题', async () => {
   const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => false } });
-  const items = await generateBatchQuestions({ generator, input: { generationMode: 'service', serviceKey: 'alpha-combined-rsi' }, count: 100 });
+  const items = await generateBatchQuestions({ generator, input: { generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing' }, count: 100 });
   assert.equal(items.length, 100);
   assert.equal(new Set(items.map(item => item.question)).size, 100);
   for (const material of Object.keys(specifications)) assert.ok(items.some(item => item.question.includes(material)));
+});
+
+test('共同配比题不含制备要求，两个 RSI 均支持同一出题格式', async () => {
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => false } });
+  for (const serviceKey of ['alpha-rsi', 'alpha-combined-rsi']) {
+    const result = await generator.generate({ generationMode: 'service', serviceKey, questionKind: 'composition', count: 4 });
+    assert.equal(result.items.length, 4);
+    assert.ok(result.items.every(item => item.serviceKey === serviceKey && item.question.includes('总和100%') && !item.question.includes('LPBF_')));
+  }
+  await assert.rejects(generator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', questionKind: 'manufacturing', count: 1 }), { code: 'QUESTION_GENERATION_INVALID' });
 });

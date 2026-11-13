@@ -93,7 +93,8 @@ test('配比+制备按四个示例随机出题，指定其他主题时仍可使�
   const prompt = prompts.at(-1);
   for (const material of ['IN625', 'CuCrZr', 'IN718', 'GRCop-84']) assert.ok(prompt.includes(material));
   for (const route of ['LPBF_heat_treatment', 'LPBF_solution_aging', 'LPBF_HIP_heat_treatment']) assert.ok(prompt.includes(route));
-  assert.match(prompt, /铸态是性能预测条件，LPBF 工艺路线是另行请求的共享参考/);
+  assert.match(prompt, /铸态是性能预测条件/);
+  assert.match(prompt, /不要求制备工艺或工艺参考/);
   assert.match(prompt, /保证存在总和为100%的可行配比/);
   assert.ok(!prompt.includes('旧配比服务参考案例'));
 
