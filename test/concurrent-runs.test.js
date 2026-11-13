@@ -22,7 +22,7 @@ function fixture() {
     pending.set(body.question, done);
     return { run: { id: body.question }, completion };
   } };
-  const evaluators = { literature: evaluator, alloy: evaluator };
+  const evaluators = { literature: evaluator, 'alpha-combined-rsi': evaluator };
   return { rows, pending, repository, evaluators, service: createUnifiedEvaluationService({ repository, evaluators, maxActive: 6, maxPerService: 5 }) };
 }
 
@@ -82,7 +82,7 @@ test('统一运行可将航空服务限制为单并发，同时允许其他服�
   const create = (serviceKey, n) => service.createRun({ serviceKey, question: `服务独立并发测试 ${serviceKey}-${n}` }, { scope: 'user', key: `limit-${serviceKey}-${n}` });
   const first = await create('literature-aircraft', 1);
   const second = await create('literature-aircraft', 2);
-  await create('alloy', 1);
+  await create('alpha-combined-rsi', 1);
   assert.equal((await service.get(second.runId)).status, 'queued');
   assert.equal(pending.size, 2);
   pending.get((await service.get(first.runId)).question)({ status: 'error', error: '模拟失败' });
@@ -94,9 +94,9 @@ test('统一运行可将航空服务限制为单并发，同时允许其他服�
 
 test('自动批次同一个幂等键只创建一次，并保留失败原因', async () => {
   const { service, pending } = fixture();
-  const input = { serviceKey: 'alloy', question: '自动批次失败原因记录测试', batchId: 'batch-1' };
-  const first = await service.createBatchRun(input, { key: 'batch-1:alloy:1' });
-  const second = await service.createBatchRun(input, { key: 'batch-1:alloy:1' });
+  const input = { serviceKey: 'alpha-combined-rsi', question: '自动批次失败原因记录测试', batchId: 'batch-1' };
+  const first = await service.createBatchRun(input, { key: 'batch-1:alpha-combined-rsi:1' });
+  const second = await service.createBatchRun(input, { key: 'batch-1:alpha-combined-rsi:1' });
   assert.equal(first.runId, second.runId);
   assert.equal(second.reused, true);
   pending.get(input.question)({ status: 'error', error: '模拟服务连接断开' });
@@ -104,11 +104,23 @@ test('自动批次同一个幂等键只创建一次，并保留失败原因', as
   assert.equal((await service.get(first.runId)).error, '模拟服务连接断开');
 });
 
+test('批次运行保存制备专项标记并按题型校验', async () => {
+  const { service, pending } = fixture();
+  const input = { serviceKey: 'alpha-combined-rsi', question: '制备专项题目与结果标识测试', batchId: 'batch-kind', questionKind: 'manufacturing' };
+  const started = await service.createBatchRun(input, { key: 'batch-kind:1' });
+  assert.equal((await service.get(started.runId)).run.questionKind, 'manufacturing');
+  const retry = await service.createBatchRun(input, { key: 'batch-kind:1' });
+  assert.equal(retry.runId, started.runId);
+  await assert.rejects(service.createBatchRun({ ...input, serviceKey: 'alpha-rsi' }, { key: 'batch-kind:2' }), { code: 'BATCH_RUN_INVALID' });
+  pending.get(input.question)({ status: 'done' }); await tick();
+  assert.equal((await service.get(started.runId)).run.questionKind, 'manufacturing');
+});
+
 test('每服务五个运行，第六个排队；其他服务可运行，结果不串扰', async () => {
   const { service, pending } = fixture(); const created = [];
   const create = (serviceKey, n) => service.createRun({ serviceKey, question: `独立并发测试题目编号 ${serviceKey}-${n}` }, { scope: 'user', key: `${serviceKey}-${n}` });
   for (let i = 0; i < 6; i++) created.push(await create('literature', i));
-  const other = await create('alloy', 0);
+  const other = await create('alpha-combined-rsi', 0);
   assert.equal(pending.size, 6);
   const queued = await service.get(created[5].runId);
   assert.equal(queued.status, 'queued'); assert.equal(queued.executionStatus, 'queued');
@@ -191,13 +203,13 @@ test('批次配置按服务收紧本批次并发，其他批次与全局上限�
   const { repository, evaluators, pending } = fixture();
   const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5 });
   const created = [];
-  for (let i = 0; i < 4; i++) created.push(await service.createBatchRun({ serviceKey: 'alloy', question: `批次并发限制测试题目编号 ${i}`, batchId: 'batch-limited', concurrencyLimits: { alloy: 2 } }, { key: `batch-limited:alloy:${i}` }));
-  const other = await service.createBatchRun({ serviceKey: 'alloy', question: '批次并发限制测试其他批次题目', batchId: 'batch-other', concurrencyLimits: { alloy: 2 } }, { key: 'batch-other:alloy:0' });
+  for (let i = 0; i < 4; i++) created.push(await service.createBatchRun({ serviceKey: 'alpha-combined-rsi', question: `批次并发限制测试题目编号 ${i}`, batchId: 'batch-limited', concurrencyLimits: { 'alpha-combined-rsi': 2 } }, { key: `batch-limited:alpha-combined-rsi:${i}` }));
+  const other = await service.createBatchRun({ serviceKey: 'alpha-combined-rsi', question: '批次并发限制测试其他批次题目', batchId: 'batch-other', concurrencyLimits: { 'alpha-combined-rsi': 2 } }, { key: 'batch-other:alpha-combined-rsi:0' });
   assert.equal(pending.size, 3);
   assert.equal((await service.get(created[2].runId)).status, 'queued');
   assert.equal((await service.get(created[3].runId)).status, 'queued');
   assert.equal((await service.get(other.runId)).status, 'running');
-  assert.equal((await service.get(created[2].runId)).run.queuePayload.concurrencyLimits.alloy, 2);
+  assert.equal((await service.get(created[2].runId)).run.queuePayload.concurrencyLimits['alpha-combined-rsi'], 2);
   pending.get('批次并发限制测试题目编号 0')({ status: 'done' });
   await tick();
   assert.equal((await service.get(created[2].runId)).status, 'running');
@@ -213,14 +225,14 @@ test('批次配置按服务收紧本批次并发，其他批次与全局上限�
 test('批次并发配置无效时拒绝派发', async () => {
   const { repository, evaluators } = fixture();
   const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5 });
-  await assert.rejects(service.createBatchRun({ serviceKey: 'alloy', question: '批次并发无效配置测试题目', batchId: 'batch-bad', concurrencyLimits: { alloy: 0 } }, { key: 'batch-bad:alloy:0' }), { code: 'BATCH_SCHEME_INVALID' });
-  await assert.rejects(service.createBatchRun({ serviceKey: 'alloy', question: '批次并发无效配置测试题目二', batchId: 'batch-bad', concurrencyLimits: { unknown: 2 } }, { key: 'batch-bad:alloy:1' }), { code: 'BATCH_SCHEME_INVALID' });
+  await assert.rejects(service.createBatchRun({ serviceKey: 'alpha-combined-rsi', question: '批次并发无效配置测试题目', batchId: 'batch-bad', concurrencyLimits: { 'alpha-combined-rsi': 0 } }, { key: 'batch-bad:alpha-combined-rsi:0' }), { code: 'BATCH_SCHEME_INVALID' });
+  await assert.rejects(service.createBatchRun({ serviceKey: 'alpha-combined-rsi', question: '批次并发无效配置测试题目二', batchId: 'batch-bad', concurrencyLimits: { unknown: 2 } }, { key: 'batch-bad:alpha-combined-rsi:1' }), { code: 'BATCH_SCHEME_INVALID' });
 });
 
 test('并发上限接口返回全局与单服务限制的较小值', () => {
   const { repository, evaluators } = fixture();
   const service = createUnifiedEvaluationService({ repository, evaluators, maxActive: 10, maxPerService: 5, serviceLimits: { 'literature-aircraft': 1 } });
   const caps = service.concurrencyCaps();
-  assert.equal(caps.alloy, 5);
+  assert.equal(caps['alpha-combined-rsi'], 5);
   assert.equal(caps['literature-aircraft'], 1);
 });

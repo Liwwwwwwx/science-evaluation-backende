@@ -108,7 +108,7 @@ function createBatchReadRepository({ pgPool } = {}) {
       const owner = hasOwnerColumn ? 'owner_user_id' : "to_jsonb(unified_evaluation_runs)->>'owner_user_id'";
       const result = await current.query(`SELECT id::text AS id, batch_id, service_key, question_id, dataset_version, question,
         status, error, ${scoreProjection('scores')} AS scores, answer_truncated, started_at, finished_at, ${comparison} AS comparison_group_id,
-        run->>'elapsedMs' AS elapsed_ms, run->>'status' AS run_status,
+        run->>'elapsedMs' AS elapsed_ms, run->>'status' AS run_status, run->>'questionKind' AS question_kind,
         jsonb_build_object('hash', COALESCE(run->'scoring'->'ruleSnapshot', run->'ruleSnapshot')->'hash') AS rule_snapshot
         FROM public.unified_evaluation_runs
         WHERE (origin='automation' OR (origin='manual' AND ${owner}=$2)) AND batch_id = ANY($1::text[])

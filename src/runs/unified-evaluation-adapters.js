@@ -2,7 +2,7 @@
 const { withWaitingRetry } = require('./followup-retry');
 function createUnifiedEvaluationAdapters(evaluators = {}) {
   return Object.fromEntries(Object.entries(evaluators).map(([serviceKey, evaluator]) => {
-    const runtime = serviceKey === 'alpha-rsi' ? evaluator : withWaitingRetry(evaluator);
+    const runtime = ['alpha-rsi', 'alpha-combined-rsi'].includes(serviceKey) ? evaluator : withWaitingRetry(evaluator);
     return [serviceKey, {
       start(body, onText, onState, onTextReset) {
         return runtime.startQuestionRun(body, { onText, onState, onTextReset });

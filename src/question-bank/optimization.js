@@ -7,10 +7,23 @@ const OPTIMIZATION_TYPES = Object.freeze([
   '方案取舍：比较 2–3 组候选成分、配方或工艺方案，给出排序、适用条件与风险',
 ]);
 
+const COMPOSITION_TYPES = Object.freeze([
+  '成分设计：给定应用场景、性能门槛和工艺条件，要求提出 2–3 组候选成分（wt.% 合计 100%）并比较排序',
+  '配比调整：给定目标性能与约束，要求调整主要/微量元素配比，给出 2–3 组候选并排序',
+  '配方取舍：比较 2–3 组候选成分或配比，说明排序、适用条件与风险',
+]);
+
 const OPTIMIZATION_RULES = [
   '题目必须是材料配比/配方或工艺优化任务：给出应用场景、可核验的性能门槛和成分/工艺约束，要求提出或比较 2–3 组候选成分、配方或工艺方案，并排序或说明取舍。',
   '题面必须包含至少一个明确的数值约束（如 wt.%、温度、时间、强度门槛）；适用时说明组分合计 100%。性能门槛必须写成具体数值，不能用“假设门槛/待定上限”代替。',
   '禁止以解释机理、原理或机制作为题目主体；文献综述、实验设计、故障诊断也不能作为主题，只能作为优化任务的辅助条件。',
+  '不要编造已有实验结果、具体牌号性能或模型能力；未确定的数据明确标为假设。',
+].join('\n');
+
+const COMPOSITION_RULES = [
+  '题目必须是材料成分配比设计任务：给出应用场景、可核验的性能门槛和必要的工艺状态，要求提出或比较 2–3 组具体成分/配比（wt.% 合计 100%）并排序或说明取舍。',
+  '题面必须包含明确的数值约束（如 wt.%、温度、强度/延伸率门槛），并给出元素或组分的质量百分比口径；所有组分合计应为 100%。性能门槛必须写成具体数值，不能用“假设门槛/待定上限”代替。',
+  '题目主体必须是成分配比或配方设计；不要以工艺优化、热处理、涂层、凝固、机理解释、文献综述或故障诊断作为主题，这些只能作为成分设计的辅助条件。',
   '不要编造已有实验结果、具体牌号性能或模型能力；未确定的数据明确标为假设。',
 ].join('\n');
 
@@ -35,4 +48,17 @@ function optimizationComposition(count) {
   return `本批题型安排：${slots}。不要生成只解释机理、原理或机制的题目，也不要把文献综述、实验设计或故障诊断作为主题。`;
 }
 
-module.exports = { OPTIMIZATION_TYPES, OPTIMIZATION_RULES, isOptimizationQuestion, optimizationComposition };
+function compositionComposition(count) {
+  const offset = randomInt(COMPOSITION_TYPES.length);
+  const slots = Array.from({ length: count }, (_, i) => `第${i + 1}题：${COMPOSITION_TYPES[(offset + i) % COMPOSITION_TYPES.length]}。必须给出具体 wt.% 配比口径，所有组分合计 100%，并包含可核验的数值性能约束。`).join('\n');
+  return `本批题型安排：${slots}。所有题都必须以成分/配比设计为主体，不要生成工艺优化、热处理、涂层、凝固或机理解释题。`;
+}
+
+function isCompositionQuestion(question) {
+  const text = typeof question === 'string' ? question.trim() : '';
+  if (!isOptimizationQuestion(text)) return false;
+  if (!/(配比|成分|组分|配方)/.test(text)) return false;
+  return true;
+}
+
+module.exports = { OPTIMIZATION_TYPES, COMPOSITION_TYPES, OPTIMIZATION_RULES, COMPOSITION_RULES, isOptimizationQuestion, isCompositionQuestion, optimizationComposition, compositionComposition };

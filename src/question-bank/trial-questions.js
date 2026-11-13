@@ -1,21 +1,51 @@
 const { generateBatchQuestions } = require('./batch-generation');
-const { fingerprintOf } = require('./identity');
 const { DEFAULT_SCHEME, SERVICE_KEYS, validateScheme } = require('../runs/batch-scheme');
 
-// 两组均围绕材料领域：航空材料可用于航空检索、材料检索和合金团队；
-// 新材料合成题可用于新材料、合成制备和材料检索。Mission 各取一部分。
-// 批次题与对比随机题共用「配比/配方或工艺优化」方向，不再轮转机理解释等题型。
+// 两个 RSI 的配比题共用题面；旧服务和对比逻辑仅用于历史方案兼容。
+const COMPOSITION_TOPIC = '航空航天材料与高温合金：仅限镍基/钴基高温合金或航空铝合金的成分/配比设计，要求给出 wt.% 具体成分（合计100%）、目标性能数值门槛和2–3组候选配比并排序；不要出工艺优化、热处理、涂层、凝固或机理解释题';
+const SERVICE_INPUTS = Object.freeze({
+  'mission-material': { generationMode: 'service', serviceKey: 'mission-material' },
+  literature: { generationMode: 'service', serviceKey: 'literature' },
+  'literature-aircraft': { generationMode: 'service', serviceKey: 'literature-aircraft' },
+  synthesis: { generationMode: 'service', serviceKey: 'synthesis' },
+  'new-material': { generationMode: 'service', serviceKey: 'new-material' },
+});
+
 async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME } = {}) {
   scheme = validateScheme(scheme);
-  const aviation = scheme.pools.aviation ? await generateBatchQuestions({ generator, input: { serviceKey: 'literature-aircraft', focus: 'optimization', topic: '航空航天材料与高温合金：成分/配比设计、制备与热处理工艺、性能门槛与候选方案比较；问题应可用于航空材料文献检索和合金材料研究' }, count: scheme.pools.aviation }) : [];
-  const synthesis = scheme.pools.synthesis ? await generateBatchQuestions({ generator, input: { serviceKey: 'synthesis', focus: 'optimization', topic: '新材料合成与制备：前驱体配比、反应路线、工艺条件、结构与性能，要求给出候选配方或工艺方案并比较' }, count: scheme.pools.synthesis }) : [];
-  const pool = [...aviation, ...synthesis];
-  if (new Set(pool.map(item => fingerprintOf(item.question))).size !== pool.length) {
-    const error = new Error('不同领域生成的题目存在重复，未创建运行计划');
-    error.code = 'TRIAL_QUESTIONS_DUPLICATE';
-    throw error;
+  const out = {};
+  const count = key => scheme.services[key] || 0;
+  async function generate(input, total) {
+    const items = await generateBatchQuestions({ generator, input, count: total });
+    return items.map(item => item.question);
   }
-  const values = items => items.map(item => item.question);
-  return Object.fromEntries(SERVICE_KEYS.filter(key => scheme.services[key].aviation + scheme.services[key].synthesis > 0).map(key => [key, values([...aviation.slice(0, scheme.services[key].aviation), ...synthesis.slice(0, scheme.services[key].synthesis)])]));
+
+  if (count('alloy')) {
+    out.alloy = await generate({ serviceKey: 'alloy', focus: 'composition', topic: COMPOSITION_TOPIC }, count('alloy'));
+    if (scheme.compareAlloyAlpha) out['alpha-rsi'] = [...out.alloy];
+  }
+  if (scheme.compareSynthesisAlpha && count('synthesis')) {
+    out.synthesis = await generate(SERVICE_INPUTS.synthesis, count('synthesis'));
+    out['alpha-rsi'] = [...out.synthesis];
+  } else if (count('synthesis')) {
+    out.synthesis = await generate(SERVICE_INPUTS.synthesis, count('synthesis'));
+  }
+  const commonRsi = count('alpha-rsi'); const commonCombined = count('alpha-combined-rsi');
+  if (commonRsi || commonCombined) {
+    let shared = out['alpha-rsi'] || [];
+    const needed = Math.max(commonRsi, commonCombined);
+    if (shared.length < needed) shared = [...shared, ...await generate({ generationMode: 'service', serviceKey: 'alpha-rsi', questionKind: 'composition' }, needed - shared.length)];
+    if (commonRsi && !out['alpha-rsi']) out['alpha-rsi'] = shared.slice(0, commonRsi);
+    if (commonCombined) out['alpha-combined-rsi'] = shared.slice(0, commonCombined);
+  }
+  if (scheme.rsiManufacturingCount) {
+    const special = await generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing' }, scheme.rsiManufacturingCount);
+    out['alpha-combined-rsi'] = [...(out['alpha-combined-rsi'] || []), ...special];
+  }
+  for (const key of ['mission-material', 'literature', 'literature-aircraft', 'new-material']) {
+    if (count(key)) out[key] = await generate(SERVICE_INPUTS[key], count(key));
+  }
+  return Object.fromEntries(SERVICE_KEYS.filter(key => out[key]).map(key => [key, out[key]]));
 }
+
 module.exports = { generateTrialQuestions };

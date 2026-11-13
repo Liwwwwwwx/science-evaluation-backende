@@ -7,7 +7,7 @@ const { withWaitingRetry } = require('./followup-retry');
 
 // 协议来源：旧管理端 material-service-cases 的 alpha-rsi-ws runner。
 // 1110 用 [start]/[end] 标记正文，user_input_request 表达开工确认与补充条件请求。
-const SERVICE_LABEL = '材料 RSI';
+const SERVICE_LABEL = '材料配比 RSI';
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_END_SETTLE_MS = 1500;
 const DEFAULT_CLOSE_SETTLE_MS = 500;
@@ -33,6 +33,8 @@ function partialMarkerLength(value) {
 
 function createAlphaRsiSingleEvaluator({
   url,
+  label = SERVICE_LABEL,
+  taskPrefix = 'evaluation-alpha-rsi',
   timeoutMs = DEFAULT_TIMEOUT_MS,
   endSettleMs = DEFAULT_END_SETTLE_MS,
   closeSettleMs = DEFAULT_CLOSE_SETTLE_MS,
@@ -40,7 +42,7 @@ function createAlphaRsiSingleEvaluator({
   generateSupplement = createAlphaRsiSupplement(),
 } = {}) {
   const target = new URL(url);
-  if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw new Error('材料 RSI 必须配置 WebSocket 地址');
+  if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw new Error(`${label} 必须配置 WebSocket 地址`);
   const httpUrl = new URL(target);
   httpUrl.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
 
@@ -48,7 +50,7 @@ function createAlphaRsiSingleEvaluator({
     serviceAddress: publicServiceAddress(target),
     scoreMode: 'none',
     async startQuestionRun({ question }, { onText = () => {}, onState = () => {} } = {}) {
-      const id = `evaluation-alpha-rsi-${randomUUID()}`;
+      const id = `${taskPrefix}-${randomUUID()}`;
       const startedAt = Date.now();
       const process = createProcessRecorder(startedAt);
       const transport = { state: 'connecting', openedAt: null, closedAt: null, closeCode: null, wasClean: null, lastFrameType: null, lastFrameAt: null, receivedFrames: 0 };
@@ -71,6 +73,8 @@ function createAlphaRsiSingleEvaluator({
       const requests = new Set();
       const supplementAbort = new AbortController();
       let inputPending = false;
+      let resultFailed = false;
+      let turnFailed = false;
 
       const completion = new Promise((resolve) => { resolveCompletion = resolve; });
       const keep = (value) => {
@@ -90,6 +94,7 @@ function createAlphaRsiSingleEvaluator({
         if (settled || ending) return;
         ending = true;
         supplementAbort.abort();
+        if (!error && (resultFailed || turnFailed)) error = `${label} 返回失败，请查看服务结果。`;
         if (!error && details.result?.status === 'waiting_for_input') error = '服务返回等待补充信息，但未提供可回复的交互请求，本轮未完成。';
         transport.state = error ? 'failed' : 'closed'; transport.finishedAt = new Date().toISOString(); if (!transport.closedAt) transport.closedAt = transport.finishedAt;
         clearTimeout(timer);
@@ -108,15 +113,15 @@ function createAlphaRsiSingleEvaluator({
         resolveCompletion({ status: error ? 'error' : 'done', taskid: id, elapsedMs: Date.now() - startedAt, error, details });
       };
 
-      const timer = setTimeout(() => finish(`${SERVICE_LABEL} 执行超时`), timeoutMs);
+      const timer = setTimeout(() => finish(`${label} 执行超时`), timeoutMs);
 
       const replyToInputRequest = async (frame) => {
         const requestId = frame.request_id;
-        if (!['string', 'number'].includes(typeof requestId) || String(requestId).length > 200) return finish(`${SERVICE_LABEL} 确认请求标识无效`);
+        if (!['string', 'number'].includes(typeof requestId) || String(requestId).length > 200) return finish(`${label} 确认请求标识无效`);
         const requestKey = String(requestId);
         if (requests.has(requestKey)) return;
-        if (inputPending) return finish(`${SERVICE_LABEL} 同时发出多个确认请求，无法安全答复`);
-        if (replyCount >= MAX_CHECKPOINTS) return finish(`${SERVICE_LABEL} 重复要求人工确认，已中止`);
+        if (inputPending) return finish(`${label} 同时发出多个确认请求，无法安全答复`);
+        if (replyCount >= MAX_CHECKPOINTS) return finish(`${label} 重复要求人工确认，已中止`);
         requests.add(requestKey);
         replyCount += 1;
         const parameters = frame.parameters && typeof frame.parameters === 'object' ? frame.parameters : {};
@@ -153,12 +158,12 @@ function createAlphaRsiSingleEvaluator({
             if (details.result?.status === 'waiting_for_input') details.result = null;
           } catch {
             record.delivery = 'failed'; emit();
-            return finish(`${SERVICE_LABEL} 补充答复发送失败`);
+            return finish(`${label} 补充答复发送失败`);
           }
           emit();
           return;
         }
-        if (reason !== 'checkpoint') { record.delivery = 'not_sent'; emit(); return finish(`${SERVICE_LABEL} 未知交互类型，未自动答复`); }
+        if (reason !== 'checkpoint') { record.delivery = 'not_sent'; emit(); return finish(`${label} 未知交互类型，未自动答复`); }
         record.summary = '自动确认继续。';
         try {
           socket.send(JSON.stringify({ type: 'checkpoint.reply', taskid: id, request_id: requestId, approved: true, params: { message: '' } }));
@@ -166,7 +171,7 @@ function createAlphaRsiSingleEvaluator({
         } catch {
           record.delivery = 'failed';
           emit();
-          return finish(`${SERVICE_LABEL} 确认答复发送失败`);
+          return finish(`${label} 确认答复发送失败`);
         }
         emit();
       };
@@ -178,7 +183,7 @@ function createAlphaRsiSingleEvaluator({
 
       const appendText = (delta) => {
         raw += delta;
-        if (raw.length > MAX_ANSWER_CHARS) return finish(`${SERVICE_LABEL} 回答超过保存上限`);
+        if (raw.length > MAX_ANSWER_CHARS) return finish(`${label} 回答超过保存上限`);
         if (delta.includes('[') || pendingPartial) {
           const visible = raw.replace(MARKER_RE, '');
           const held = partialMarkerLength(raw);
@@ -195,7 +200,7 @@ function createAlphaRsiSingleEvaluator({
         if (raw.includes(START_MARK)) receivedStart = true;
         if (raw.includes(END_MARK) && !receivedEnd) {
           receivedEnd = true;
-          endTimer = setTimeout(() => finish(inputPending ? '服务在自动补充完成前结束，本轮未继续。' : receivedStart ? null : `${SERVICE_LABEL} 缺少起始标识`), endSettleMs);
+          endTimer = setTimeout(() => finish(inputPending ? '服务在自动补充完成前结束，本轮未继续。' : receivedStart ? null : `${label} 缺少起始标识`), endSettleMs);
         }
       };
 
@@ -204,19 +209,19 @@ function createAlphaRsiSingleEvaluator({
         const data = typeof event?.data === 'string' ? event.data : event?.data?.toString?.();
         if (typeof data !== 'string' || !data) return;
         transport.receivedFrames = frameCount + 1; transport.lastFrameAt = new Date().toISOString(); transport.lastFrameType = data.startsWith('{') ? 'json' : 'text';
-        if (++frameCount > MAX_FRAMES) return finish(`${SERVICE_LABEL} 协议帧超过上限`);
-        if (Buffer.byteLength(data) > MAX_STATE_BYTES) return finish(`${SERVICE_LABEL} 数据帧超过保存上限`);
+        if (++frameCount > MAX_FRAMES) return finish(`${label} 协议帧超过上限`);
+        if (Buffer.byteLength(data) > MAX_STATE_BYTES) return finish(`${label} 数据帧超过保存上限`);
         let frame = null;
         try { frame = JSON.parse(data); } catch {}
         if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
           if (frame.type === 'timeline.event' && frame.event && typeof frame.event === 'object' && !Array.isArray(frame.event)) frame = frame.event;
           if (frame.ignore === true || ['heartbeat.ping', 'heartbeat', 'ping', 'pong'].includes(frame.type)) return;
           process.record(frame);
-          if (['error', 'requirement_review_error'].includes(frame.type)) return finish(`${SERVICE_LABEL} 返回执行错误`);
+          if (['error', 'requirement_review_error'].includes(frame.type)) return finish(`${label} 返回执行错误`);
           if (frame.type === 'user_input_request') { recordProtocol(frame); void replyToInputRequest(frame); return; }
           if (typeof frame.type === 'string' && /(?:_request|\.request)$/.test(frame.type)) {
             recordProtocol(frame);
-            return finish(`${SERVICE_LABEL} 交互尚未支持：${frame.type.slice(0, 100)}`);
+            return finish(`${label} 交互尚未支持：${frame.type.slice(0, 100)}`);
           }
           if (frame.type === 'generated_files') {
             const files = Array.isArray(frame.file_metadata) ? frame.file_metadata : [];
@@ -229,11 +234,15 @@ function createAlphaRsiSingleEvaluator({
             return;
           }
           if (frame.type === 'result') {
-            if (keep(frame.data || frame)) details.result = frame.data || frame; else details.truncated = true;
+            const result = frame.data || frame;
+            resultFailed = ['failed', 'error'].includes(result.status);
+            if (keep(result)) details.result = result; else details.truncated = true;
             recordProtocol({ type: 'result' });
             scheduleEmit();
             return;
           }
+          if (frame.type === 'turn_error') turnFailed = true;
+          if (frame.type === 'turn_complete' && typeof frame.status === 'string') turnFailed = ['failed', 'error'].includes(frame.status);
           if (['progress', 'retrieval_progress', 'stage', 'stage_start', 'stage_end'].includes(frame.type)) {
             const body = frame.data && typeof frame.data === 'object' ? frame.data : frame;
             const message = [body.message, body.text, body.content, body.title, frame.message].find((value) => typeof value === 'string' && value.trim());
@@ -257,19 +266,19 @@ function createAlphaRsiSingleEvaluator({
           transport.state = 'open'; transport.openedAt = new Date().toISOString();
           try {
             socket.send(JSON.stringify({ idea: question, taskid: id, user_name: 'science-evaluation', file_metadata: [] }));
-          } catch { finish(`${SERVICE_LABEL} 请求发送失败`); }
+          } catch { finish(`${label} 请求发送失败`); }
         });
         socket.addEventListener('message', receive);
-        socket.addEventListener('error', () => finish(`${SERVICE_LABEL} 连接失败`));
+        socket.addEventListener('error', () => finish(`${label} 连接失败`));
         socket.addEventListener('close', (event) => {
           if (settled || ending) return;
           transport.closedAt = new Date().toISOString();
           transport.closeCode = Number.isInteger(event?.code) ? event.code : null;
           transport.wasClean = typeof event?.wasClean === 'boolean' ? event.wasClean : null;
           if (endTimer) return;
-          closeTimer = setTimeout(() => finish(receivedStart && receivedEnd ? null : `${SERVICE_LABEL} 连接中断（关闭码 ${transport.closeCode ?? '未知'}），未收到完整回答`), closeSettleMs);
+          closeTimer = setTimeout(() => finish(receivedStart && receivedEnd ? null : `${label} 连接中断（关闭码 ${transport.closeCode ?? '未知'}），未收到完整回答`), closeSettleMs);
         });
-      } catch { finish(`${SERVICE_LABEL} 连接失败`); }
+      } catch { finish(`${label} 连接失败`); }
 
       return { run: { id }, completion, cancel: () => finish('本次运行已结束') };
     },

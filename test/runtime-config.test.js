@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { automationEnabled, httpSettings, missionTimeoutMs } = require('../src/runtime-config');
+const { automationEnabled, timeoutRecoveryEnabled, httpSettings, missionTimeoutMs } = require('../src/runtime-config');
 
 test('自动化默认只在非开发环境启用，显式开关优先', () => {
   assert.equal(automationEnabled({ NODE_ENV: 'development' }), false);
@@ -9,6 +9,12 @@ test('自动化默认只在非开发环境启用，显式开关优先', () => {
   assert.equal(automationEnabled({ NODE_ENV: 'production' }), true);
   assert.equal(automationEnabled({ NODE_ENV: 'production', EVALUATION_AUTOMATION_ENABLED: 'false' }), false);
   assert.equal(automationEnabled({ NODE_ENV: 'development', EVALUATION_AUTOMATION_ENABLED: 'true' }), true);
+});
+test('运行写入开启时默认恢复超时记录，本地可单独关闭', () => {
+  assert.equal(timeoutRecoveryEnabled({}), false);
+  assert.equal(timeoutRecoveryEnabled({ EVALUATION_RUN_WRITE_ENABLED: 'true' }), true);
+  assert.equal(timeoutRecoveryEnabled({ EVALUATION_RUN_WRITE_ENABLED: 'true', EVALUATION_TIMEOUT_RECOVERY_ENABLED: 'false' }), false);
+  assert.equal(timeoutRecoveryEnabled({ EVALUATION_RUN_WRITE_ENABLED: 'false', EVALUATION_TIMEOUT_RECOVERY_ENABLED: 'true' }), false);
 });
 test('生产 HTTP 必须显式开启，HTTPS 始终使用 Secure Cookie', () => {
   const env = { NODE_ENV: 'production', EVALUATION_PUBLIC_ORIGIN: 'http://192.0.2.1:6714' };

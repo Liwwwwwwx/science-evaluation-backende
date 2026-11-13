@@ -9,15 +9,14 @@ const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { createMissionEvaluator } = require('../src/runs/mission-evaluator');
 const { createLiteratureEvaluator } = require('../src/runs/literature-evaluator');
-const { createMaterialEvaluator } = require('../src/runs/material-evaluator');
+const { createAlphaRsiEvaluator } = require('../src/runs/alpha-rsi-evaluator');
 
 const SERVICES = [
   { key: 'mission-material', label: 'Mission 上游', env: 'EVALUATION_MISSION_MATERIAL_WS_URL' },
   { key: 'literature', label: '文献检索', env: 'EVALUATION_LITERATURE_WS_URL' },
   { key: 'literature-aircraft', label: '航空文献', env: 'EVALUATION_AIRCRAFT_LITERATURE_WS_URL' },
-  { key: 'alloy', label: '合金材料', env: 'EVALUATION_ALLOY_WS_URL' },
-  { key: 'synthesis', label: '合成制备', env: 'EVALUATION_SYNTHESIS_WS_URL' },
-  { key: 'new-material', label: '新材料', env: 'EVALUATION_NEW_MATERIAL_WS_URL' },
+  { key: 'alpha-rsi', label: '材料配比 RSI', env: 'EVALUATION_ALPHA_RSI_WS_URL' },
+  { key: 'alpha-combined-rsi', label: '配比+制备 RSI', env: 'EVALUATION_ALPHA_COMBINED_RSI_WS_URL' },
 ];
 const QUESTIONS_PER_SERVICE = 10;
 const PER_SERVICE_CONCURRENCY = 5;
@@ -82,7 +81,7 @@ function createAdapters(addresses, timeoutMs) {
     const options = { url: addresses[key], timeoutMs };
     const adapter = key === 'mission-material' ? createMissionEvaluator(options)
       : key === 'literature' || key === 'literature-aircraft' ? createLiteratureEvaluator({ ...options, serviceKey: key })
-        : createMaterialEvaluator({ ...options, serviceKey: key });
+        : createAlphaRsiEvaluator({ ...options, ...(key === 'alpha-combined-rsi' ? { label: '配比+制备 RSI', taskPrefix: 'evaluation-alpha-combined-rsi' } : {}) });
     return [key, adapter];
   }));
 }

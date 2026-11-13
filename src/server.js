@@ -13,7 +13,6 @@ const { createBatchReadRepository } = require('./runs/batch-read.repository');
 const { createBatchReadService } = require('./runs/batch-read.service');
 const { createRunQuestionResolver } = require('./runs/question-resolver');
 const { createLiteratureEvaluator } = require('./runs/literature-evaluator');
-const { createMaterialEvaluator } = require('./runs/material-evaluator');
 const { createMissionEvaluator } = require('./runs/mission-evaluator');
 const { createAlphaRsiEvaluator } = require('./runs/alpha-rsi-evaluator');
 const { createMissionDailyRepository } = require('./runs/mission-daily.repository');
@@ -29,13 +28,14 @@ const { createDailyReportSharing } = require('./daily-reports/sharing');
 const { validDate } = require('./daily-reports/summary');
 const { createQuestionBankGenerationService } = require('./question-bank/generation');
 const { createTrialBatchRepository } = require('./runs/trial-batch.repository');
-const { createTrialBatchService, TARGETS } = require('./runs/trial-batch.service');
+const { createTrialBatchService } = require('./runs/trial-batch.service');
 const { createBatchSchemeRepository } = require('./runs/batch-scheme.repository');
+const { SERVICE_KEYS } = require('./runs/batch-scheme');
 const { createManualBatchRepository } = require('./runs/manual-batch.repository');
 const { createManualBatchService } = require('./runs/manual-batch.service');
 const { createTrialBatchScheduler } = require('./runs/trial-batch.scheduler');
 const { createStandardsRepository } = require('./standards/repository');
-const { automationEnabled, httpSettings, missionTimeoutMs } = require('./runtime-config');
+const { automationEnabled, timeoutRecoveryEnabled, httpSettings, missionTimeoutMs } = require('./runtime-config');
 const host = process.env.EVALUATION_HOST || '127.0.0.1';
 const port = Number(process.env.PORT || 7714);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
@@ -71,17 +71,15 @@ if (databaseUrl) {
   const evaluators = {};
   if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL, timeoutMs: missionTimeoutMs() });
   if (process.env.EVALUATION_ALPHA_RSI_WS_URL) evaluators['alpha-rsi'] = createAlphaRsiEvaluator({ url: process.env.EVALUATION_ALPHA_RSI_WS_URL });
+  if (process.env.EVALUATION_ALPHA_COMBINED_RSI_WS_URL) evaluators['alpha-combined-rsi'] = createAlphaRsiEvaluator({ url: process.env.EVALUATION_ALPHA_COMBINED_RSI_WS_URL, label: '配比+制备 RSI', taskPrefix: 'evaluation-alpha-combined-rsi' });
   if (process.env.EVALUATION_LITERATURE_WS_URL) evaluators.literature = createLiteratureEvaluator({ url: process.env.EVALUATION_LITERATURE_WS_URL });
   if (process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL) evaluators['literature-aircraft'] = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL });
-  for (const [serviceKey, name] of [['alloy', 'EVALUATION_ALLOY_WS_URL'], ['synthesis', 'EVALUATION_SYNTHESIS_WS_URL'], ['new-material', 'EVALUATION_NEW_MATERIAL_WS_URL']]) {
-    if (process.env[name]) evaluators[serviceKey] = createMaterialEvaluator({ serviceKey, url: process.env[name] });
-  }
   const automation = automationEnabled();
   const trialDate = automation ? process.env.EVALUATION_TRIAL_DATE || '' : '';
   const dailyMultiService = automation && process.env.EVALUATION_DAILY_MULTI_SERVICE_ENABLED === 'true';
   nightlyEnabled = dailyMultiService;
   if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
-  const serviceAddresses = Object.fromEntries(Object.keys(TARGETS).map(key => [key, evaluators[key]?.serviceAddress || null]));
+  const serviceAddresses = Object.fromEntries(SERVICE_KEYS.map(key => [key, evaluators[key]?.serviceAddress || null]));
   if ((trialDate || dailyMultiService) && process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true') throw new Error('自动测评需要启用运行写入');
   const scoring = createScoringService({ rules });
   evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 }, executionTimeoutMs: { 'mission-material': missionTimeoutMs(), default: 60 * 60 * 1000 } });
@@ -127,7 +125,7 @@ if (databaseUrl) {
 createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, generator, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
-  if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });
+  if (timeoutRecoveryEnabled()) evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') manualBatches?.start();
   missionDaily?.start();
   trialScheduler?.start();

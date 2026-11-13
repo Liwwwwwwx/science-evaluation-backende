@@ -13,7 +13,7 @@ function artifactOriginAllowed(run, href) {
   } catch { return false; }
   const taskIds = [run?.nativeRunId || run?.run?.taskId, run?.run?.details?.autoRetry?.taskId].filter(id => typeof id === 'string' && id);
   const entry = service.pathname.replace(/\/start\/?$/, '').replace(/\/$/, '');
-  const taskAsset = taskIds.some(taskid => url.pathname.startsWith(`${entry}/tasks/${encodeURIComponent(taskid)}/assets/`) || (run?.serviceKey === 'alpha-rsi' && url.pathname.startsWith(`/alloy/tasks/${encodeURIComponent(taskid)}/assets/`)));
+  const taskAsset = taskIds.some(taskid => url.pathname.startsWith(`${entry}/tasks/${encodeURIComponent(taskid)}/assets/`) || (['alpha-rsi', 'alpha-combined-rsi'].includes(run?.serviceKey) && url.pathname.startsWith(`/alloy/tasks/${encodeURIComponent(taskid)}/assets/`)));
   const serviceAsset = url.origin === service.origin && (taskAsset || url.pathname.startsWith('/files/'));
   const publicAsset = url.origin === 'https://www.science42.tech' && url.pathname.startsWith('/alpha/materials/modelfiles/');
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !/%(?:2f|5c|00|25)/i.test(url.pathname) && (serviceAsset || publicAsset);

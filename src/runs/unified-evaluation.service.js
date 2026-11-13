@@ -4,10 +4,10 @@ const { createUnifiedEvaluationAdapters } = require('./unified-evaluation-adapte
 const { createRunEvents } = require('./unified-evaluation-events');
 const { createConcurrency } = require('./concurrency');
 const { validateConcurrency } = require('./batch-scheme');
-const { isSupportedComparisonPair } = require('./comparison-services');
 const { hasOutput } = require('../scoring/service');
 
-const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
+const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
+const ACTIVE_SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'literature', 'literature-aircraft'];
 const MAX_ACTIVE = 25;
 const MAX_PER_SERVICE = 5;
 const MAX_QUEUED = 300;
@@ -241,8 +241,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
       }
     } finally { job.settled = true; job.reply = null; if (!executionSlotReleased) releaseJob(job); prune(); }
   }
-  async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null, comparisonGroupId = null } = {}, internal = null) {
-    if (typeof serviceKey !== 'string' || !SERVICE_KEYS.includes(serviceKey) || !evaluators || !evaluators[serviceKey]) throw new TeamServiceError(400, 'UNIFIED_EVAL_SERVICE_INVALID', '不支持该测评服务');
+  async function start({ serviceKey, question, origin = 'manual', questionId = null, datasetVersion = null, sourceType = null, batchId = null, comparisonGroupId = null, questionKind = null } = {}, internal = null) {
+    if (typeof serviceKey !== 'string' || !ACTIVE_SERVICE_KEYS.includes(serviceKey) || !evaluators || !evaluators[serviceKey]) throw new TeamServiceError(400, 'UNIFIED_EVAL_SERVICE_INVALID', '不支持该测评服务');
     if (typeof question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
     // 已验证的固定案例和随机批次保留原服务约束；不能把自定义提问长度限制套到案例上。
     const existingRun = Boolean(internal && typeof internal.execute === 'function');
@@ -283,6 +283,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     }
     const initialRun = { ...(evaluators[serviceKey]?.serviceAddress ? { serviceAddress: evaluators[serviceKey].serviceAddress, serviceAddressSource: 'run' } : {}),
       ...(ruleSnapshot ? { ruleSnapshot } : {}),
+      ...(questionKind ? { questionKind } : {}),
       ...(internal?.rerun ? { previousRunId: internal.rerun.runId } : {}),
       ...(idempotency ? { queuePayload: { version: 1, caseDef: internal.caseDef || null, scoreMode: internal.scoreMode || null, concurrencyLimits: internal.concurrencyLimits || null } } : {}) };
     const job = { runId: recovered?.runId || crypto.randomUUID(), nativeRunId: null, serviceKey, origin, question: text, questionId, datasetVersion, questionSourceType: sourceType, batchId, comparisonGroupId, status: 'queued', answer: '', answerTruncated: false, run: recovered ? recovered.run : Object.keys(initialRun).length ? initialRun : null, scores: internal && internal.scoreMode === 'none' ? { quality: { status: 'absent', quality: null, error: null } } : null, scoreError: null, error: null, startedAt: recovered?.startedAt || new Date().toISOString(), finishedAt: null, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, scoreMode: internal && internal.scoreMode, ownerScope: recovered?.ownerScope || internal?.idempotency?.scope, reply: null, reservation, batchReservation };
@@ -479,9 +480,11 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
   }
   async function createBatchRun(input, { key, ruleSnapshot } = {}) {
     if (!input || typeof input.batchId !== 'string' || !input.batchId || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '批次测评任务参数无效');
+    if (input.comparisonGroupId) throw new TeamServiceError(410, 'COMPARISON_DISABLED', '新建对比测评已停用，历史对比仍可查看');
+    if (input.questionKind != null && (!['composition', 'manufacturing'].includes(input.questionKind) || !['alpha-rsi', 'alpha-combined-rsi'].includes(input.serviceKey) || (input.questionKind === 'manufacturing' && input.serviceKey !== 'alpha-combined-rsi'))) throw new TeamServiceError(400, 'BATCH_RUN_INVALID', '材料测评题型无效');
     const safe = { serviceKey: input.serviceKey, question: input.question, origin: input.ownerUserId ? 'manual' : 'automation', questionId: input.questionId || null,
       datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null, batchId: input.batchId,
-      ...(input.comparisonGroupId ? { comparisonGroupId: input.comparisonGroupId } : {}) };
+      ...(input.comparisonGroupId ? { comparisonGroupId: input.comparisonGroupId } : {}), ...(input.questionKind ? { questionKind: input.questionKind } : {}) };
     const hash = crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
     return start(safe, { idempotency: { scope: input.ownerUserId ? `evaluation-user:${input.ownerUserId}` : 'evaluation-automation:batch', key, hash }, caseDef: null, scoreMode: evaluators?.[safe.serviceKey]?.scoreMode, ruleSnapshot,
       ...(input.concurrencyLimits != null ? { concurrencyLimits: validateConcurrency(input.concurrencyLimits) } : {}) });
@@ -492,12 +495,13 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     if (recoveryRunning || !repository?.listRecoverableQueued || !repository?.claimQueued) return;
     recoveryRunning = true;
     try {
-      const keys = SERVICE_KEYS.filter(key => !!evaluators?.[key]);
+      const keys = ACTIVE_SERVICE_KEYS.filter(key => !!evaluators?.[key]);
       if (!keys.length) return;
       const addresses = Object.fromEntries(keys.map(key => [key, evaluators[key].serviceAddress || null]));
       const queued = await repository.listRecoverableQueued(keys, maxQueued + maxActive, addresses);
       for (const row of queued) {
         if (runs.has(row.runId)) continue;
+        if (row.comparisonGroupId) continue;
         const payload = row.run?.queuePayload;
         if (!payload || payload.version !== 1 || (payload.caseDef != null && (typeof payload.caseDef !== 'object' || Array.isArray(payload.caseDef)))) continue;
         try {
@@ -773,49 +777,8 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     void runScoring(job, options, release).finally(() => { job.settled = true; prune(); });
     return { runId, attemptId, reused: false };
   }
-  async function createComparison(input = {}, { scope, key } = {}) {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TeamServiceError(400, 'COMPARISON_INVALID', '对比测评参数无效');
-    if (!repository?.comparisonReady || !(await repository.comparisonReady())) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移，请先执行 migrations/012_comparison_groups.sql');
-    if (typeof scope !== 'string' || !scope || typeof key !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(key)) throw new TeamServiceError(400, 'UNIFIED_EVAL_IDEMPOTENCY_INVALID', '需要有效的 Idempotency-Key');
-    const serviceKeys = input.serviceKeys;
-    if (!isSupportedComparisonPair(serviceKeys) || serviceKeys.some(value => !evaluators?.[value])) {
-      throw new TeamServiceError(400, 'COMPARISON_SERVICES_INVALID', '对比测评目前仅支持已接入的合金材料与「材料 RSI」');
-    }
-    if (typeof input.question !== 'string') throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', '请输入有效题目');
-    const text = input.question.trim();
-    const maxFor = (serviceKey) => serviceKey === 'synthesis' ? 200 : 500;
-    const max = Math.min(...serviceKeys.map(maxFor));
-    if (text.length < 8 || text.length > max) throw new TeamServiceError(400, 'UNIFIED_EVAL_QUESTION_INVALID', `题目需为 8–${max} 个字符`);
-    for (const value of [input.questionId, input.datasetVersion, input.sourceType]) {
-      if (value != null && (typeof value !== 'string' || value.length > 200)) throw new TeamServiceError(400, 'UNIFIED_EVAL_METADATA_INVALID', '运行来源信息无效');
-    }
-    const metadata = { questionId: input.questionId || null, datasetVersion: input.datasetVersion || null, sourceType: input.sourceType || null };
-    if (metadata.questionId || metadata.datasetVersion || metadata.sourceType) {
-      if (!['fixed', 'random'].includes(metadata.sourceType) || !metadata.questionId || !metadata.datasetVersion || !resolveQuestion) throw new TeamServiceError(400, 'QUESTION_SOURCE_INVALID', '请选择有效的题目和版本');
-      for (const serviceKey of serviceKeys) await resolveQuestion({ ...metadata, serviceKey, question: text });
-    }
-    // 第一个成员是整个对比请求的幂等锚点；请求哈希覆盖完整服务组合和题目。
-    const groupId = crypto.createHash('sha256').update(JSON.stringify(['comparison', scope, key])).digest('hex');
-    const request = { serviceKeys, question: text, ...metadata, comparisonGroupId: groupId };
-    const runKey = (index) => crypto.createHash('sha256').update(`comparison:${index}:${key}`).digest('hex');
-    const hash = (index) => crypto.createHash('sha256').update(JSON.stringify({ ...request, index })).digest('hex');
-    const prior = await repository.findIdempotent(scope, runKey(0));
-    if (prior && prior.hash !== hash(0)) throw new TeamServiceError(409, 'UNIFIED_EVAL_IDEMPOTENCY_CONFLICT', '幂等键已用于不同请求');
-    const original = prior ? await repository.get(prior.runId) : null;
-    if (prior && !original) throw new TeamServiceError(503, 'COMPARISON_STORAGE_UNAVAILABLE', '原对比请求暂不可读取，请稍后使用原请求重试');
-    let ruleSnapshot = prior ? original.run?.ruleSnapshot || null : scoring?.snapshotRule ? await scoring.snapshotRule() : null;
-    const first = await start({ serviceKey: serviceKeys[0], question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId }, {
-      idempotency: { scope, key: runKey(0), hash: hash(0) }, caseDef: null, ruleSnapshot, scoreMode: evaluators[serviceKeys[0]].scoreMode,
-    });
-    // 并发请求可能各自读取到不同规则：始终以实际写入的首条运行为准。
-    const anchor = await repository.get(first.runId);
-    if (!anchor) throw new TeamServiceError(503, 'COMPARISON_STORAGE_UNAVAILABLE', '原对比请求暂不可读取，请稍后使用原请求重试');
-    ruleSnapshot = anchor.run?.ruleSnapshot || null;
-    const second = await start({ serviceKey: serviceKeys[1], question: text, origin: 'manual', ...metadata, comparisonGroupId: groupId }, {
-      idempotency: { scope, key: runKey(1), hash: hash(1) }, caseDef: null, ruleSnapshot, scoreMode: evaluators[serviceKeys[1]].scoreMode,
-    });
-    const runs = [first, second].map((result, index) => ({ runId: result.runId, serviceKey: serviceKeys[index], reused: result.reused === true }));
-    return { groupId, runs };
+  async function createComparison() {
+    throw new TeamServiceError(410, 'COMPARISON_DISABLED', '新建对比测评已停用，历史对比仍可查看');
   }
 
   async function getComparison(groupId, userId) {
@@ -840,7 +803,7 @@ function createUnifiedEvaluationService({ evaluators, repository = null, resolve
     return { owned };
   }
 
-  function availableServices() { return SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
+  function availableServices() { return ACTIVE_SERVICE_KEYS.filter(key => !!evaluators?.[key]); }
   return { start, createRun, createComparison, getComparison, comparisonStorageReady: async () => !!repository?.comparisonReady && await repository.comparisonReady(), rerun, createMissionDailyRun, createBatchRun, observe, get, list, listHistory, updateHistory, hideAvailable, hideRuns, reply, end, rescore, questionScores, assertRunAccess, recoverQueued, startQueueRecovery, stopQueueRecovery, recoverTimedOutRuns, startTimeoutRecovery, stopTimeoutRecovery, scoringEnabled: !!scoring, availableServices, concurrencyCaps, runAutomation, beginAutomation, startLegacy };
 }
 module.exports = { createUnifiedEvaluationService, SERVICE_KEYS };
