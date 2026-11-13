@@ -168,7 +168,7 @@ test('异常关闭和超时不会冒充完成，保留已有回答', async () =>
   assert.match((await (await timeout.startQuestionRun({ question: '请测试超时行为' }, { onText() {} })).completion).error, /超时/);
 });
 
-test('原生 WebSocket 同时执行五个 Mission 任务且连接与回答隔离', async t => {
+test('实际 WebSocket 同时执行五个 Mission 任务且连接与回答隔离', async t => {
   const server = createServer(); const sockets = new Set(); const requests = [];
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   server.on('upgrade', (request, socket, head) => {

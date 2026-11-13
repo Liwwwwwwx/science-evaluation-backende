@@ -290,6 +290,35 @@ test('规则或模型来源缺失时不展示分数差，截断评分不列入�
   assert.equal(listed.items[0].provisionalScores.deepSeek, true);
 });
 
+test('图片评分与历史文字评分的批次不可直接比较', async () => {
+  const current = plan(); const previous = plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' });
+  const after = run({ id: 'current', scores: { deepSeekScore: { status: 'ready', model: 'deepseek-chat', quality: { total: 80, source: { imageCoverage: { found: 1, sent: 1, overflow: false } } } } } });
+  const before = run({ id: 'previous', batch_id: MISSION_PREVIOUS, scores: { deepSeekScore: { status: 'ready', model: 'deepseek-chat', quality: { total: 75 } } } });
+  const service = createBatchReadService({ repository: repository({ plans: [current, previous], runs: [after, before] }) });
+  const result = await service.comparison(MISSION);
+  assert.equal(result.comparable, false); assert.match(result.reason, /图片评分方式/);
+});
+
+test('批次按实际发送给评委的图片判断能否比较', async t => {
+  const cases = [
+    { name: '旧文字评分与未发送图片的新评分可比较', before: undefined, after: { imageCoverage: { found: 0, sent: 0, overflow: false } }, comparable: true },
+    { name: '新文字评分与图片评分不可比较', before: { imageCoverage: { found: 0, sent: 0, overflow: false } }, after: { imageCoverage: { found: 1, sent: 1, overflow: false } }, comparable: false },
+    { name: '两次都发送图片时可比较', before: { imageCoverage: { found: 1, sent: 1, overflow: false } }, after: { imageCoverage: { found: 2, sent: 2, overflow: false } }, comparable: true },
+    { name: '仅有图片已检查标记时仍识别为图片评分', before: undefined, after: { imagesInspected: true }, comparable: false },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const score = (total, source) => ({ deepSeekScore: { status: 'ready', model: 'deepseek-chat', quality: { total, ...(source ? { source } : {}) } } });
+    const service = createBatchReadService({ repository: repository({
+      plans: [plan(), plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' })],
+      runs: [run({ id: 'current', scores: score(80, item.after) }), run({ id: 'previous', batch_id: MISSION_PREVIOUS, scores: score(75, item.before) })],
+    }) });
+    const result = await service.comparison(MISSION);
+    assert.equal(result.comparable, item.comparable);
+    if (item.comparable) assert.equal(result.questions[0].delta, 5);
+    else assert.match(result.reason, /图片评分方式/);
+  });
+});
+
 test('未结束的运行不判定为已修复或新增失败', async () => {
   const service = createBatchReadService({ repository: repository({
     plans: [plan(), plan({ id: MISSION_PREVIOUS, plan_date: '2026-11-01' })],

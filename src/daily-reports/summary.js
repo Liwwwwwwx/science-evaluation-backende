@@ -1,6 +1,6 @@
 const { createHash } = require('node:crypto');
 const { DOMAINS } = require('../question-bank/domains');
-const SERVICES = { 'mission-material':'Mission 主服务', literature:'文献检索', 'literature-aircraft':'航空文献', alloy:'合金材料', synthesis:'合成制备', 'new-material':'新材料', 'alpha-rsi':'ALPHA 材料 RSI（1110）' };
+const SERVICES = { 'mission-material':'Mission 主服务', literature:'文献检索', 'literature-aircraft':'航空文献', alloy:'合金材料', synthesis:'合成制备', 'new-material':'新材料', 'alpha-rsi':'材料 RSI' };
 const JUDGES = { deepSeekScore:'DeepSeek', qwenScore:'千问' };
 function validDate(value) { return typeof value === 'string' && /^20\d{2}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value; }
 function nightDate(now) { return new Date(now.getTime() + 8*3600000 - 22*3600000).toISOString().slice(0,10); }

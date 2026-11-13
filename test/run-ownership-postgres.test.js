@@ -71,7 +71,11 @@ test('隔离数据库：旧记录归 admin，个人运行及所有入口隔离�
   assert.equal((await get('b',`/runs/${a}/artifacts/0`)).status,404);
   for (const action of ['end','reply','score','rerun']) assert.equal((await post('b',`/runs/${a}/${action}`)).status,404);
   assert.equal((await get('b',`/runs/${team}`)).status,200);
-  assert.equal((await post('b',`/runs/${team}/score`)).status,404);
+  // 团队成员可重评共享自动批次；此测试未配置评分服务。
+  const sharedScore = await post('b',`/runs/${team}/score`);
+  assert.equal(sharedScore.status,503);
+  assert.equal((await sharedScore.json()).error.code,'SCORING_UNAVAILABLE');
+  for (const action of ['end','reply','rerun']) assert.equal((await post('b',`/runs/${team}/${action}`)).status,404);
   assert.equal((await get('admin-id',`/runs/${old}`)).status,200);
   const scores=await (await get('b',`/question-scores?items=${encodeURIComponent(JSON.stringify([{id:'q',datasetVersion:'v1'}]))}`)).json();
   assert.ok(!scores.items.some(row=>row.runId===a));

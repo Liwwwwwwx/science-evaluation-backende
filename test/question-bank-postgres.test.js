@@ -23,8 +23,12 @@ test('隔离 PostgreSQL 中题库导入、版本更新、内置覆盖及软删�
       const datasetVersion = fixedDatasetVersionOf(c.serviceKey, cases.filter(x => x.serviceKey === c.serviceKey));
       await pool.query(`INSERT INTO eval_questions(id,layer,service_key,source_type,question,fingerprint,dataset_version) VALUES($1,'base',$2,'fixed',$3,$4,$5)`, [fixedQuestionId(c.serviceKey,c.id),c.serviceKey,c.question,fingerprintOf(c.question),datasetVersion]);
     }
+    await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/015_question_test_sets.sql'), 'utf8'));
     const repo = createEvalQuestionBankRepository({ pool }); const service = createQuestionBankService(repo);
     const listing = await service.list(new URLSearchParams({ source: 'fixed', limit: '20' })); assert.equal(listing.total, cases.length);
+    assert.deepEqual((await service.testSets()).items, [{ name: '材料研发测试案例集', count: 23 }]);
+    const shared = await service.list(new URLSearchParams({ source: 'fixed', testSet: '材料研发测试案例集', runnableFor: 'alloy', comparisonWith: 'alpha-rsi' }));
+    assert.equal(shared.total, 23);
     const input = { items: [{ serviceKey: 'alloy', question: '测试用材料题目：高温下性能如何？' }] };
     const results = await Promise.allSettled([service.import(input), service.import(input)]);
     assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);

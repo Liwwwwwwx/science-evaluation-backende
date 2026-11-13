@@ -45,6 +45,7 @@ let secureCookies = true;
 let authService;
 let accounts;
 let questionBank;
+let generator;
 let evaluations;
 let batches;
 let missionDaily;
@@ -88,7 +89,9 @@ if (databaseUrl) {
   const plans = createMissionDailyRepository({ pgPool: pool });
   batchSchemes = createBatchSchemeRepository({ pgPool: pool });
   const trialRepository = createTrialBatchRepository({ pgPool: pool });
-  const generator = createQuestionBankGenerationService();
+  generator = createQuestionBankGenerationService({
+    caseExamples: serviceKeys => questionRepository.listTestSetExamples({ testSet: '材料研发测试案例集', serviceKeys, limit: 3 }),
+  });
   const trialService = createTrialBatchService({ repository: trialRepository, evaluations, scoring, serviceAddresses, generator, schemes: batchSchemes });
   manualBatches = createManualBatchService({ repository: createManualBatchRepository({ pgPool: pool, schemes: batchSchemes }), evaluations, scoring, serviceAddresses, generator, trialService, schemes: batchSchemes, onError: () => console.error('手动组合测评暂不可用，请检查批次状态') });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
@@ -121,7 +124,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, generator, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true') evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });

@@ -3,7 +3,7 @@
 
 // Direct Mission probe: uses the same adapter as the platform, without its queue,
 // database or scoring. The service itself may persist tasks and generate files.
-const { createMissionEvaluator } = require('../src/runs/mission-evaluator');
+const { createMissionEvaluator, createMissionSocket } = require('../src/runs/mission-evaluator');
 
 const DEFAULT_QUESTION = '请简要比较氮化铝和氮化硼作为芯片封装散热填料的优点与限制。';
 const HELP = `Mission 流式并发探针（Node.js 22）
@@ -50,7 +50,7 @@ function preview(value) {
 function elapsed(ms) { return ms == null ? '—' : `${(ms / 1000).toFixed(1)}秒`; }
 function ago(at, now) { return at == null ? '从未' : `${Math.max(0, (now - at) / 1000).toFixed(1)}秒前`; }
 
-async function runProbe(options, { createSocket = url => new WebSocket(url), write = line => console.log(line), now = () => Date.now() } = {}) {
+async function runProbe(options, { createSocket = createMissionSocket, write = line => console.log(line), now = () => Date.now() } = {}) {
   const rows = Array.from({ length: options.count }, (_, index) => ({ index: index + 1, taskId: null, state: '连接中', start: now(), frameCount: 0, businessCount: 0, textCount: 0, maxFrameBytes: 0, largeFrameSeen: false, lastFrame: null, lastBusiness: null, lastText: null, lastType: '—', textPreview: '', reviewCount: 0, result: null, closeCode: null }));
   const label = row => `[${String(row.index).padStart(2, '0')}]`;
   const report = row => {

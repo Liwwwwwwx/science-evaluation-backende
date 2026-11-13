@@ -4,7 +4,9 @@ function createRunQuestionResolver(repository) {
     if (typeof input.question !== 'string') throw new TeamServiceError(400, 'QUESTION_TEXT_INVALID', '请输入有效题面');
     const row = await repository.getQuestion(input.questionId, input.datasetVersion);
     if (!row) throw new TeamServiceError(404, 'QUESTION_NOT_FOUND', '题目不存在');
-    if (row.layer !== 'base' || row.status !== 'active' || row.sourceType !== input.sourceType || (row.serviceKey && row.serviceKey !== input.serviceKey)) {
+    const applicable = Array.isArray(row.applicableServices) ? row.applicableServices : [];
+    const bound = row.serviceKey ? row.serviceKey === input.serviceKey || applicable.includes(input.serviceKey) : applicable.length === 0 || applicable.includes(input.serviceKey);
+    if (row.layer !== 'base' || row.status !== 'active' || row.sourceType !== input.sourceType || !bound) {
       throw new TeamServiceError(409, 'QUESTION_NOT_RUNNABLE', '题目已停用或不适用于当前服务，请重新选择');
     }
     if (row.question.trim() !== input.question.trim()) throw new TeamServiceError(409, 'QUESTION_TEXT_CONFLICT', '题目已变化，请重新选择版本');

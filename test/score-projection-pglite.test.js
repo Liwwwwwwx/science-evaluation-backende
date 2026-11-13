@@ -18,13 +18,13 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   await db.exec(`CREATE TABLE unified_evaluation_runs (
     id text PRIMARY KEY, service_key text, origin text, owner_user_id text, question text,
     question_id text, dataset_version text, question_source_type text, batch_id text,
-    status text, error text, scores jsonb, run jsonb, answer_truncated boolean,
-    started_at timestamptz, finished_at timestamptz
+    status text, error text, score_error text, scores jsonb, run jsonb, answer_truncated boolean,
+    started_at timestamptz, finished_at timestamptz, updated_at timestamptz DEFAULT now()
   );
   CREATE TABLE eval_questions (id text, dataset_version text, domain_key text);
   CREATE TABLE evaluation_user_run_history (user_id text, run_id text, title text, hidden boolean);
   CREATE TABLE evaluation_trial_batch_plans (plan_date date, id text, state text, items jsonb, rule_snapshot jsonb, error text, created_at timestamptz, updated_at timestamptz);`);
-  const detailed = { deepSeekScore: { status: 'ready', model: 'judge-a', quality: { total: 80, taskCompletion: { status: 'completed', note: 'x'.repeat(100000) }, source: { truncated: false }, extra: 'y'.repeat(100000) } }, qwenScore: { status: 'ready', model: 'judge-b', quality: { total: 72, source: { truncated: true } } }, other: { report: 'z'.repeat(100000) } };
+  const detailed = { deepSeekScore: { status: 'ready', model: 'judge-a', quality: { total: 80, taskCompletion: { status: 'completed', note: 'x'.repeat(100000) }, source: { truncated: false, imageCoverage: { found: 2, sent: 2, overflow: false } }, extra: 'y'.repeat(100000) } }, qwenScore: { status: 'ready', model: 'judge-b', quality: { total: 72, source: { truncated: true, imagesInspected: true } } }, other: { report: 'z'.repeat(100000) } };
   const pending = { deepSeekScore: { status: 'pending', model: null }, qwenScore: null, quality: { status: 'absent' } };
   const run = { status: 'done', elapsedMs: 1200, ruleSnapshot: { hash: 'rule-1' } };
   const insert = `INSERT INTO unified_evaluation_runs (id,service_key,origin,owner_user_id,question,question_id,dataset_version,batch_id,status,scores,run,answer_truncated,started_at)
@@ -51,6 +51,8 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   const compact = await repo.runsByBatchIds(['batch-1'], 'alice');
   assert.doesNotMatch(queries.at(-1), /to_jsonb\(unified_evaluation_runs\)/);
   assert.deepEqual(new Set(compact.map(row => row.id)), new Set(['auto', 'mine']));
+  assert.deepEqual(compact.find(row => row.id === 'auto').scores.deepSeekScore.quality.source.imageCoverage, { found: 2, sent: 2, overflow: false });
+  assert.equal(compact.find(row => row.id === 'auto').scores.qwenScore.quality.source.imagesInspected, true);
   assert.ok(JSON.stringify(compact).length < 5000);
   const originalScores = { auto: detailed, mine: pending };
   const baseline = compact.map(row => ({ ...row, scores: originalScores[row.id] }));
@@ -85,4 +87,18 @@ test('裁剪评分后列表、批次统计和权限保持一致，并兼容旧�
   assert.equal((await optimized.get('mission-1', 'alice')).links.dailyReport, '/daily-reports/2026-11-04');
   assert.equal((await optimized.get('manual-1', 'alice')).batch.date, '2026-11-04');
   assert.equal((await optimized.list({ source: 'nightly', from: '2026-11-04', to: '2026-11-04', userId: 'alice' })).items.every(item => item.date === '2026-11-04'), true);
+  // 已取消记录保留执行状态，同时以评分轮次原子抢占和更新结果。
+  await db.query("INSERT INTO unified_evaluation_runs (id,origin,owner_user_id,status,run) VALUES ('cancelled','manual','alice','cancelled',$1::jsonb)", [JSON.stringify({ status: 'running' })]);
+  assert.equal(await unified.claimScoring('cancelled', null, { attemptId: 'partial-1' }, pending), true);
+  assert.equal(await unified.claimScoring('cancelled', null, { attemptId: 'partial-2' }, pending), false);
+  assert.equal((await db.query("SELECT status FROM unified_evaluation_runs WHERE id='cancelled'")).rows[0].status, 'cancelled');
+  assert.equal(await unified.updateScoring('cancelled', 'partial-1', { scoring: { attemptId: 'partial-1', finishedAt: '2026-11-12' }, markdownSyntax: {}, scores: detailed, status: 'cancelled' }), true);
+  assert.equal((await db.query("SELECT status FROM unified_evaluation_runs WHERE id='cancelled'")).rows[0].status, 'cancelled');
+  assert.equal(await unified.claimScoring('auto', null, { attemptId: 'shared-1', expiresAt: new Date(Date.now() + 60000).toISOString() }, pending), true);
+  assert.equal(await unified.claimScoring('auto', null, { attemptId: 'shared-2' }, pending), false);
+  assert.equal((await unified.list({ userId: 'alice' })).items.find(item => item.runId === 'auto').scoringInProgress, true);
+  await db.query("INSERT INTO unified_evaluation_runs (id,service_key,origin,owner_user_id,question,status,started_at) VALUES ('history','alpha-rsi','manual','alice','题目','done',now())");
+  const history = await unified.listHistory('alice');
+  assert.equal(history.find(item => item.runId === 'history').serviceKey, 'alpha-rsi');
+  assert.ok(!(await unified.listHistory('bob')).some(item => item.runId === 'history'));
 });

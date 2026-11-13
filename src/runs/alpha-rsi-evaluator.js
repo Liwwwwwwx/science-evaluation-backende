@@ -7,7 +7,7 @@ const { withWaitingRetry } = require('./followup-retry');
 
 // 协议来源：旧管理端 material-service-cases 的 alpha-rsi-ws runner。
 // 1110 用 [start]/[end] 标记正文，user_input_request 表达开工确认与补充条件请求。
-const SERVICE_LABEL = 'ALPHA 材料 RSI';
+const SERVICE_LABEL = '材料 RSI';
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_END_SETTLE_MS = 1500;
 const DEFAULT_CLOSE_SETTLE_MS = 500;
@@ -40,7 +40,7 @@ function createAlphaRsiSingleEvaluator({
   generateSupplement = createAlphaRsiSupplement(),
 } = {}) {
   const target = new URL(url);
-  if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw new Error('ALPHA 材料 RSI 必须配置 WebSocket 地址');
+  if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw new Error('材料 RSI 必须配置 WebSocket 地址');
   const httpUrl = new URL(target);
   httpUrl.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
 

@@ -8,7 +8,7 @@ const SERVICE_LABELS = {
   alloy: '合金材料',
   synthesis: '合成制备',
   'new-material': '新材料',
-  'alpha-rsi': 'ALPHA 材料 RSI（1110）',
+  'alpha-rsi': '材料 RSI',
 };
 const JUDGES = { deepSeek: 'deepSeekScore', qwen: 'qwenScore' };
 const THRESHOLD_POINTS = 5;
@@ -266,6 +266,12 @@ function detailOf(plan, runs) {
   };
 }
 
+function imageInputMode(score) {
+  const source = score?.quality?.source;
+  const sent = source?.imageCoverage?.sent;
+  return (Number.isFinite(sent) ? sent > 0 : source?.imagesInspected === true) ? 'vision' : 'text';
+}
+
 function comparableScores(previous, current) {
   if (previous.execution !== 'completed' || current.execution !== 'completed') return [null, null];
   for (const key of Object.keys(JUDGES)) {
@@ -273,6 +279,7 @@ function comparableScores(previous, current) {
     const after = current.rawScores?.[JUDGES[key]];
     if (before?.status !== 'ready' || after?.status !== 'ready') continue;
     if (previous.answerTruncated || current.answerTruncated || before.quality?.source?.truncated === true || after.quality?.source?.truncated === true) continue;
+    if (imageInputMode(before) !== imageInputMode(after)) continue;
     if (!before.model || !after.model || before.model !== after.model) continue;
     const beforeScore = totalScore(previous.rawScores, key);
     const afterScore = totalScore(current.rawScores, key);
@@ -332,6 +339,14 @@ function models(runs) {
   return [...new Set(runs.flatMap((run) => Object.values(JUDGES).map((key) => run.rawScores?.[key]?.model)).filter((value) => typeof value === 'string' && value))].sort();
 }
 
+function compatibleImageModes(first, second) {
+  return Object.values(JUDGES).every(key => {
+    const modes = runs => new Set(runs.map(run => run.rawScores?.[key]).filter(item => item?.status === 'ready').map(imageInputMode));
+    const a = modes(first); const b = modes(second);
+    return a.size <= 1 && b.size <= 1 && (!a.size || !b.size || [...a][0] === [...b][0]);
+  });
+}
+
 function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
   const base = { batchId: basePlan.id, date: planDate(basePlan), planned: servicePlans(basePlan).reduce((sum, service) => sum + service.expected, 0) };
   if (!previousPlan) {
@@ -350,6 +365,9 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
   }
   if (baseModels.length && previousModels.length && baseModels.join('\0') !== previousModels.join('\0')) {
     return { base, previous, comparable: false, mode: 'none', reason: '两批次使用的评分模型不同，不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
+  }
+  if (!compatibleImageModes(baseRuns, previousRuns)) {
+    return { base, previous, comparable: false, mode: 'none', reason: '两批次的图片评分方式不一致，不能直接比较。', matchedQuestions: 0, thresholdPoints: THRESHOLD_POINTS, services: [], questions: [] };
   }
   const questions = questionComparisons(baseRuns, previousRuns);
   const sameRule = baseHashes.length === 1 && previousHashes.length === 1 && baseHashes[0] === previousHashes[0];

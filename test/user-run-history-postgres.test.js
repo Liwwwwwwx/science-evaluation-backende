@@ -20,7 +20,9 @@ test('隔离 PostgreSQL：标题及移除按用户隔离，原运行与分页保
   await pool.query("INSERT INTO unified_evaluation_runs(id,service_key,origin,question,status,started_at,answer,owner_user_id) VALUES ($1,'literature','manual','原题目','done',now(),'原回答','a')", [id]);
   const repository = createUnifiedEvaluationRepository({ pgPool: pool });
   assert.equal(await repository.updateHistory('a', id, 'rename', '个人名称'), true);
-  assert.equal((await repository.listHistory('a'))[0].title, '个人名称');
+  const history = await repository.listHistory('a');
+  assert.equal(history[0].title, '个人名称');
+  assert.equal(history[0].serviceKey, 'literature');
   assert.equal((await repository.listHistory('b')).length, 0);
   assert.equal(await repository.updateHistory('a', id, 'remove', ''), true);
   assert.equal((await repository.listHistory('a')).length, 0);
