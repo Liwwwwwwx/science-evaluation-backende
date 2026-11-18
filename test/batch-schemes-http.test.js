@@ -23,8 +23,9 @@ test('方案读取、管理员保存及手动发起分别校验权限、来源�
   assert.equal((await fetch(base, { method: 'POST', headers: headers('admin', 'http://evil.test'), body: data })).status, 403);
   assert.equal((await fetch(base, { method: 'POST', headers: headers('admin'), body: data })).status, 200);
   assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('read'), body: data })).status, 403);
-  assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('user'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 202);
-  assert.equal(calls.at(-1).userId, 'user'); assert.equal(calls.at(-1).key, 'test-key');
+  assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('user'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 403);
+  assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('admin'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 202);
+  assert.equal(calls.at(-1).userId, 'admin'); assert.equal(calls.at(-1).key, 'test-key');
 });
 
 test('仅管理员可切换夜间方案，个人删除保留当前用户身份并校验同源', async t => {

@@ -38,6 +38,13 @@ test('制备专项独立计数，兼容旧方案并受服务及总量上限约�
   assert.throws(() => validateScheme(tooManyTotal), /320/);
 });
 
+test('旧方案里的新材料题量不自动恢复，重新选择后才参与派发', () => {
+  const config = small(); config.services['new-material'] = 5;
+  assert.equal(upgradeComparisonScheme(config).services['new-material'], 0);
+  assert.equal(upgradeComparisonScheme({ ...config, includeNewMaterial: true }).services['new-material'], 5);
+  assert.equal(config.services['new-material'], 5);
+});
+
 test('旧方案把航空与合成题量合并为服务题数', () => {
   const legacy = {
     pools: { aviation: 3, synthesis: 3 },

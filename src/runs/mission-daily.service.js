@@ -13,13 +13,13 @@ function dailyKey(day, item) {
 }
 
 // 计划与题目快照先落库，再创建可幂等恢复的运行；不使用请求方身份或公开接口。
-function createMissionDailyService({ repository, evaluations, scoring, serviceAddress = null, enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, skipDate = () => false, onError = () => {} } = {}) {
+function createMissionDailyService({ repository, evaluations, scoring, serviceAddress: defaultAddress = null, getServiceAddress = () => defaultAddress, enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, skipDate = () => false, onError = () => {} } = {}) {
   if (!repository || !evaluations) throw new Error('每日测评依赖运行及数据库');
   let timer = null; let ticking = false; let reported = false;
-  async function dispatch(plan) {
+  async function dispatch(plan, serviceAddress) {
     if (!serviceAddress || plan.serviceAddress !== serviceAddress) return;
     for (const item of plan.items) {
-      await evaluations.createMissionDailyRun({ ...item, batchId: plan.id }, { key: dailyKey(plan.date, item), ruleSnapshot: plan.ruleSnapshot });
+      await evaluations.createMissionDailyRun({ ...item, batchId: plan.id }, { key: dailyKey(plan.date, item), ruleSnapshot: plan.ruleSnapshot, expectedAddress: serviceAddress });
     }
     await repository.markSubmitted(plan.id);
   }
@@ -27,8 +27,10 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
     if (!enabled || !ready || ticking) return;
     ticking = true;
     try {
+      const serviceAddress = await getServiceAddress();
+      if (!serviceAddress) return;
       const pending = await repository.pending();
-      if (pending) { await dispatch(pending); return; }
+      if (pending) { await dispatch(pending, serviceAddress); return; }
       const { date, minute } = localTime(now());
       if (minute < 22 * 60) return;
       if (skipDate(date)) return;
@@ -46,7 +48,7 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
       const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
       const plan = await repository.create({ date, id: randomUUID(), serviceAddress, items, ruleSnapshot,
         state: items.length ? 'dispatching' : 'empty', reason: items.length < 10 ? `可用题目 ${items.length} 道，未达到 10 道` : null });
-      if (plan.state === 'dispatching') await dispatch(plan);
+      if (plan.state === 'dispatching') await dispatch(plan, serviceAddress);
     } finally { ticking = false; }
   }
   function start() {
@@ -56,13 +58,14 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
   }
   function stop() { if (timer) clearInterval(timer); timer = null; }
   async function status() {
-    const info = { enabled, ready, time: '22:00', timeZone: TIME_ZONE, targetCount: 10, last: null };
+    const serviceAddress = ready ? await getServiceAddress() : null;
+    const info = { enabled, ready: ready && !!serviceAddress, time: '22:00', timeZone: TIME_ZONE, targetCount: 10, last: null };
     if (!enabled || !ready) return info;
     const plan = await repository.latest();
     if (!plan) return info;
     const runs = await repository.runs(plan.id);
     const byQuestion = new Map(runs.map(run => [`${run.questionId}\0${run.datasetVersion}`, run]));
-    const reason = plan.state === 'dispatching' && plan.serviceAddress !== serviceAddress ? '服务地址已变化，任务暂停并等待核对' : plan.reason;
+    const reason = plan.state === 'dispatching' && plan.serviceAddress !== serviceAddress ? '服务已暂停或地址已变化，任务暂停并等待核对' : plan.reason;
     return { ...info, last: { date: plan.date, id: plan.id, state: plan.state, reason, count: plan.items.length,
       items: plan.items.map(item => ({ ...item, ...(byQuestion.get(`${item.questionId}\0${item.datasetVersion}`) || { runId: null, status: 'not_dispatched', scores: null }) })) } };
   }

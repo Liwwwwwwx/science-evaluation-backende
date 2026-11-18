@@ -2,7 +2,7 @@ const { TeamServiceError } = require('../errors');
 
 // 旧服务键仍用于读取历史快照；新批次只执行当前服务。
 const SERVICE_KEYS = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi'];
-const INACTIVE_SERVICE_KEYS = ['alloy', 'synthesis', 'new-material'];
+const INACTIVE_SERVICE_KEYS = ['alloy', 'synthesis'];
 const MAX_CONCURRENCY = 5;
 // 新方案只按服务分配题数；旧方案的航空/合成两池在读取时合并为服务题数。
 const DEFAULT_SCHEME = Object.freeze({
@@ -49,11 +49,12 @@ function normalizeLegacy(input) {
 
 function validateScheme(input) {
   const source = normalizeLegacy(input);
-  if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).some(key => !['services', 'concurrency', 'compareSynthesisAlpha', 'compareAlloyAlpha', 'rsiManufacturingCount'].includes(key))) invalid('方案格式无效');
+  if (!source || typeof source !== 'object' || Array.isArray(source) || Object.keys(source).some(key => !['services', 'concurrency', 'compareSynthesisAlpha', 'compareAlloyAlpha', 'rsiManufacturingCount', 'includeNewMaterial'].includes(key))) invalid('方案格式无效');
   const { services } = source;
   const concurrency = source.concurrency === undefined ? undefined : validateConcurrency(source.concurrency);
   if (source.compareSynthesisAlpha !== undefined && typeof source.compareSynthesisAlpha !== 'boolean') invalid('同题对比配置无效');
   if (source.compareAlloyAlpha !== undefined && typeof source.compareAlloyAlpha !== 'boolean') invalid('同题对比配置无效');
+  if (source.includeNewMaterial !== undefined && typeof source.includeNewMaterial !== 'boolean') invalid('新材料题量配置无效');
   const compareAlloyAlpha = source.compareAlloyAlpha === true;
   const compareSynthesisAlpha = source.compareSynthesisAlpha === true;
   if (compareAlloyAlpha && compareSynthesisAlpha) invalid('不能同时开启两种同题对比');
@@ -73,16 +74,17 @@ function validateScheme(input) {
     if (normalized['alpha-rsi'] !== normalized.alloy) invalid('同题对比要求1110与合金材料使用相同数量的题目');
   }
   if (compareSynthesisAlpha && (!normalized.synthesis || normalized['alpha-rsi'] !== normalized.synthesis)) invalid('同题对比要求合成制备与1110使用相同数量的题目');
-  return { services: normalized, rsiManufacturingCount, compareAlloyAlpha, compareSynthesisAlpha, ...(concurrency === undefined ? {} : { concurrency }) };
+  return { services: normalized, rsiManufacturingCount, compareAlloyAlpha, compareSynthesisAlpha, ...(source.includeNewMaterial === true ? { includeNewMaterial: true } : {}), ...(concurrency === undefined ? {} : { concurrency }) };
 }
 
 // 只投影新批次使用的配置，不修改数据库中的旧配置或已生成的批次快照。
 function upgradeComparisonScheme(input, { allowEmpty = false } = {}) {
   const config = validateScheme(input);
   const services = { ...config.services };
-  for (const key of INACTIVE_SERVICE_KEYS) services[key] = 0;
+  const inactive = config.includeNewMaterial ? INACTIVE_SERVICE_KEYS : [...INACTIVE_SERVICE_KEYS, 'new-material'];
+  for (const key of inactive) services[key] = 0;
   const concurrency = config.concurrency && { ...config.concurrency };
-  if (concurrency) for (const key of INACTIVE_SERVICE_KEYS) concurrency[key] = MAX_CONCURRENCY;
+  if (concurrency) for (const key of inactive) concurrency[key] = MAX_CONCURRENCY;
   const current = {
     ...config,
     services,

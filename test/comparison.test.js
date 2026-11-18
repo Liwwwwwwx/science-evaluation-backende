@@ -85,11 +85,11 @@ test('停用服务不能新建或自动恢复，旧对比排队记录也不会�
     async listRecoverableQueued(keys) { recoveredKeys = keys; return [{ runId: 'old', comparisonGroupId: 'a'.repeat(64) }]; },
     async claimQueued() { claims++; },
   };
-  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), synthesis: evaluator(), 'new-material': evaluator(), 'alpha-rsi': evaluator(), 'alpha-combined-rsi': evaluator() }, repository });
+  const service = createUnifiedEvaluationService({ evaluators: { alloy: evaluator(), synthesis: evaluator(), 'alpha-rsi': evaluator(), 'alpha-combined-rsi': evaluator() }, repository });
   for (const serviceKey of ['alloy', 'synthesis', 'new-material']) {
     await assert.rejects(service.start({ serviceKey, question: '请分析材料的组成和目标性能。' }), { code: 'UNIFIED_EVAL_SERVICE_INVALID' });
   }
-  assert.deepEqual(service.availableServices(), ['alpha-rsi', 'alpha-combined-rsi']);
+  assert.deepEqual(await service.availableServices(), ['alpha-rsi', 'alpha-combined-rsi']);
   await service.recoverQueued();
   assert.deepEqual(recoveredKeys, ['alpha-rsi', 'alpha-combined-rsi']);
   assert.equal(claims, 0);

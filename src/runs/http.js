@@ -1,4 +1,6 @@
 const { TeamServiceError } = require('../errors');
+const { canManageAccounts } = require('../auth/accounts');
+const { SERVICE_LABELS } = require('./service-settings');
 const { readRunArtifact } = require('./artifacts');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 // 单个结构化结果可达数MB；允许一份完整结果写出，慢连接仍受缓冲上限保护。
@@ -7,16 +9,11 @@ function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', mes
 async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply }) {
   const base = '/api/evaluation/unified';
   if (url.pathname === `${base}/services` && req.method === 'GET') {
-    const configured = evaluations?.availableServices() || [];
-    const writable = runWriteEnabled && user.permissions.includes('team-services:write');
-    return reply(res, 200, { items: [
-      { key: 'mission-material', label: 'Mission_ScienceMaterial' },
-      { key: 'alpha-rsi', label: '材料配比 RSI' },
-      { key: 'alpha-combined-rsi', label: '配比+制备 RSI' },
-      { key: 'literature', label: '文献检索' },
-      { key: 'literature-aircraft', label: '航空文献' },
-      { key: 'new-material', label: '新材料' },
-    ].map(item => ({ ...item, enabled: writable && configured.includes(item.key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent' })) });
+    const canRun = runWriteEnabled && canManageAccounts(user);
+    const configured = canRun ? await evaluations?.availableServices?.() || [] : [];
+    return reply(res, 200, { canRun, items: Object.entries(SERVICE_LABELS).map(([key, label]) => ({
+      key, label, enabled: configured.includes(key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent',
+    })) });
   }
   if (!evaluations) throw new TeamServiceError(503, 'EVALUATION_UNAVAILABLE', '独立运行尚未配置');
   if (url.pathname === `${base}/history`) {
@@ -70,7 +67,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
   }
   if (url.pathname === `${base}/runs`) {
     if (req.method === 'POST') {
-      if (!user.permissions.includes('team-services:write')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
+      if (!canManageAccounts(user)) throw new TeamServiceError(403, 'FORBIDDEN', '仅 admin 可发起测评');
       if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
       if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
       const input = await readBody(req, 16 * 1024);
@@ -114,11 +111,11 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
   const rescoreRequest = req.method === 'POST' && match[2] === '/score';
   const access = await evaluations.assertRunAccess(match[1], String(user.id), req.method === 'POST' && !rescoreRequest);
   if (['/reply', '/score', '/rerun', '/end'].includes(match[2]) && req.method === 'POST') {
+    if (match[2] === '/rerun' && !canManageAccounts(user)) throw new TeamServiceError(403, 'FORBIDDEN', '仅 admin 可重新发起测评');
     if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
     if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
     if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
     if (match[2] === '/rerun') {
-      if (!user.permissions.includes('team-services:read')) throw new TeamServiceError(403, 'FORBIDDEN', '没有原运行查看权限');
       const input = await readBody(req, 1024);
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) invalid('重新测评使用原题与原服务，请发送空对象');
       return reply(res, 201, await evaluations.rerun(match[1], { scope, key: req.headers['idempotency-key'] }));
@@ -144,7 +141,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const rerunnable = ended && ['done','error'].includes(value.status) && ['done','error'].includes(value.run?.status);
     return reply(res, 200, { ...value, rerunPreservesOutput: true,
       canRescore: !!(scope && (access.owned || value.origin === 'automation') && runWriteEnabled && evaluations.scoringEnabled && ended),
-      canRerun: !!(scope && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && (evaluations.availableServices?.() || []).includes(value.serviceKey)) });
+      canRerun: !!(canManageAccounts(user) && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && ((await evaluations.availableServices?.()) || []).includes(value.serviceKey)) });
   }
   // 先读取一次，保证不存在/不可读时返回 JSON 错误而不是半条 SSE。
   await evaluations.get(match[1]);

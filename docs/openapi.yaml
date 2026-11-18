@@ -1523,7 +1523,7 @@ paths:
     get:
       tags: [统一运行]
       summary: 可用测评服务
-      description: 需要 `team-services:read`。`enabled` 表示适配器已配置、具备写权限且写入已启用；可用状态不代表实时探活成功。
+      description: 需要 `team-services:read`。只有 admin 在运行写入启用后可发起测评；`enabled` 另要求服务已配置且启用，不代表实时探活成功。
       responses:
         '200':
           description: 已接入服务列表
@@ -1531,8 +1531,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, canRun]
                 properties:
+                  canRun:
+                    type: boolean
                   items:
                     type: array
                     items:
@@ -1553,6 +1555,56 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /api/evaluation/unified/service-settings:
+    get:
+      tags: [统一运行]
+      summary: 读取测评服务开关与地址
+      description: 仅 admin 可访问。`storageReady=false` 表示仍在使用后端默认配置，暂不能保存。
+      responses:
+        '200':
+          description: 服务配置及保存版本
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvaluationServiceSettings' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [统一运行]
+      summary: 保存测评服务配置
+      description: 仅 admin 可保存，需同源会话。提交读取时的版本及修改项，立即用于新任务。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, items]
+              properties:
+                version: { type: integer, minimum: 0 }
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 6
+                  items: { $ref: '#/components/schemas/EvaluationServiceSetting' }
+      responses:
+        '200':
+          description: 保存后的服务配置及新版本
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvaluationServiceSettings' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 配置版本冲突，或仍有排队任务或正在派发的批次
+        '503':
+          description: 服务配置存储尚未启用
 
   /api/evaluation/unified/mission-daily:
     get:
@@ -1729,7 +1781,7 @@ paths:
       tags: [统一运行]
       summary: 创建统一运行
       description: |
-        需要 `team-services:write`、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
+        仅 admin 可发起，要求评测读写权限、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
         以及 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。来源统一为人工运行（manual），归当前用户所有。
         题库来源字段（questionId/datasetVersion/sourceType）须完整，后端核验有效版本与原题。
         成功返回 201；排队执行时也立即返回，经 SSE 或详情接口获取进度。执行完成后自动独立评分。
@@ -1746,7 +1798,7 @@ paths:
               properties:
                 serviceKey:
                   type: string
-                  enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft]
+                  enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
                 question:
                   type: string
                   description: 题面；人工提问 8–500 字符
@@ -2043,7 +2095,7 @@ paths:
       tags: [统一运行]
       summary: 保留旧输出并重新测评
       description: |
-        需要读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持本人已结束的人工运行。
+        仅 admin 可发起，要求读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持本人已结束的人工运行。
         创建新运行并沿用原题、服务与规则快照，原记录及输出完整保留。同键只创建一次。
       parameters:
         - $ref: '#/components/parameters/RunId'
@@ -2820,6 +2872,36 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+    EvaluationServiceSetting:
+      type: object
+      required: [key, enabled, address]
+      properties:
+        key:
+          type: string
+          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
+        enabled: { type: boolean }
+        address:
+          type: string
+          nullable: true
+          description: 完整公网 IPv4 WebSocket 地址和路径，不含认证信息或查询参数；null 使用后端默认地址。
+
+    EvaluationServiceSettings:
+      type: object
+      required: [storageReady, version, items]
+      properties:
+        storageReady: { type: boolean }
+        version: { type: integer }
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/EvaluationServiceSetting'
+              - type: object
+                required: [label, defaultAddress]
+                properties:
+                  label: { type: string }
+                  defaultAddress: { type: string, nullable: true }
+
     Error:
       type: object
       required: [error]
