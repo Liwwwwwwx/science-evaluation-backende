@@ -90,8 +90,8 @@ if (databaseUrl) {
   serviceSettings = createServiceSettings({ pool, defaults: evaluators, factories });
   const getEvaluators = async () => (await serviceSettings.runtime()).evaluators;
   const getServiceState = async () => {
-    const { evaluators: current, paused } = await serviceSettings.runtime();
-    return { addresses: Object.fromEntries(SERVICE_KEYS.map(key => [key, current[key]?.serviceAddress || null])), paused };
+    const { evaluators: current, paused, version } = await serviceSettings.runtime();
+    return { addresses: Object.fromEntries(SERVICE_KEYS.map(key => [key, current[key]?.serviceAddress || null])), paused, version };
   };
   const automation = automationEnabled();
   const trialDate = automation ? process.env.EVALUATION_TRIAL_DATE || '' : '';
@@ -111,7 +111,7 @@ if (databaseUrl) {
   const trialService = createTrialBatchService({ repository: trialRepository, evaluations, scoring, getServiceState, generator, schemes: batchSchemes });
   manualBatches = createManualBatchService({ repository: createManualBatchRepository({ pgPool: pool, schemes: batchSchemes }), evaluations, scoring, getServiceState, generator, trialService, schemes: batchSchemes, onError: () => console.error('手动组合测评暂不可用，请检查批次状态') });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
-    getServiceAddress: async () => (await getServiceState()).addresses['mission-material'],
+    getServiceState: async () => { const { addresses, version } = await getServiceState(); return { address: addresses['mission-material'], version }; },
     enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', skipDate: day => dailyMultiService || day === trialDate,
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
   if (trialDate || dailyMultiService) {

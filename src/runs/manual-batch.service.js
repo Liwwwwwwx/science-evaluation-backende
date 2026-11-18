@@ -52,13 +52,13 @@ function createManualBatchService({ repository, evaluations, generator, scoring,
     }
     const keys = Object.keys(scheme.services).filter(service => scheme.services[service] > 0);
     if (scheme.rsiManufacturingCount && !keys.includes('alpha-combined-rsi')) keys.push('alpha-combined-rsi');
-    const { addresses } = await getServiceState();
+    const { addresses, version: serviceSettingsVersion } = await getServiceState();
     if (keys.some(service => !addresses[service])) throw new TeamServiceError(503, 'BATCH_SERVICES_UNAVAILABLE', '所选服务已停用或尚未配置');
     if ((scheme.compareAlloyAlpha || scheme.compareSynthesisAlpha) && !await evaluations.comparisonStorageReady()) throw new TeamServiceError(503, 'COMPARISON_STORAGE_NOT_MIGRATED', '对比存储尚未迁移');
     const snapshot = { config: scheme, scheme: source, rsiQuestionLayout: 'shared-v1' };
     const requestHash = createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
     const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
-    const result = await repository.create({ id: randomUUID(), date: localTime(new Date()).date, userId, requestKey: key, requestHash, configSnapshot: snapshot, serviceAddresses: addresses, ruleSnapshot });
+    const result = await repository.create({ id: randomUUID(), date: localTime(new Date()).date, userId, requestKey: key, requestHash, configSnapshot: snapshot, serviceAddresses: addresses, ruleSnapshot, serviceSettingsVersion });
     if (!result.reused) void process(result.plan.id, true).catch(onError);
     return { batchId: result.plan.id, state: result.plan.state, reused: result.reused };
   }

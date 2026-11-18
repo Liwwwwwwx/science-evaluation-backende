@@ -13,7 +13,7 @@ function dailyKey(day, item) {
 }
 
 // 计划与题目快照先落库，再创建可幂等恢复的运行；不使用请求方身份或公开接口。
-function createMissionDailyService({ repository, evaluations, scoring, serviceAddress: defaultAddress = null, getServiceAddress = () => defaultAddress, enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, skipDate = () => false, onError = () => {} } = {}) {
+function createMissionDailyService({ repository, evaluations, scoring, serviceAddress: defaultAddress = null, getServiceState = () => ({ address: defaultAddress }), enabled = false, ready = false, now = () => new Date(), intervalMs = 30000, skipDate = () => false, onError = () => {} } = {}) {
   if (!repository || !evaluations) throw new Error('每日测评依赖运行及数据库');
   let timer = null; let ticking = false; let reported = false;
   async function dispatch(plan, serviceAddress) {
@@ -27,7 +27,7 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
     if (!enabled || !ready || ticking) return;
     ticking = true;
     try {
-      const serviceAddress = await getServiceAddress();
+      const { address: serviceAddress, version: serviceSettingsVersion } = await getServiceState();
       if (!serviceAddress) return;
       const pending = await repository.pending();
       if (pending) { await dispatch(pending, serviceAddress); return; }
@@ -46,7 +46,7 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
       }
       const items = await repository.selectQuestions(date);
       const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
-      const plan = await repository.create({ date, id: randomUUID(), serviceAddress, items, ruleSnapshot,
+      const plan = await repository.create({ date, id: randomUUID(), serviceAddress, serviceSettingsVersion, items, ruleSnapshot,
         state: items.length ? 'dispatching' : 'empty', reason: items.length < 10 ? `可用题目 ${items.length} 道，未达到 10 道` : null });
       if (plan.state === 'dispatching') await dispatch(plan, serviceAddress);
     } finally { ticking = false; }
@@ -58,7 +58,7 @@ function createMissionDailyService({ repository, evaluations, scoring, serviceAd
   }
   function stop() { if (timer) clearInterval(timer); timer = null; }
   async function status() {
-    const serviceAddress = ready ? await getServiceAddress() : null;
+    const serviceAddress = ready ? (await getServiceState()).address : null;
     const info = { enabled, ready: ready && !!serviceAddress, time: '22:00', timeZone: TIME_ZONE, targetCount: 10, last: null };
     if (!enabled || !ready) return info;
     const plan = await repository.latest();

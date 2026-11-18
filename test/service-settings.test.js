@@ -1,11 +1,16 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { Pool } = require('pg');
 const { createApp } = require('../src/app');
 const { createServiceSettings, validateAddress } = require('../src/runs/service-settings');
 const { createUnifiedEvaluationService } = require('../src/runs/unified-evaluation.service');
+const { createManualBatchRepository } = require('../src/runs/manual-batch.repository');
+const { createTrialBatchRepository } = require('../src/runs/trial-batch.repository');
+const { createMissionDailyRepository } = require('../src/runs/mission-daily.repository');
+const migration = name => readFileSync(path.resolve(__dirname, '../migrations', name), 'utf8');
 
 test('测评地址拒绝不完整 IP、非公网地址、凭据以及不兼容的新材料路径', () => {
   for (const address of ['ws://8.8.8:1105/start', 'ws://127.0.0.1/start', 'ws://169.254.169.254/start',
@@ -55,7 +60,7 @@ test('隔离 PostgreSQL：地址与开关即时生效，排队时拒绝修改并
   const evaluations = createUnifiedEvaluationService({ getEvaluators: async () => (await secondProcess.runtime()).evaluators });
   assert.equal((await settings.list()).storageReady, false);
   assert.deepEqual(await evaluations.availableServices(), ['alpha-rsi']);
-  await pool.query(readFileSync(path.resolve(__dirname, '../migrations/016_evaluation_service_settings.sql'), 'utf8'));
+  await pool.query(migration('016_evaluation_service_settings.sql'));
   const address = 'ws://8.8.8.8:1105/new-material/start';
   const newSetting = { version: 0, items: [{ key: 'new-material', enabled: true, address }] };
   const concurrent = await Promise.allSettled([settings.save(newSetting, 'admin'), secondProcess.save(newSetting, 'admin')]);
@@ -67,7 +72,8 @@ test('隔离 PostgreSQL：地址与开关即时生效，排队时拒绝修改并
   await started.nativeCompletion;
   assert.deepEqual(calls, [address]);
   assert.equal((await evaluations.get(started.runId)).run.serviceAddress, address);
-  await pool.query("CREATE TABLE public.unified_evaluation_runs (status text); INSERT INTO public.unified_evaluation_runs VALUES ('queued')");
+  for (const file of ['003_evaluation_runs.sql', '005_mission_daily_plans.sql', '008_trial_batch_plans.sql', '013_batch_schemes.sql']) await pool.query(migration(file));
+  await pool.query("INSERT INTO public.unified_evaluation_runs (id, service_key, origin, question, status, started_at) VALUES ($1, 'new-material', 'manual', '隔离测试题目', 'queued', now())", [randomUUID()]);
   const pause = { version: 1, items: [{ key: 'new-material', enabled: false, address }] };
   await assert.rejects(settings.save(pause, 'admin'), { code: 'SERVICE_SETTINGS_BUSY' });
   await pool.query("UPDATE public.unified_evaluation_runs SET status = 'running'");
@@ -75,4 +81,32 @@ test('隔离 PostgreSQL：地址与开关即时生效，排队时拒绝修改并
   assert.deepEqual(await evaluations.availableServices(), ['alpha-rsi']);
   assert.deepEqual((await secondProcess.runtime()).paused, ['new-material']);
   assert.equal((await evaluations.get(started.runId)).run.serviceAddress, address);
+
+  const manual = createManualBatchRepository({ pgPool: pool, schemes: { ready: async () => true } });
+  const trial = createTrialBatchRepository({ pgPool: pool });
+  const mission = createMissionDailyRepository({ pgPool: pool });
+  const date = '2026-11-18';
+  const manualId = randomUUID();
+  const args = { date, serviceAddresses: { 'alpha-rsi': defaults['alpha-rsi'].serviceAddress }, ruleSnapshot: null, configSnapshot: {} };
+  const paths = [
+    { create: version => manual.create({ ...args, id: manualId, userId: 'admin', requestKey: 'test-batch', requestHash: 'fixture', serviceSettingsVersion: version }), read: () => manual.get(manualId), clear: () => manual.fail(manualId, '测试结束') },
+    { create: version => trial.create({ ...args, id: randomUUID(), serviceSettingsVersion: version }), read: () => trial.get(date), clear: () => pool.query("UPDATE evaluation_trial_batch_plans SET state='failed' WHERE plan_date=$1", [date]) },
+    { create: version => mission.create({ date, id: randomUUID(), serviceAddress: 'ws://mission.invalid/start', items: [{}], state: 'dispatching', serviceSettingsVersion: version }), read: () => mission.get(date), clear: () => pool.query("UPDATE evaluation_mission_daily_plans SET state='skipped' WHERE plan_date=$1", [date]) },
+  ];
+  for (const route of paths) {
+    const staleVersion = (await secondProcess.runtime()).version;
+    const { version } = await settings.save({ ...pause, version: staleVersion }, 'admin');
+    await assert.rejects(route.create(staleVersion), { code: 'SERVICE_SETTINGS_CHANGED' });
+    assert.equal(await route.read(), null, '配置已变更时不得留下无法派发的计划');
+    const [creation, change] = await Promise.allSettled([route.create(version), settings.save({ ...pause, version }, 'admin')]);
+    assert.notEqual(creation.status, change.status, '并发的批次创建和配置更新只能成功一个');
+    if (creation.status === 'fulfilled') {
+      assert.equal(change.reason.code, 'SERVICE_SETTINGS_BUSY');
+      assert.ok(await route.read());
+      await route.clear();
+    } else {
+      assert.equal(creation.reason.code, 'SERVICE_SETTINGS_CHANGED');
+      assert.equal(await route.read(), null);
+    }
+  }
 });

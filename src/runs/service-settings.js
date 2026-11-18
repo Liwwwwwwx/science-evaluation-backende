@@ -42,12 +42,20 @@ function validateAddress(input, key) {
   return new URL(match[0]).href;
 }
 
+async function lockBatchStart(client, version) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext('evaluation-batch-start'))");
+  if (version == null) return;
+  const { rows: [table] } = await client.query("SELECT to_regclass('public.evaluation_service_settings') IS NOT NULL AS ready");
+  const current = table.ready ? (await client.query('SELECT version FROM public.evaluation_service_settings WHERE id = 1')).rows[0]?.version : 0;
+  if ((current ?? 0) !== version) throw new TeamServiceError(409, 'SERVICE_SETTINGS_CHANGED', '测评服务配置已更新，请刷新后重试');
+}
+
 function createServiceSettings({ pool, defaults, factories }) {
   const cached = new Map();
 
-  async function read() {
+  async function read(client = pool) {
     try {
-      const { rows } = await pool.query('SELECT version, overrides FROM public.evaluation_service_settings WHERE id = 1');
+      const { rows } = await client.query('SELECT version, overrides FROM public.evaluation_service_settings WHERE id = 1');
       return rows[0] || null;
     } catch (error) {
       if (error.code === '42P01') return null;
@@ -66,7 +74,7 @@ function createServiceSettings({ pool, defaults, factories }) {
 
   async function runtime() {
     const row = await read();
-    const { items } = describe(row);
+    const { items, version } = describe(row);
     const evaluators = {};
     const paused = [];
     for (const item of items) {
@@ -86,36 +94,46 @@ function createServiceSettings({ pool, defaults, factories }) {
       }
       evaluators[item.key] = entry.evaluator;
     }
-    return { evaluators, paused };
+    return { evaluators, paused, version };
   }
 
   async function save(input, userId) {
     if (!input || !Number.isInteger(input.version) || input.version < 0 || !Array.isArray(input.items) || !input.items.length || input.items.length > ACTIVE_SERVICE_KEYS.length) invalid('服务配置或版本无效');
-    const row = await read();
-    if (!row) throw new TeamServiceError(503, 'SERVICE_SETTINGS_UNAVAILABLE', '服务配置存储尚未启用');
-    const overrides = { ...row.overrides };
+    const changed = {};
     const seen = new Set();
     for (const item of input.items) {
       if (!item || !ACTIVE_SERVICE_KEYS.includes(item.key) || seen.has(item.key) || typeof item.enabled !== 'boolean') invalid('服务或启用状态无效');
       const address = validateAddress(item.address, item.key);
       if (item.enabled && !address && !defaults[item.key]?.serviceAddress) invalid(`${SERVICE_LABELS[item.key]}启用前需要填写服务地址`);
-      overrides[item.key] = { address, enabled: item.enabled };
+      changed[item.key] = { address, enabled: item.enabled };
       seen.add(item.key);
     }
-    const present = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1::text[])", [Object.keys(ACTIVE_WORK)]);
-    const tables = new Set(present.rows.map(entry => entry.table_name));
-    const pending = Object.entries(ACTIVE_WORK).filter(([table]) => tables.has(table)).map(([table, where]) => `EXISTS(SELECT 1 FROM public.${table} WHERE ${where})`);
-    const { rows } = await pool.query(`UPDATE public.evaluation_service_settings
-      SET version = version + 1, overrides = $1::jsonb, updated_by = $2, updated_at = now()
-      WHERE id = 1 AND version = $3 AND NOT (${pending.join(' OR ') || 'false'}) RETURNING version, overrides`, [JSON.stringify(overrides), userId, input.version]);
-    if (!rows[0]) {
-      if ((await read())?.version === input.version) throw new TeamServiceError(409, 'SERVICE_SETTINGS_BUSY', '还有排队任务或批次正在派发，请稍后保存');
-      throw new TeamServiceError(409, 'SERVICE_SETTINGS_CONFLICT', '服务配置已被更新，请刷新后再保存');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // 批次创建在同一把事务锁内复核读到的版本。先拿锁再查待派发任务，避免使用旧事务快照。
+      await lockBatchStart(client);
+      const row = await read(client);
+      if (!row) throw new TeamServiceError(503, 'SERVICE_SETTINGS_UNAVAILABLE', '服务配置存储尚未启用');
+      if (row.version !== input.version) throw new TeamServiceError(409, 'SERVICE_SETTINGS_CONFLICT', '服务配置已被更新，请刷新后再保存');
+      const present = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1::text[])", [Object.keys(ACTIVE_WORK)]);
+      const tables = new Set(present.rows.map(entry => entry.table_name));
+      const pending = Object.entries(ACTIVE_WORK).filter(([table]) => tables.has(table)).map(([table, where]) => `EXISTS(SELECT 1 FROM public.${table} WHERE ${where})`);
+      const { rows } = await client.query(`UPDATE public.evaluation_service_settings
+        SET version = version + 1, overrides = $1::jsonb, updated_by = $2, updated_at = now()
+        WHERE id = 1 AND NOT (${pending.join(' OR ') || 'false'}) RETURNING version, overrides`, [JSON.stringify({ ...row.overrides, ...changed }), userId]);
+      if (!rows[0]) throw new TeamServiceError(409, 'SERVICE_SETTINGS_BUSY', '还有排队任务或批次正在派发，请稍后保存');
+      await client.query('COMMIT');
+      return describe(rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-    return describe(rows[0]);
   }
 
   return { list: async () => describe(await read()), runtime, save };
 }
 
-module.exports = { ACTIVE_SERVICE_KEYS, SERVICE_LABELS, createServiceSettings, validateAddress };
+module.exports = { ACTIVE_SERVICE_KEYS, SERVICE_LABELS, createServiceSettings, lockBatchStart, validateAddress };

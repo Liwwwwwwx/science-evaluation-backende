@@ -13,11 +13,11 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
     const ruleSnapshot = scoring?.snapshotRule ? await scoring.snapshotRule() : null;
     const selected = schemes ? await schemes.nightly() : null;
     const config = selected ? upgradeComparisonScheme(selected.config, { allowEmpty: true }) : validateScheme(DEFAULT_SCHEME);
-    const { addresses, paused } = await serviceState();
+    const { addresses, paused, version: serviceSettingsVersion } = await serviceState();
     for (const key of paused) config.services[key] = 0;
     if (paused.includes('alpha-combined-rsi')) config.rsiManufacturingCount = 0;
     const configSnapshot = { config, scheme: selected ? { id: selected.id, name: selected.name, version: selected.version } : null, rsiQuestionLayout: 'shared-v1' };
-    if (!await repository.create({ date, id, serviceAddresses: addresses, ruleSnapshot, configSnapshot })) return repository.get(date);
+    if (!await repository.create({ date, id, serviceAddresses: addresses, ruleSnapshot, configSnapshot, serviceSettingsVersion })) return repository.get(date);
     try {
       const selectedKeys = Object.keys(config.services).filter(key => config.services[key] > 0);
       if (config.rsiManufacturingCount && !selectedKeys.includes('alpha-combined-rsi')) selectedKeys.push('alpha-combined-rsi');
