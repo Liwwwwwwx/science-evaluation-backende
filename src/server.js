@@ -15,6 +15,8 @@ const { createRunQuestionResolver } = require('./runs/question-resolver');
 const { createLiteratureEvaluator } = require('./runs/literature-evaluator');
 const { createMissionEvaluator } = require('./runs/mission-evaluator');
 const { createAlphaRsiEvaluator } = require('./runs/alpha-rsi-evaluator');
+const { createMaterialEvaluator } = require('./runs/material-evaluator');
+const { createServiceSettings } = require('./runs/service-settings');
 const { createMissionDailyRepository } = require('./runs/mission-daily.repository');
 const { createMissionDailyService } = require('./runs/mission-daily.service');
 const { createFeishuTestNotifier } = require('./notifications/feishu-test');
@@ -47,6 +49,7 @@ let accounts;
 let questionBank;
 let generator;
 let evaluations;
+let serviceSettings;
 let batches;
 let missionDaily;
 let missionDailyReport;
@@ -68,21 +71,36 @@ if (databaseUrl) {
   const questionRepository = createEvalQuestionBankRepository({ pool });
   standardsRepository = createStandardsRepository({ pool, questions: questionRepository });
   questionBank = createQuestionBankService(questionRepository);
-  const evaluators = {};
-  if (process.env.EVALUATION_MISSION_MATERIAL_WS_URL) evaluators['mission-material'] = createMissionEvaluator({ url: process.env.EVALUATION_MISSION_MATERIAL_WS_URL, timeoutMs: missionTimeoutMs() });
-  if (process.env.EVALUATION_ALPHA_RSI_WS_URL) evaluators['alpha-rsi'] = createAlphaRsiEvaluator({ url: process.env.EVALUATION_ALPHA_RSI_WS_URL });
-  if (process.env.EVALUATION_ALPHA_COMBINED_RSI_WS_URL) evaluators['alpha-combined-rsi'] = createAlphaRsiEvaluator({ url: process.env.EVALUATION_ALPHA_COMBINED_RSI_WS_URL, label: '配比+制备 RSI', taskPrefix: 'evaluation-alpha-combined-rsi' });
-  if (process.env.EVALUATION_LITERATURE_WS_URL) evaluators.literature = createLiteratureEvaluator({ url: process.env.EVALUATION_LITERATURE_WS_URL });
-  if (process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL) evaluators['literature-aircraft'] = createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url: process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL });
+  const factories = {
+    'mission-material': url => createMissionEvaluator({ url, timeoutMs: missionTimeoutMs() }),
+    'alpha-rsi': url => createAlphaRsiEvaluator({ url }),
+    'alpha-combined-rsi': url => createAlphaRsiEvaluator({ url, label: '配比+制备 RSI', taskPrefix: 'evaluation-alpha-combined-rsi' }),
+    literature: url => createLiteratureEvaluator({ url }),
+    'literature-aircraft': url => createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url }),
+    'new-material': url => createMaterialEvaluator({ serviceKey: 'new-material', url }),
+  };
+  const defaultUrls = {
+    'mission-material': process.env.EVALUATION_MISSION_MATERIAL_WS_URL,
+    'alpha-rsi': process.env.EVALUATION_ALPHA_RSI_WS_URL,
+    'alpha-combined-rsi': process.env.EVALUATION_ALPHA_COMBINED_RSI_WS_URL,
+    literature: process.env.EVALUATION_LITERATURE_WS_URL,
+    'literature-aircraft': process.env.EVALUATION_AIRCRAFT_LITERATURE_WS_URL,
+  };
+  const evaluators = Object.fromEntries(Object.entries(defaultUrls).filter(([, url]) => url).map(([key, url]) => [key, factories[key](url)]));
+  serviceSettings = createServiceSettings({ pool, defaults: evaluators, factories });
+  const getEvaluators = async () => (await serviceSettings.runtime()).evaluators;
+  const getServiceState = async () => {
+    const { evaluators: current, paused, version } = await serviceSettings.runtime();
+    return { addresses: Object.fromEntries(SERVICE_KEYS.map(key => [key, current[key]?.serviceAddress || null])), paused, version };
+  };
   const automation = automationEnabled();
   const trialDate = automation ? process.env.EVALUATION_TRIAL_DATE || '' : '';
   const dailyMultiService = automation && process.env.EVALUATION_DAILY_MULTI_SERVICE_ENABLED === 'true';
   nightlyEnabled = dailyMultiService;
   if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
-  const serviceAddresses = Object.fromEntries(SERVICE_KEYS.map(key => [key, evaluators[key]?.serviceAddress || null]));
   if ((trialDate || dailyMultiService) && process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true') throw new Error('自动测评需要启用运行写入');
   const scoring = createScoringService({ rules });
-  evaluations = createUnifiedEvaluationService({ evaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 }, executionTimeoutMs: { 'mission-material': missionTimeoutMs(), default: 60 * 60 * 1000 } });
+  evaluations = createUnifiedEvaluationService({ evaluators, getEvaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 }, executionTimeoutMs: { 'mission-material': missionTimeoutMs(), default: 60 * 60 * 1000 } });
   batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
   batchSchemes = createBatchSchemeRepository({ pgPool: pool });
@@ -90,11 +108,11 @@ if (databaseUrl) {
   generator = createQuestionBankGenerationService({
     caseExamples: serviceKeys => questionRepository.listTestSetExamples({ testSet: '材料研发测试案例集', serviceKeys, limit: 3 }),
   });
-  const trialService = createTrialBatchService({ repository: trialRepository, evaluations, scoring, serviceAddresses, generator, schemes: batchSchemes });
-  manualBatches = createManualBatchService({ repository: createManualBatchRepository({ pgPool: pool, schemes: batchSchemes }), evaluations, scoring, serviceAddresses, generator, trialService, schemes: batchSchemes, onError: () => console.error('手动组合测评暂不可用，请检查批次状态') });
+  const trialService = createTrialBatchService({ repository: trialRepository, evaluations, scoring, getServiceState, generator, schemes: batchSchemes });
+  manualBatches = createManualBatchService({ repository: createManualBatchRepository({ pgPool: pool, schemes: batchSchemes }), evaluations, scoring, getServiceState, generator, trialService, schemes: batchSchemes, onError: () => console.error('手动组合测评暂不可用，请检查批次状态') });
   missionDaily = createMissionDailyService({ repository: plans, evaluations, scoring,
-    serviceAddress: evaluators['mission-material']?.serviceAddress || null,
-    enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && !!evaluators['mission-material'], skipDate: day => dailyMultiService || day === trialDate,
+    getServiceState: async () => { const { addresses, version } = await getServiceState(); return { address: addresses['mission-material'], version }; },
+    enabled: automation && process.env.EVALUATION_MISSION_DAILY_ENABLED === 'true', ready: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', skipDate: day => dailyMultiService || day === trialDate,
     onError: () => console.error('Mission 每日测评调度暂不可用，将自动重试') });
   if (trialDate || dailyMultiService) {
     trialScheduler = createTrialBatchScheduler({ date: trialDate, daily: dailyMultiService, service: trialService, repository: trialRepository, missionRepository: plans,
@@ -122,7 +140,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, generator, evaluations, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, generator, evaluations, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   if (timeoutRecoveryEnabled()) evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });

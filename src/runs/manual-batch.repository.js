@@ -1,5 +1,6 @@
 const { TeamServiceError } = require('../errors');
 const { upgradeComparisonScheme } = require('./batch-scheme');
+const { lockBatchStart } = require('./service-settings');
 
 function createManualBatchRepository({ pgPool, schemes } = {}) {
   async function requireStorage() { if (!await schemes.ready()) throw new TeamServiceError(503, 'BATCH_SCHEMES_NOT_MIGRATED', '手动批次存储尚未迁移'); }
@@ -7,12 +8,12 @@ function createManualBatchRepository({ pgPool, schemes } = {}) {
   return {
     async ownershipReady() { await requireStorage(); const r = await pgPool.query("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='unified_evaluation_runs' AND column_name='owner_user_id') AS ready"); return r.rows[0]?.ready === true; },
     async find(userId, key) { await requireStorage(); const r = await pgPool.query('SELECT p.*,p.plan_date::text AS plan_date FROM evaluation_manual_batch_plans p WHERE created_by=$1 AND request_key=$2', [userId, key]); return map(r.rows[0]); },
-    async create({ id, date, userId, requestKey, requestHash, configSnapshot, serviceAddresses, ruleSnapshot }) {
+    async create({ id, date, userId, requestKey, requestHash, configSnapshot, serviceAddresses, ruleSnapshot, serviceSettingsVersion }) {
       await requireStorage();
       const client = await pgPool.connect();
       try {
         await client.query('BEGIN');
-        await client.query("SELECT pg_advisory_xact_lock(hashtext('evaluation-batch-start'))");
+        await lockBatchStart(client, serviceSettingsVersion);
         const existing = await client.query('SELECT p.*,p.plan_date::text AS plan_date FROM evaluation_manual_batch_plans p WHERE created_by=$1 AND request_key=$2', [userId, requestKey]);
         if (existing.rows[0]) {
           if (existing.rows[0].request_hash !== requestHash) throw new TeamServiceError(409, 'BATCH_IDEMPOTENCY_CONFLICT', '幂等键已用于不同方案');
