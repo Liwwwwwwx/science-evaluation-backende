@@ -1523,7 +1523,7 @@ paths:
     get:
       tags: [统一运行]
       summary: 可用测评服务
-      description: 需要 `team-services:read`。只有 admin 在运行写入启用后可发起测评；`enabled` 另要求服务已配置且启用，不代表实时探活成功。
+      description: 需要 `team-services:read`。有 `team-services:write` 权限且运行写入启用时可发起测评。`enabled` 另要求服务已配置且启用，不代表实时探活成功。
       responses:
         '200':
           description: 已接入服务列表
@@ -1781,7 +1781,7 @@ paths:
       tags: [统一运行]
       summary: 创建统一运行
       description: |
-        仅 admin 可发起，要求评测读写权限、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
+        要求 `team-services:write` 权限、同源校验、运行写入开关 `EVALUATION_RUN_WRITE_ENABLED=true`，
         以及 1–128 个可打印 ASCII 字符的 `Idempotency-Key`。来源统一为人工运行（manual），归当前用户所有。
         题库来源字段（questionId/datasetVersion/sourceType）须完整，后端核验有效版本与原题。
         成功返回 201；排队执行时也立即返回，经 SSE 或详情接口获取进度。执行完成后自动独立评分。
@@ -2095,7 +2095,7 @@ paths:
       tags: [统一运行]
       summary: 保留旧输出并重新测评
       description: |
-        仅 admin 可发起，要求读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持本人已结束的人工运行。
+        要求评测读写权限、同源校验、运行写入开关与 Idempotency-Key。仅支持本人已结束的人工运行。
         创建新运行并沿用原题、服务与规则快照，原记录及输出完整保留。同键只创建一次。
       parameters:
         - $ref: '#/components/parameters/RunId'
@@ -2328,8 +2328,8 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [测评批次]
-      summary: 管理员保存测评方案
-      description: 仅内置 admin 可保存；版本不一致返回 409。设为夜间方案只影响后续新批次。
+      summary: 保存测评方案
+      description: 有读写权限的成员可保存自己的方案。版本不一致返回 409。仅内置 admin 可指定夜间方案，对后续新批次生效。
       requestBody:
         required: true
         content:
@@ -2355,7 +2355,7 @@ paths:
     post:
       tags: [测评批次]
       summary: 发起个人组合测评批次
-      description: 使用指定配比创建个人批次，不占用夜间日期名额，也不进入夜间日报；相同用户和幂等键重试返回原批次。
+      description: 有评测读写权限且运行写入启用时可使用指定配比创建个人批次，不占用夜间日期名额，也不进入夜间日报；相同用户和幂等键重试返回原批次。
       parameters:
         - name: Idempotency-Key
           in: header

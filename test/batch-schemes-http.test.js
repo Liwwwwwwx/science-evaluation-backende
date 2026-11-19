@@ -16,14 +16,21 @@ test('方案读取、管理员保存及手动发起分别校验权限、来源�
   const base = `http://127.0.0.1:${server.address().port}/api/evaluation/unified/batch-schemes`;
   const headers = (user, origin = 'http://localhost') => ({ cookie: `evaluation_session=${user}`, origin, 'content-type': 'application/json', 'idempotency-key': 'test-key' });
   assert.equal((await fetch(base)).status, 401);
-  assert.equal((await fetch(base, { headers: headers('read') })).status, 200);
+  for (const user of ['read', 'user', 'admin']) {
+    const response = await fetch(base, { headers: headers(user) });
+    assert.equal(response.status, 200);
+    const catalog = await response.json();
+    assert.equal(catalog.canRun, user !== 'read');
+    assert.equal(catalog.canSetNightly, user === 'admin');
+  }
   const data = JSON.stringify({ name: '夜间方案', config: DEFAULT_SCHEME, isNightly: true, version: 0 });
   assert.equal((await fetch(base, { method: 'POST', headers: headers('user'), body: data })).status, 403);
   assert.equal((await fetch(base, { method: 'POST', headers: headers('user'), body: JSON.stringify({ ...JSON.parse(data), isNightly: false, name: '我的方案' }) })).status, 200);
   assert.equal((await fetch(base, { method: 'POST', headers: headers('admin', 'http://evil.test'), body: data })).status, 403);
   assert.equal((await fetch(base, { method: 'POST', headers: headers('admin'), body: data })).status, 200);
   assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('read'), body: data })).status, 403);
-  assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('user'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 403);
+  assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('user'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 202);
+  assert.equal(calls.at(-1).userId, 'user');
   assert.equal((await fetch(`${base}/run`, { method: 'POST', headers: headers('admin'), body: JSON.stringify({ config: DEFAULT_SCHEME }) })).status, 202);
   assert.equal(calls.at(-1).userId, 'admin'); assert.equal(calls.at(-1).key, 'test-key');
 });

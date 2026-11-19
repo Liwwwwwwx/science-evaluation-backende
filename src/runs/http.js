@@ -1,5 +1,4 @@
 const { TeamServiceError } = require('../errors');
-const { canManageAccounts } = require('../auth/accounts');
 const { SERVICE_LABELS } = require('./service-settings');
 const { readRunArtifact } = require('./artifacts');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -9,7 +8,7 @@ function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', mes
 async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply }) {
   const base = '/api/evaluation/unified';
   if (url.pathname === `${base}/services` && req.method === 'GET') {
-    const canRun = runWriteEnabled && canManageAccounts(user);
+    const canRun = runWriteEnabled && user.permissions.includes('team-services:write');
     const configured = canRun ? await evaluations?.availableServices?.() || [] : [];
     return reply(res, 200, { canRun, items: Object.entries(SERVICE_LABELS).map(([key, label]) => ({
       key, label, enabled: configured.includes(key), scoring: evaluations?.scoringEnabled ? 'independent' : 'absent',
@@ -67,7 +66,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
   }
   if (url.pathname === `${base}/runs`) {
     if (req.method === 'POST') {
-      if (!canManageAccounts(user)) throw new TeamServiceError(403, 'FORBIDDEN', '仅 admin 可发起测评');
+      if (!user.permissions.includes('team-services:write')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
       if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
       if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
       const input = await readBody(req, 16 * 1024);
@@ -111,7 +110,6 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
   const rescoreRequest = req.method === 'POST' && match[2] === '/score';
   const access = await evaluations.assertRunAccess(match[1], String(user.id), req.method === 'POST' && !rescoreRequest);
   if (['/reply', '/score', '/rerun', '/end'].includes(match[2]) && req.method === 'POST') {
-    if (match[2] === '/rerun' && !canManageAccounts(user)) throw new TeamServiceError(403, 'FORBIDDEN', '仅 admin 可重新发起测评');
     if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
     if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
     if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
@@ -141,7 +139,7 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const rerunnable = ended && ['done','error'].includes(value.status) && ['done','error'].includes(value.run?.status);
     return reply(res, 200, { ...value, rerunPreservesOutput: true,
       canRescore: !!(scope && (access.owned || value.origin === 'automation') && runWriteEnabled && evaluations.scoringEnabled && ended),
-      canRerun: !!(canManageAccounts(user) && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && ((await evaluations.availableServices?.()) || []).includes(value.serviceKey)) });
+      canRerun: !!(scope && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && ((await evaluations.availableServices?.()) || []).includes(value.serviceKey)) });
   }
   // 先读取一次，保证不存在/不可读时返回 JSON 错误而不是半条 SSE。
   await evaluations.get(match[1]);

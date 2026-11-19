@@ -81,7 +81,14 @@ test('隔离数据库：旧记录归 admin，个人运行及所有入口隔离�
   assert.equal((await get('admin-id',`/runs/${old}`)).status,200);
   const scores=await (await get('b',`/question-scores?items=${encodeURIComponent(JSON.stringify([{id:'q',datasetVersion:'v1'}]))}`)).json();
   assert.ok(!scores.items.some(row=>row.runId===a));
-  assert.equal((await post('a',`/runs/${a}/rerun`)).status,403);
+  const detail = await (await get('a', `/runs/${a}`)).json();
+  assert.equal(detail.canRerun, true);
+  const memberRerun = await post('a', `/runs/${a}/rerun`);
+  assert.equal(memberRerun.status, 201);
+  const {runId: memberRunId} = await memberRerun.json();
+  assert.equal((await get('a', `/runs/${memberRunId}`)).status, 200);
+  assert.equal((await get('b', `/runs/${memberRunId}`)).status, 404);
+  assert.equal((await repo.get(a)).answer, '保留的回答');
   assert.equal((await post('admin-id',`/runs/${a}/rerun`)).status,404);
   const reruns=await Promise.all([post('admin-id',`/runs/${adminRun}/rerun`),post('admin-id',`/runs/${adminRun}/rerun`)]);
   assert.deepEqual(reruns.map(result=>result.status),[201,201]);

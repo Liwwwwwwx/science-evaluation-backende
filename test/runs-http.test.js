@@ -32,8 +32,8 @@ test('文献适配器保留文本标量、过滤控制帧并拒绝不完整连�
 });
 
 test('运行 HTTP 校验会话、读写权限、来源、开关、幂等键及参数', async t => {
-  let calls = 0;
-  const hidden = []; const evaluations = { list: async () => ({ items: [], total: 0 }), hideAvailable: async () => true, hideRuns: async (userId, runIds) => { hidden.push({ userId, runIds }); return runIds; }, createRun: async (_, { scope, key }) => { calls++; assert.equal(scope, 'evaluation-user:admin'); assert.equal(key, 'same-key'); return { runId: '11111111-1111-4111-8111-111111111111', serviceKey: 'literature' }; } };
+  const scopes = [];
+  const hidden = []; const evaluations = { list: async () => ({ items: [], total: 0 }), hideAvailable: async () => true, hideRuns: async (userId, runIds) => { hidden.push({ userId, runIds }); return runIds; }, createRun: async (_, { scope, key }) => { scopes.push(scope); assert.equal(key, 'same-key'); return { runId: '11111111-1111-4111-8111-111111111111', serviceKey: 'literature' }; } };
   const authService = { authenticate: async token => { if (!token) throw Object.assign(new Error('请登录'), { status: 401 }); return { id: token, username: token, permissions: token === 'reader' ? ['team-services:read'] : ['team-services:read', 'team-services:write'] }; } };
   const server = createApp({ token: 'x'.repeat(32), authService, evaluations, runWriteEnabled: true, publicOrigin: 'http://localhost' });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => server.close());
@@ -41,10 +41,11 @@ test('运行 HTTP 校验会话、读写权限、来源、开关、幂等键及�
   const post = (token = 'admin', origin = 'http://localhost', key = 'same-key') => fetch(base, { method: 'POST', headers: { cookie: `evaluation_session=${token}`, origin, 'content-type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ serviceKey: 'literature', question: '测试文献问题' }) });
   assert.equal((await fetch(base)).status, 401);
   assert.equal((await post('reader')).status, 403);
-  assert.equal((await post('writer')).status, 403);
+  assert.equal((await post('writer')).status, 201);
   assert.equal((await post('admin', 'http://evil.invalid')).status, 403);
   // 幂等键由运行服务最终校验；HTTP 完整传递主体及键。
-  assert.equal((await post()).status, 201); assert.equal(calls, 1);
+  assert.equal((await post()).status, 201);
+  assert.deepEqual(scopes, ['evaluation-user:writer', 'evaluation-user:admin']);
   assert.equal((await fetch(base + '?page=0', { headers: { cookie: 'evaluation_session=reader' } })).status, 400);
   assert.equal((await fetch(base + '/bad-id', { headers: { cookie: 'evaluation_session=reader' } })).status, 400);
   const hideUrl = base + '/hide';
@@ -75,12 +76,12 @@ test('重新测评接口要求读写权限、同源、写开关并禁止覆盖�
     const url = `http://127.0.0.1:${app.address().port}/api/evaluation/unified/runs/${id}/rerun`;
     const post = (cookie='admin',origin='http://localhost',body='{}') => fetch(url,{method:'POST',headers:{cookie:`evaluation_session=${cookie}`,origin,'content-type':'application/json','Idempotency-Key':'rerun-key'},body});
     assert.equal((await post('reader')).status,403);
-    assert.equal((await post('writer')).status,403);
+    assert.equal((await post('writer')).status,enabled ? 201 : 503);
     assert.equal((await post('admin','http://other.test')).status,403);
     if (enabled) { assert.equal((await post('admin','http://localhost','{"question":"覆盖"}')).status,400); assert.equal((await post()).status,201); }
     else assert.equal((await post()).status,503);
   }
-  assert.equal(calls,1);
+  assert.equal(calls,2);
 });
 
 test('航空文献复用 instruction 协议，隔离任务标识并保留部分回答和失败原因', async () => {
@@ -133,7 +134,7 @@ test('服务可用性按各自适配器、写开关和用户权限确定，1108�
         const response = await fetch(url, { headers: { cookie: `evaluation_session=${user}` } });
         assert.equal(response.status, 200);
         const { items, canRun } = await response.json();
-        assert.equal(canRun, write && user === 'admin');
+        assert.equal(canRun, write && user !== 'reader');
         assert.deepEqual(items.filter(item => item.enabled).map(item => item.key), canRun ? ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'literature', 'literature-aircraft', 'new-material'].filter(key => keys.includes(key)) : []);
         assert.ok(items.every(item => item.scoring === 'absent'));
       }
