@@ -1,6 +1,5 @@
 const { randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
-const { canManageAccounts } = require('../auth/accounts');
 const { DEFAULT_SCHEME, upgradeComparisonScheme } = require('./batch-scheme');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
@@ -10,14 +9,12 @@ async function handleBatchSchemes({ req, res, url, user, schemes, manualBatches,
   const base = '/api/evaluation/unified/batch-schemes';
   if (url.pathname === base && req.method === 'GET') {
     const canWrite = runWriteEnabled && user.permissions.includes('team-services:write');
-    const canRun = runWriteEnabled && canManageAccounts(user);
     const data = await schemes.list({ userId: String(user.id), admin: user.username === 'admin' });
     const items = Array.isArray(data.items) ? data.items.map(item => ({ ...item, config: upgradeComparisonScheme(item.config, { allowEmpty: true }) })) : data.items;
     const nightly = data.nightly !== undefined ? data.nightly : data.storageReady && typeof schemes.nightly === 'function' ? await schemes.nightly() : null;
-    return reply(res, 200, { ...data, items, nightly: nightly ? { id: nightly.id, name: nightly.name, version: nightly.version } : null, nightlyEnabled: typeof nightlyEnabled === 'boolean' ? nightlyEnabled : null, userId: String(user.id), defaultConfig: DEFAULT_SCHEME, canManage: canWrite, canSetNightly: canRun, canRun, concurrencyCaps, enabledServices: await availableServices?.() });
+    return reply(res, 200, { ...data, items, nightly: nightly ? { id: nightly.id, name: nightly.name, version: nightly.version } : null, nightlyEnabled: typeof nightlyEnabled === 'boolean' ? nightlyEnabled : null, userId: String(user.id), defaultConfig: DEFAULT_SCHEME, canManage: canWrite, canSetNightly: canWrite && user.username === 'admin', canRun: canWrite, concurrencyCaps, enabledServices: await availableServices?.() });
   }
   if (req.method !== 'POST') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
-  if (url.pathname === `${base}/run` && !canManageAccounts(user)) throw new TeamServiceError(403, 'FORBIDDEN', '仅 admin 可发起批次测评');
   if (!user.permissions.includes('team-services:write')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
   if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
   if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
