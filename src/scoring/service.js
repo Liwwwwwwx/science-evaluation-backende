@@ -218,7 +218,7 @@ function judgePrompt(job, rubric, input, markdown, policy) {
 function createScoringService({ clients = createScoringClients(), rules = null, maxActive = 4, timeoutMs = 210000, imageLoader = readRunImages } = {}) {
   let active = 0;
   function pending() { return Object.fromEntries(KEYS.map(key => [key, { status: clients[key]?.isConfigured() ? 'pending' : 'unavailable', model: clients[key]?.model || null, quality: null, error: clients[key]?.isConfigured() ? null : '模型未配置' }])); }
-  async function score(job, publish = async () => {}, { attemptId = crypto.randomUUID(), requestHash = null, history = [] } = {}) {
+  async function score(job, publish = async () => {}, { attemptId = crypto.randomUUID(), requestHash = null, history = [], usageActor = 'automation' } = {}) {
     const startedAt = new Date().toISOString();
     const metadata = { version: VERSION, scoreViewVersion: 'display-v1', inputVersion: 'vision-v1', attemptId, requestHash, history, startedAt, finishedAt: null, expiresAt: new Date(Date.now() + timeoutMs + 30000).toISOString(), rubric: null };
     const policy = job.run?.ruleSnapshot ? snapshotRule(job.run.ruleSnapshot) : null;
@@ -229,10 +229,11 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
     const busy = active >= maxActive; if (!busy) active++;
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs);
     // Promise.race 同时约束测试替身/不遵守 signal 的客户端；晚到结果不再发布。
-    const call = (client, prompt, images = []) => new Promise((resolve, reject) => {
+    const call = (client, prompt, images = [], stage = 'judge') => new Promise((resolve, reject) => {
       const abort = () => reject(new Error('评分超时')); if (controller.signal.aborted) return abort();
       controller.signal.addEventListener('abort', abort, { once: true });
-      Promise.resolve().then(() => client.callJson(prompt, { signal: controller.signal, ...(images.length ? { images } : {}) })).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', abort));
+      Promise.resolve().then(() => client.callJson(prompt, { signal: controller.signal,
+        usageContext: { evaluationId: job.runId, attemptId, actor: usageActor, kind: requestHash ? 'rescore' : 'initial', stage }, ...(images.length ? { images } : {}) })).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', abort));
     });
     try {
       const outputs = [{ id: 'answer', label: '正文', text: String(job.answer || '') }, ...(Array.isArray(job.run?.details?.displayEvents) ? job.run.details.displayEvents : []).filter(event => ['display.team_output', 'display.final_answer'].includes(event.type)).map(event => ({ id: event.event_id, label: event.type === 'display.final_answer' ? '最终总结' : `团队输出：${event.team?.name || '未命名团队'}`, text: event.phase === 'end' && typeof event.content === 'string' ? event.content : event.delta || '' }))];
@@ -254,7 +255,7 @@ function createScoringService({ clients = createScoringClients(), rules = null, 
         const old = job.run?.scoring?.rubric;
         let rubric = old?.version === VERSION && old?.questionHash === hash(job.question) && (old.ruleHash || null) === (policy?.hash || null) ? old : null;
         if (!rubric) {
-          for (const key of enabled) { try { rubric = normalizeRubric(await call(clients[key], rubricPrompt(job.question) + (policy ? `\n通用任务标准：${policy.config.completionInstructions}\n只提取本题要求，不额外要求不相关成果。` : '')), job.question, clients[key].model); if (policy) rubric.ruleHash = policy.hash; break; } catch { if (controller.signal.aborted) break; } }
+          for (const key of enabled) { try { rubric = normalizeRubric(await call(clients[key], rubricPrompt(job.question) + (policy ? `\n通用任务标准：${policy.config.completionInstructions}\n只提取本题要求，不额外要求不相关成果。` : ''), [], 'rubric'), job.question, clients[key].model); if (policy) rubric.ruleHash = policy.hash; break; } catch { if (controller.signal.aborted) break; } }
           if (!rubric) throw new Error('无法生成统一题目要求清单，请稍后重评');
         }
         metadata.rubric = rubric; const input = packInput(job);

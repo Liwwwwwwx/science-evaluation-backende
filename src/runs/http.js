@@ -5,7 +5,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 // 单个结构化结果可达数MB；允许一份完整结果写出，慢连接仍受缓冲上限保护。
 const MAX_SSE_BUFFER = 8 * 1024 * 1024;
 function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', message); }
-async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, publicOrigin, readBody, reply }) {
+async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runWriteEnabled, publicOrigin, readBody, reply }) {
   const base = '/api/evaluation/unified';
   if (url.pathname === `${base}/services` && req.method === 'GET') {
     const canRun = runWriteEnabled && user.permissions.includes('team-services:write');
@@ -137,7 +137,8 @@ async function handleRuns({ req, res, url, user, evaluations, runWriteEnabled, p
     const leased = scoring && !scoring.finishedAt && Date.parse(scoring.expiresAt) > Date.now();
     const ended = ['done','error','cancelled'].includes(value.status) && !leased && !value.run?.outputClearedAt;
     const rerunnable = ended && ['done','error'].includes(value.status) && ['done','error'].includes(value.run?.status);
-    return reply(res, 200, { ...value, rerunPreservesOutput: true,
+    const usage = !['queued','running'].includes(value.status) ? await scoringUsage?.byRun(match[1]) : null;
+    return reply(res, 200, { ...value, scoringUsage: usage ?? null, rerunPreservesOutput: true,
       canRescore: !!(scope && (access.owned || value.origin === 'automation') && runWriteEnabled && evaluations.scoringEnabled && ended),
       canRerun: !!(scope && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && ((await evaluations.availableServices?.()) || []).includes(value.serviceKey)) });
   }
