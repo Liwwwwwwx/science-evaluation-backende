@@ -1,3 +1,6 @@
+const { createScoringUsage } = require('./scoring/usage');
+const { createScoringClients } = require('./scoring/clients');
+const { createDirectScoreService } = require('./scoring/direct-score');
 const { createScoringService } = require('./scoring/service');
 const { createRuleService } = require('./scoring/rules');
 const { createRuleRepository } = require('./scoring/rule-repository');
@@ -61,6 +64,8 @@ let batchSchemes;
 let nightlyEnabled = null;
 let manualBatches;
 let standardsRepository;
+let scoringUsage;
+let directScore;
 if (databaseUrl) {
   ({ publicOrigin, secureCookies } = httpSettings());
   const pool = new Pool({ connectionString: databaseUrl });
@@ -99,9 +104,12 @@ if (databaseUrl) {
   nightlyEnabled = dailyMultiService;
   if (trialDate && !validDate(trialDate)) throw new Error('试运行日期无效');
   if ((trialDate || dailyMultiService) && process.env.EVALUATION_RUN_WRITE_ENABLED !== 'true') throw new Error('自动测评需要启用运行写入');
-  const scoring = createScoringService({ rules });
+  scoringUsage = createScoringUsage(pool);
+  const scoringClients = createScoringClients(process.env, scoringUsage);
+  directScore = createDirectScoreService({ clients: scoringClients });
+  const scoring = createScoringService({ rules, clients: scoringClients });
   evaluations = createUnifiedEvaluationService({ evaluators, getEvaluators, scoring, repository: createUnifiedEvaluationRepository({ pgPool: pool }), resolveQuestion: createRunQuestionResolver(questionRepository), maxActive: trialDate || dailyMultiService ? 26 : 25, maxQueued: 350, serviceLimits: { 'literature-aircraft': 1 }, executionTimeoutMs: { 'mission-material': missionTimeoutMs(), default: 60 * 60 * 1000 } });
-  batches = createBatchReadService({ repository: createBatchReadRepository({ pgPool: pool }) });
+  batches = createBatchReadService({ scoringUsage, repository: createBatchReadRepository({ pgPool: pool }) });
   const plans = createMissionDailyRepository({ pgPool: pool });
   batchSchemes = createBatchSchemeRepository({ pgPool: pool });
   const trialRepository = createTrialBatchRepository({ pgPool: pool });
@@ -140,7 +148,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, questionBank, generator, evaluations, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, scoringUsage, directScore, questionBank, generator, evaluations, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   if (timeoutRecoveryEnabled()) evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });

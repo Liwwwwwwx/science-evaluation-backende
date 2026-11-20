@@ -36,7 +36,9 @@ test('共享批次可重评，中断记录的已保存输出仅产生参考分�
   const rubric = { requirements: [{ requirement: '说明材料结果', critical: true }], visualAidsApplicable: false, visualAidsReason: '无需额外图表' };
   let holdScoring = false; let releaseScoring;
   const scoringGate = new Promise(resolve => { releaseScoring = resolve; });
-  const client = { model: 'fixture', isConfigured: () => true, callJson: async prompt => {
+  const usageContexts = [];
+  const client = { model: 'fixture', isConfigured: () => true, callJson: async (prompt, { usageContext }) => {
+    usageContexts.push(usageContext);
     if (holdScoring) await scoringGate;
     return prompt.startsWith('仅根据题目') ? rubric : {
       dimensions: { readability: { score: 80, note: '清楚' }, professionalism: { score: 80, note: '有说明' }, visualAids: { score: null, note: '不适用' } },
@@ -69,6 +71,12 @@ test('共享批次可重评，中断记录的已保存输出仅产生参考分�
   assert.equal(shared.scores.deepSeekScore.status, 'ready');
   assert.equal(shared.scores.deepSeekScore.quality.source.truncated, false);
   assert.equal(shared.answer, '保留的材料结果');
+  assert.ok(usageContexts.length >= 2);
+  assert.ok(usageContexts.every(c => c.actor === 'evaluation-user:bob' && c.evaluationId === ids[0] && c.kind === 'rescore'));
+  assert.deepEqual(new Set(usageContexts.map(c => c.stage)), new Set(['rubric', 'judge']));
+  const previousCalls = usageContexts.length;
+  assert.equal((await post('bob', ids[0], 'score')).status, 202);
+  assert.equal(usageContexts.length, previousCalls);
 
   const cancelledBefore = await (await get('bob', `/runs/${ids[2]}`)).json();
   assert.equal(cancelledBefore.canRescore, true); assert.equal(cancelledBefore.canRerun, false);

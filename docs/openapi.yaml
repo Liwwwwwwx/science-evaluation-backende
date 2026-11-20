@@ -2380,6 +2380,55 @@ paths:
         '409': { description: 已有活动批次、方案版本冲突或幂等键冲突 }
         '503': { description: 所选服务、运行归属或对比存储不可用 }
 
+  /api/evaluation/unified/scoring-usage:
+    get:
+      tags: [统一运行]
+      summary: 按账号汇总评分用量或查看该账号的逐次明细
+      description: 仅限具有测评读写权限的 admin。日期按北京时间包含首尾两日。actor 取自汇总行，重评归发起人。固定每页 25 条。
+      security: [{ SessionCookie: [] }]
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+      responses:
+        '200':
+          description: 汇总行含账号名及用量，明细行含运行或直接评分 ID、服务、批次、评分轮数及最近调用时间。
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: '#/components/schemas/ScoringUsage' }
+                        - oneOf:
+                            - type: object
+                              required: [actor]
+                              properties:
+                                actor: { type: string }
+                                username: { type: string, nullable: true }
+                                displayName: { type: string, nullable: true }
+                            - type: object
+                              required: [evaluationId]
+                              properties:
+                                evaluationId: { type: string, format: uuid }
+                                serviceKey: { type: string, nullable: true }
+                                batchId: { type: string, nullable: true }
+                                direct: { type: boolean }
+                                rounds: { type: integer }
+                                rescored: { type: boolean }
+                                lastUsed: { type: string, format: date-time }
+        '400': { description: 日期或分页无效 }
+        '401': { description: 登录已失效 }
+        '403': { description: 没有管理员权限 }
+        '503': { description: 评分用量存储未配置或未迁移 }
+
   /api/evaluation/unified/batches:
     get:
       tags: [测评批次]
@@ -3450,6 +3499,10 @@ components:
         - $ref: '#/components/schemas/RunListItem'
         - type: object
           properties:
+            scoringUsage:
+              description: 该运行已记录的评分用量。无记录时为 null。
+              nullable: true
+              allOf: [{ $ref: '#/components/schemas/ScoringUsage' }]
             nativeRunId:
               type: string
               nullable: true
@@ -3557,10 +3610,26 @@ components:
           additionalProperties: { type: integer, minimum: 1, maximum: 5 }
         compareAlloyAlpha: { type: boolean, deprecated: true, description: 历史同题对比配置，新批次始终关闭 }
         compareSynthesisAlpha: { type: boolean, deprecated: true, description: 旧版合成制备与 1110 同题对比，仅用于历史方案兼容 }
+    ScoringUsage:
+      type: object
+      description: 已记录的评分调用及人民币预估费用。无已知用量或金额时对应数值为 null。
+      properties:
+        calls: { type: integer }
+        evaluations: { type: integer }
+        inputTokens: { type: integer, nullable: true }
+        outputTokens: { type: integer, nullable: true }
+        totalTokens: { type: integer, nullable: true }
+        estimatedCny: { type: number, nullable: true }
+        missingUsage: { type: integer }
+        missingCost: { type: integer }
     BatchSummary:
       type: object
       required: [batchId, date, source, state, planned]
       properties:
+        scoringUsage:
+          description: 当前可见运行的已记录评分用量。没有记录时返回 null。
+          nullable: true
+          allOf: [{ $ref: '#/components/schemas/ScoringUsage' }]
         batchId:
           type: string
           format: uuid

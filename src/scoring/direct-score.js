@@ -1,3 +1,4 @@
+const { randomUUID } = require('node:crypto');
 const { createScoringClients } = require('./clients');
 const { redact } = require('./service');
 const { scoreView } = require('./score-view');
@@ -118,7 +119,7 @@ function validateResult(value, answer, standard, safeAnswer = answer, originalSe
 
 function createDirectScoreService({ clients = createScoringClients(), maxActive = 4, timeoutMs = 150000 } = {}) {
   let active = 0;
-  return { async score({ question, answer, standard }) {
+  return { async score({ question, answer, standard }, actor = 'service') {
     if (!text(question, 4000) || question.trim().length < 8 || !text(answer, 60000) || !text(standard, 20000)) throw failure(400, 'DIRECT_SCORE_INPUT_INVALID', '请提供有效的题目、评分标准和输出');
     if (!KEYS.some(key => clients[key]?.isConfigured())) throw failure(503, 'DIRECT_SCORE_UNAVAILABLE', '评分模型未配置');
     if (active >= maxActive) throw failure(429, 'DIRECT_SCORE_BUSY', '评分繁忙，请稍后重试');
@@ -149,12 +150,14 @@ function createDirectScoreService({ clients = createScoringClients(), maxActive 
       ...(inlineViewers.length ? [`图片或文件标记元数据：${JSON.stringify(inlineViewers)}`] : []),
       `待评输出原文片段：${JSON.stringify(segments)}`,
     ].join('\n');
+    const evaluationId = randomUUID();
+    const usageContext = { evaluationId, attemptId: evaluationId, actor, kind: 'direct', stage: 'judge' };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const call = (client, body) => new Promise((resolve, reject) => {
       const abort = () => reject(new Error('评分超时')); if (controller.signal.aborted) return abort();
       controller.signal.addEventListener('abort', abort, { once: true });
-      Promise.resolve().then(() => client.callJson(body, { signal: controller.signal })).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', abort));
+      Promise.resolve().then(() => client.callJson(body, { signal: controller.signal, usageContext })).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', abort));
     });
     try {
       const entries = await Promise.all(KEYS.map(async key => {

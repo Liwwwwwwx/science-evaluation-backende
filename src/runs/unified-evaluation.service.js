@@ -736,7 +736,10 @@ function createUnifiedEvaluationService({ evaluators, getEvaluators = () => eval
         send(job, 'run', { runId: job.runId, ...job.run });
         send(job, 'score', { runId: job.runId, scores: job.scores, scoreError: null, scoringStatus: statusFields(job).scoringStatus });
       };
-      try { await scoring.score(input, publish, options || undefined); }
+      try {
+        const actor = options?.usageActor || job.ownerScope;
+        await scoring.score(input, publish, { ...options, usageActor: actor?.startsWith('evaluation-user:') ? actor : 'automation' });
+      }
       catch {
         job.scores = Object.fromEntries(Object.entries(job.scores || {}).map(([key, value]) => [key, value.status === 'pending' ? { ...value, status: 'failed', error: '评分处理失败，请稍后重评' } : value]));
         job.status = endedStatus; job.scoreError = '评分处理失败，请稍后重评';
@@ -782,7 +785,7 @@ function createUnifiedEvaluationService({ evaluators, getEvaluators = () => eval
     const status = current.status === 'cancelled' || current.run?.status === 'cancelled' ? 'cancelled' : current.run?.status === 'error' || (current.status === 'error' && current.run?.status !== 'done') ? 'error' : 'scoring';
     const job = { ...current, run: { ...current.run, scoring: initialScoring }, scores: scoring.pending(), status, settled: false, events: createRunEvents(), writeChain: Promise.resolve(), saveTimer: null, reply: null };
     runs.set(runId, job);
-    void runScoring(job, options, release).finally(() => { job.settled = true; prune(); });
+    void runScoring(job, { ...options, usageActor: scope }, release).finally(() => { job.settled = true; prune(); });
     return { runId, attemptId, reused: false };
   }
   async function createComparison() {

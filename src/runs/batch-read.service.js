@@ -416,7 +416,7 @@ function comparisonOf(basePlan, previousPlan, baseRuns, previousRuns) {
   };
 }
 
-function createBatchReadService({ repository } = {}) {
+function createBatchReadService({ repository, scoringUsage } = {}) {
   if (!repository) throw new Error('批次读取仓储未配置');
 
   async function list({ source = 'all', state = '', from = '', to = '', schemeId = '', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
@@ -434,7 +434,8 @@ function createBatchReadService({ repository } = {}) {
           byBatch.get(run.batch_id).push(mapRun(run));
         }
       }
-      return plans.map(plan => summaryOf(plan, byBatch.get(plan.id) || []));
+      const usage = await scoringUsage?.byBatch(plans.map(plan => plan.id), userId);
+      return plans.map(plan => ({ ...summaryOf(plan, byBatch.get(plan.id) || []), scoringUsage: usage?.get(plan.id) ?? null }));
     }
     if (!state && repository.pagePlans) {
       const requested = Math.max(Number(page) || 1, 1);
@@ -460,7 +461,8 @@ function createBatchReadService({ repository } = {}) {
     if (!found.storageReady) throw new TeamServiceError(503, 'BATCH_STORAGE_UNAVAILABLE', '批次存储尚未迁移');
     if (!found.plan) throw new TeamServiceError(404, 'BATCH_NOT_FOUND', '批次不存在');
     const runs = (await repository.runsByBatchIds([String(id)], userId)).map(mapRun);
-    return detailOf(found.plan, runs);
+    const usage = await scoringUsage?.byBatch([String(id)], userId);
+    return { ...detailOf(found.plan, runs), scoringUsage: usage?.get(String(id)) ?? null };
   }
 
   async function runs(id, { serviceKey = '', status = '', execution = '', sort = 'scoreAsc', page = 1, pageSize = PAGE_SIZE, userId = null } = {}) {
