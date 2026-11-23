@@ -69,7 +69,8 @@ function evidence(value, input, scope = 'output') {
 }
 
 function completeScope(input, scope) {
-  return !input.truncated && (scope === 'output' || (input.process?.recorded === true && !input.process?.truncated));
+  const attachmentsComplete = !input.attachmentCoverage?.files?.some(file => file.state !== 'included');
+  return !input.truncated && attachmentsComplete && (scope === 'output' || (input.process?.recorded === true && !input.process?.truncated));
 }
 
 module.exports = { evidence, completeScope, passages };
