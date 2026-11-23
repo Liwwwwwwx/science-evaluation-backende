@@ -51,10 +51,11 @@ test('隔离 PostgreSQL：地址与开关即时生效，排队时拒绝修改并
   t.after(() => pool.end());
   const defaults = { 'alpha-rsi': { serviceAddress: 'ws://configured.invalid/start' } };
   const calls = [];
-  const factories = { 'new-material': address => ({
+  const factory = address => ({
     serviceAddress: address, scoreMode: 'none',
     async startQuestionRun() { calls.push(address); return { run: { id: 'fake-native-run' }, completion: Promise.resolve({ status: 'done' }) }; },
-  }) };
+  });
+  const factories = { 'new-material': factory, 'new-material-rsi': factory };
   const settings = createServiceSettings({ pool, defaults, factories });
   const secondProcess = createServiceSettings({ pool, defaults, factories });
   const evaluations = createUnifiedEvaluationService({ getEvaluators: async () => (await secondProcess.runtime()).evaluators });
@@ -109,4 +110,17 @@ test('隔离 PostgreSQL：地址与开关即时生效，排队时拒绝修改并
       assert.equal(await route.read(), null);
     }
   }
+  const version = (await settings.list()).version;
+  const newAddress = 'ws://8.8.4.4:1115/start';
+  await settings.save({ version, items: [
+    { key: 'new-material', enabled: true, address },
+    { key: 'new-material-rsi', enabled: true, address: newAddress },
+  ] }, 'admin');
+  assert.deepEqual(await evaluations.availableServices(), ['alpha-rsi', 'new-material', 'new-material-rsi']);
+  const newRun = await evaluations.start({ serviceKey: 'new-material-rsi', question: '请生成目标材料的周期晶体结构。' });
+  newRun.subscribe(() => {});
+  await newRun.nativeCompletion;
+  assert.deepEqual(calls, [address, newAddress]);
+  assert.equal((await evaluations.get(newRun.runId)).run.serviceAddress, newAddress);
+  assert.equal((await evaluations.get(started.runId)).run.serviceAddress, address);
 });

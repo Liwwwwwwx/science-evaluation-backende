@@ -1,6 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
-const { publicServiceAddress } = require('./service-address');
+const { publicServiceAddress, taskDirectoryPath } = require('./service-address');
 const { createAutomaticReview } = require('./automatic-review');
 const { createProcessRecorder } = require('../scoring/process-review');
 const { createConversationEvents } = require('./conversation-events');
@@ -10,6 +10,7 @@ const MATERIAL_SERVICES = {
   alloy: { label: '合金材料', field: 'idea', timeoutMs: 900000, endSettleMs: 300, snapshot: true },
   synthesis: { label: '合成制备', field: 'idea', timeoutMs: 360000, endSettleMs: 1200, snapshot: false },
   'new-material': { label: '新材料', field: 'instruction', timeoutMs: 900000, endSettleMs: 300, snapshot: true },
+  'new-material-rsi': { label: '新材料 RSI', field: 'instruction', timeoutMs: 900000, endSettleMs: 300, snapshot: true },
 };
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
 const MAX_ANSWER_CHARS = 3 * 1024 * 1024;
@@ -49,11 +50,14 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
   const config = Object.hasOwn(MATERIAL_SERVICES, serviceKey) ? MATERIAL_SERVICES[serviceKey] : null; if (!config) throw Error('不支持的材料服务');
   const target = new URL(url); if (!['ws:', 'wss:'].includes(target.protocol) || target.username || target.password) throw Error('材料服务必须配置 WebSocket 地址');
   const httpUrl = new URL(target); httpUrl.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
+  const taskPath = taskDirectoryPath(target.pathname, serviceKey);
   return {
     serviceAddress: publicServiceAddress(target),
     scoreMode: 'none',
     async startQuestionRun({ question }, { onText, onState = () => {} }) {
       const id = `evaluation-${serviceKey}-${randomUUID()}`; const startedAt = Date.now();
+      const snapshotUrl = new URL(httpUrl);
+      snapshotUrl.pathname = `${taskPath}/${encodeURIComponent(id)}`; snapshotUrl.search = '';
       const process = createProcessRecorder(startedAt);
       const conversation = createConversationEvents({ baseUrl: httpUrl.origin });
       const details = { displayEvents: conversation.data.displayEvents, process: process.data, progress: [], result: null, protocolFrames: [], generatedFiles: [], artifacts: [], review: [], pendingReview: null, snapshot: null, truncated: false };
@@ -76,7 +80,6 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
         let completionError = error;
         try {
           if (config.snapshot && !error) {
-            const snapshotUrl = new URL(httpUrl); snapshotUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}`); snapshotUrl.search = '';
             try {
               const data = await readJsonBounded(await fetchImpl(snapshotUrl, { signal: AbortSignal.timeout(15000), redirect: 'error' }));
               if (!data || typeof data !== 'object' || Array.isArray(data) || (data.taskid && data.taskid !== id)) throw Error('任务快照身份不匹配');
@@ -85,14 +88,14 @@ function createMaterialEvaluator({ serviceKey, url, timeoutMs, endSettleMs, auto
           } else if (!config.snapshot) details.snapshot = { ok: false, skipped: true, error: '该服务不提供任务快照接口' };
           const textAssets = [...text.matchAll(/https?:\/\/[^\s<>()[\]"']+?\.(?:png|jpe?g|gif|webp|svg|glb|stl|cif|csv|pdf)(?:\?[^\s<>()[\]"']*)?/gi)].map(item => ({ url: item[0] }));
           const presentation = details.snapshot?.data?.artifacts?.presentation;
-          const declaredAssets = serviceKey === 'new-material' && Array.isArray(presentation?.assets) ? presentation.assets.flatMap(asset => {
+          const declaredAssets = config.field === 'instruction' && Array.isArray(presentation?.assets) ? presentation.assets.flatMap(asset => {
             if (typeof asset?.path !== 'string') return [];
             const name = asset.path.split('/').pop();
             if (!name || !/\.(?:png|jpe?g|gif|webp|glb|stl|cif)$/i.test(name)) return [];
             let encodedName;
             try { encodedName = encodeURIComponent(name); }
             catch { details.artifactError = '部分成果路径无效，已跳过对应预览链接'; return []; }
-            const assetUrl = new URL(httpUrl); assetUrl.pathname = target.pathname.replace(/\/start\/?$/, `/tasks/${encodeURIComponent(id)}/assets/${encodedName}`); assetUrl.search = '';
+            const assetUrl = new URL(snapshotUrl); assetUrl.pathname += `/assets/${encodedName}`;
             return [{ name: asset.name || name, url: assetUrl.href }];
           }) : [];
           details.artifacts = collectArtifacts({ result: details.result, snapshot: details.snapshot, frames: details.protocolFrames, files: details.generatedFiles, displayArtifacts: conversation.data.artifacts, textAssets, declaredAssets }, httpUrl);

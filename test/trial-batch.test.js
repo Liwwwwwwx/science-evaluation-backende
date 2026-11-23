@@ -1,8 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTrialBatchService } = require('../src/runs/trial-batch.service');
+const { SERVICE_KEYS } = require('../src/runs/batch-scheme');
 
-function fixture(comparisonReady = true) {
+function fixture(comparisonReady = true, schemes = null) {
   let plan = null; let generated = 0; const created = new Map(); const calls = [];
   const repository = {
     async create(value) { if (plan) return false; plan = { ...value, state: 'generating' }; return true; },
@@ -12,13 +13,13 @@ function fixture(comparisonReady = true) {
     async submitted(id) { if (plan.id === id) plan.state = 'submitted'; },
   };
   const generator = { async generate(input) { return { items: Array.from({ length: input.count }, () => ({ question: `请分析材料结构及性能研究案例第 ${++generated} 题。` })) }; } };
-  const serviceAddresses = Object.fromEntries(['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi'].map(key => [key, `ws://${key}.example/start`]));
+  const serviceAddresses = Object.fromEntries(SERVICE_KEYS.map(key => [key, `ws://${key}.example/start`]));
   let firstFailure = true;
-  const evaluations = { async comparisonStorageReady() { return comparisonReady; }, async createBatchRun(input, { key }) {
-    calls.push(key); created.set(key, input);
+  const evaluations = { async comparisonStorageReady() { return comparisonReady; }, async createBatchRun(input, { key, expectedAddress }) {
+    calls.push(key); created.set(key, { ...input, expectedAddress });
     if (firstFailure) { firstFailure = false; throw new Error('模拟写入结果未知'); }
   } };
-  return { service: createTrialBatchService({ repository, evaluations, generator, serviceAddresses }), get plan() { return plan; }, get generated() { return generated; }, created, calls };
+  return { service: createTrialBatchService({ repository, evaluations, generator, serviceAddresses, schemes }), get plan() { return plan; }, get generated() { return generated; }, created, calls };
 }
 
 test('新批次冻结共同题目，派发异常后按原键恢复', async () => {
@@ -31,6 +32,25 @@ test('新批次冻结共同题目，派发异常后按原键恢复', async () =>
   assert.equal(f.created.get(`${f.plan.id}:alpha-rsi:0`).question, f.created.get(`${f.plan.id}:alpha-combined-rsi:0`).question);
   await f.service.dispatch('2026-11-02');
   assert.equal(f.plan.state, 'submitted'); assert.equal(f.created.size, 220); assert.equal(f.calls.length, 440);
+});
+
+test('两路新材料共用结构题，分别使用各自的地址、并发和幂等键', async () => {
+  const config = { includeNewMaterial: true, services: { 'new-material': 2, 'new-material-rsi': 3 }, concurrency: { 'new-material': 4, 'new-material-rsi': 2 } };
+  const f = fixture(false, { nightly: async () => ({ name: '双服务', version: 1, config }) });
+  await f.service.prepare('2026-11-02');
+  assert.equal(f.generated, 3);
+  await assert.rejects(f.service.dispatch('2026-11-02'), /派发状态未知/);
+  await f.service.dispatch('2026-11-02');
+  assert.equal(f.plan.state, 'submitted');
+  assert.equal(f.created.size, 5);
+  const oldRun = f.created.get(`${f.plan.id}:new-material:0`);
+  const newRun = f.created.get(`${f.plan.id}:new-material-rsi:0`);
+  assert.equal(oldRun.question, newRun.question);
+  assert.equal(oldRun.expectedAddress, 'ws://new-material.example/start');
+  assert.equal(newRun.expectedAddress, 'ws://new-material-rsi.example/start');
+  assert.equal(oldRun.concurrencyLimits[oldRun.serviceKey], 4);
+  assert.equal(newRun.concurrencyLimits[newRun.serviceKey], 2);
+  assert.equal(newRun.comparisonGroupId, undefined);
 });
 
 test('随机出题失败记录计划失败，不派发任何题', async () => {

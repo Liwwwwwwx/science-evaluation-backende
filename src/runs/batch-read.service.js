@@ -1,6 +1,6 @@
 const { TeamServiceError } = require('../errors');
 
-const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi'];
+const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'new-material-rsi', 'alpha-rsi', 'alpha-combined-rsi'];
 const SERVICE_LABELS = {
   'mission-material': 'Mission 主服务',
   literature: '文献检索',
@@ -8,6 +8,7 @@ const SERVICE_LABELS = {
   alloy: '合金材料',
   synthesis: '合成制备',
   'new-material': '新材料',
+  'new-material-rsi': '新材料 RSI',
   'alpha-rsi': '材料配比 RSI',
   'alpha-combined-rsi': '配比+制备 RSI',
 };
@@ -41,7 +42,7 @@ function servicePlans(plan) {
       const base = typeof value === 'number' ? value : (Number(value?.aviation) || 0) + (Number(value?.synthesis) || 0);
       return base + (key === 'alpha-combined-rsi' ? Number(config?.rsiManufacturingCount) || 0 : 0);
     };
-    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && !['alpha-rsi', 'alpha-combined-rsi'].includes(key) || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
+    return SERVICE_ORDER.filter(key => config ? expected(key) > 0 : plan.source !== 'manual' && !['alpha-rsi', 'alpha-combined-rsi', 'new-material-rsi'].includes(key) || Object.hasOwn(counts || items, key)).map((key) => ({ key, label: SERVICE_LABELS[key] || key, expected: expected(key) }));
   }
   return [{ key: 'mission-material', label: SERVICE_LABELS['mission-material'], expected: typeof plan.item_count === 'number' ? plan.item_count : Array.isArray(plan.items) ? plan.items.length : 0 }];
 }
