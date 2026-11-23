@@ -39,7 +39,6 @@ function generalComposition(count, domainKey) {
 数据解读题必须在题面提供足够的假设数据或观察，明确标为假设，不依赖未提供的图表、论文或实验结果；其他题也应给出完成核心任务所需条件。只输出最终题目，不输出规划、题型标签或答案。`;
 }
 
-const SERVICES = new Set(['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material']);
 const SERVICE_GUIDANCE = Object.freeze({
   'mission-material': 'Mission 主服务：提出需要协调多个研究环节的综合材料研发任务，交代目标与约束。',
   'alpha-rsi': '材料配比 RSI：围绕合金或玻璃材料的组成、配方、工艺条件与目标性能提出问题；优先使用高熵合金、镍基高温合金、铜合金、可复用火箭不锈钢、航空铝合金或芯片玻璃等已接入体系，给出必要的成分口径、温度和处理状态；不要使用未接入的胶粘剂、陶瓷等体系。',
@@ -49,7 +48,9 @@ const SERVICE_GUIDANCE = Object.freeze({
   alloy: '合金材料服务：围绕合金成分、性能、工艺或选型提出问题，给出必要的应用条件与约束。',
   synthesis: '合成制备服务：围绕材料合成路线、制备条件或工艺选择提出简洁问题，明确目标材料与必要约束。',
   'new-material': '新材料服务：围绕新材料候选、设计思路或性能需求提出问题，交代应用场景与约束。',
+  'new-material-rsi': '新材料 RSI：围绕周期晶体的结构生成、合理性检查、稳定性筛选或目标性能优化出题。可给定明确化学式、允许元素范围或可筛选的性质目标，要求交付结构文件（CIF）和候选比较依据。避开独立分子、聚合物、纯配方、合成工艺和工程服役性能；明确给出化学式时单胞原子数不超过 20。',
 });
+const SERVICES = new Set(Object.keys(SERVICE_GUIDANCE));
 const FOCUSES = Object.freeze({
   general: '综合出题：覆盖当前领域的常见研究问题，各题考察不同方向',
   principles: '基础原理：考察关键概念、作用机制和理论依据',

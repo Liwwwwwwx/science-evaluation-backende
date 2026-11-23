@@ -5,4 +5,8 @@ function publicServiceAddress(value) {
     return ['ws:', 'wss:', 'http:', 'https:'].includes(url.protocol) ? `${url.protocol}//${url.host}${url.pathname}` : null;
   } catch { return null; }
 }
-module.exports = { publicServiceAddress };
+function taskDirectoryPath(pathname, serviceKey) {
+  if (serviceKey === 'new-material-rsi' && /^\/start\/?$/.test(pathname)) return '/new-material/tasks';
+  return `${pathname.replace(/\/start\/?$/, '').replace(/\/$/, '')}/tasks`;
+}
+module.exports = { publicServiceAddress, taskDirectoryPath };

@@ -86,6 +86,7 @@ if (databaseUrl) {
     literature: url => createLiteratureEvaluator({ url }),
     'literature-aircraft': url => createLiteratureEvaluator({ serviceKey: 'literature-aircraft', url }),
     'new-material': url => createMaterialEvaluator({ serviceKey: 'new-material', url }),
+    'new-material-rsi': url => createMaterialEvaluator({ serviceKey: 'new-material-rsi', url }),
   };
   const defaultUrls = {
     'mission-material': process.env.EVALUATION_MISSION_MATERIAL_WS_URL,

@@ -1,4 +1,5 @@
 const { TeamServiceError } = require('../errors');
+const { taskDirectoryPath } = require('./service-address');
 const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
 const CONTENT_TYPES = { avif: 'image/avif', bmp: 'image/bmp', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', glb: 'model/gltf-binary', gltf: 'model/gltf+json', stl: 'model/stl', pdf: 'application/pdf', csv: 'text/csv; charset=utf-8', tsv: 'text/tab-separated-values; charset=utf-8', json: 'application/json', md: 'text/plain; charset=utf-8', markdown: 'text/plain; charset=utf-8', log: 'text/plain; charset=utf-8', jsonl: 'text/plain; charset=utf-8', py: 'text/plain; charset=utf-8', js: 'text/plain; charset=utf-8', html: 'text/plain; charset=utf-8', jsx: 'text/plain; charset=utf-8', ts: 'text/plain; charset=utf-8', tsx: 'text/plain; charset=utf-8', css: 'text/plain; charset=utf-8', scss: 'text/plain; charset=utf-8', xml: 'text/plain; charset=utf-8', yaml: 'text/plain; charset=utf-8', yml: 'text/plain; charset=utf-8', sh: 'text/plain; charset=utf-8', sql: 'text/plain; charset=utf-8', toml: 'text/plain; charset=utf-8', ini: 'text/plain; charset=utf-8', txt: 'text/plain; charset=utf-8', cif: 'text/plain; charset=utf-8', zip: 'application/zip' };
 function fail(status, code, message) { throw new TeamServiceError(status, code, message); }
@@ -12,8 +13,8 @@ function artifactOriginAllowed(run, href) {
     if (service.protocol === 'wss:') service.protocol = 'https:';
   } catch { return false; }
   const taskIds = [run?.nativeRunId || run?.run?.taskId, run?.run?.details?.autoRetry?.taskId].filter(id => typeof id === 'string' && id);
-  const entry = service.pathname.replace(/\/start\/?$/, '').replace(/\/$/, '');
-  const taskAsset = taskIds.some(taskid => url.pathname.startsWith(`${entry}/tasks/${encodeURIComponent(taskid)}/assets/`) || (['alpha-rsi', 'alpha-combined-rsi'].includes(run?.serviceKey) && url.pathname.startsWith(`/alloy/tasks/${encodeURIComponent(taskid)}/assets/`)));
+  const taskPath = taskDirectoryPath(service.pathname, run?.serviceKey);
+  const taskAsset = taskIds.some(taskid => url.pathname.startsWith(`${taskPath}/${encodeURIComponent(taskid)}/assets/`) || (['alpha-rsi', 'alpha-combined-rsi'].includes(run?.serviceKey) && url.pathname.startsWith(`/alloy/tasks/${encodeURIComponent(taskid)}/assets/`)));
   const serviceAsset = url.origin === service.origin && (taskAsset || url.pathname.startsWith('/files/'));
   const publicAsset = url.origin === 'https://www.science42.tech' && url.pathname.startsWith('/alpha/materials/modelfiles/');
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !/%(?:2f|5c|00|25)/i.test(url.pathname) && (serviceAsset || publicAsset);

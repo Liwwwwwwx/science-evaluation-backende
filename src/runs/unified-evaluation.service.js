@@ -7,7 +7,7 @@ const { validateConcurrency } = require('./batch-scheme');
 const { hasOutput } = require('../scoring/service');
 const { ACTIVE_SERVICE_KEYS } = require('./service-settings');
 
-const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material'];
+const SERVICE_KEYS = ['mission-material', 'alpha-rsi', 'alpha-combined-rsi', 'alloy', 'literature', 'literature-aircraft', 'synthesis', 'new-material', 'new-material-rsi'];
 const MAX_ACTIVE = 25;
 const MAX_PER_SERVICE = 5;
 const MAX_QUEUED = 300;

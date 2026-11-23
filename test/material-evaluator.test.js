@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { createMaterialEvaluator, collectArtifacts } = require('../src/runs/material-evaluator');
+const { artifactOriginAllowed } = require('../src/runs/artifacts');
 
 function socketFor(send) {
   const socket = new EventEmitter(); socket.addEventListener = socket.on;
@@ -36,6 +37,33 @@ for (const serviceKey of ['alloy', 'synthesis', 'new-material']) test(`${service
   assert.equal(fetches, serviceKey === 'synthesis' ? 0 : 1);
   assert.equal(result.details.snapshot.ok, serviceKey !== 'synthesis');
   assert.ok(states.length >= 3); assert.equal(evaluator.scoreMode, 'none');
+});
+
+test('新材料 RSI 根入口读取结构快照，产物仅允许当前任务与服务地址', async () => {
+  const serviceKey = 'new-material-rsi';
+  const address = 'ws://127.0.0.1:1115/start';
+  let question;
+  let taskid;
+  const evaluator = createMaterialEvaluator({ serviceKey, url: address, endSettleMs: 0,
+    createSocket: () => socketFor((payload, socket) => {
+      ({ taskid, instruction: question } = payload);
+      frame(socket, '[start]结构候选[end]');
+    }),
+    fetchImpl: async url => {
+      assert.equal(url.pathname, `/new-material/tasks/${taskid}`);
+      return Response.json({ taskid, artifacts: { presentation: { assets: [{ path: 'output/result.cif' }] } } });
+    },
+  });
+  const started = await evaluator.startQuestionRun({ question: '请生成硅的晶体结构' }, { onText() {} });
+  const result = await started.completion;
+  assert.equal(question, '请生成硅的晶体结构');
+  assert.equal(result.details.snapshot.ok, true);
+  const { url } = result.details.artifacts[0];
+  assert.equal(url, `http://127.0.0.1:1115/new-material/tasks/${taskid}/assets/result.cif`);
+  const run = { serviceKey, nativeRunId: taskid, run: { serviceAddress: address } };
+  assert.equal(artifactOriginAllowed(run, url), true);
+  assert.equal(artifactOriginAllowed(run, url.replace(taskid, 'another-task')), false);
+  assert.equal(artifactOriginAllowed(run, url.replace('1115', '1234')), false);
 });
 
 test('显式人工策略仍校验必填答案及重复/过期答复', async () => {

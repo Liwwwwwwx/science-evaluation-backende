@@ -9,6 +9,7 @@ const SERVICE_INPUTS = Object.freeze({
   'literature-aircraft': { generationMode: 'service', serviceKey: 'literature-aircraft' },
   synthesis: { generationMode: 'service', serviceKey: 'synthesis' },
   'new-material': { generationMode: 'service', serviceKey: 'new-material' },
+  'new-material-rsi': { generationMode: 'service', serviceKey: 'new-material-rsi' },
 });
 
 async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME } = {}) {
@@ -42,8 +43,16 @@ async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME } = {
     const special = await generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing' }, scheme.rsiManufacturingCount);
     out['alpha-combined-rsi'] = [...(out['alpha-combined-rsi'] || []), ...special];
   }
-  for (const key of ['mission-material', 'literature', 'literature-aircraft', 'new-material']) {
+  for (const key of ['mission-material', 'literature', 'literature-aircraft']) {
     if (count(key)) out[key] = await generate(SERVICE_INPUTS[key], count(key));
+  }
+  const legacyMaterial = count('new-material');
+  const materialRsi = count('new-material-rsi');
+  if (legacyMaterial || materialRsi) {
+    const input = SERVICE_INPUTS[materialRsi ? 'new-material-rsi' : 'new-material'];
+    const shared = await generate(input, Math.max(legacyMaterial, materialRsi));
+    if (legacyMaterial) out['new-material'] = shared.slice(0, legacyMaterial);
+    if (materialRsi) out['new-material-rsi'] = shared.slice(0, materialRsi);
   }
   return Object.fromEntries(SERVICE_KEYS.filter(key => out[key]).map(key => [key, out[key]]));
 }

@@ -1,14 +1,14 @@
 const { TeamServiceError } = require('../errors');
 
 // 旧服务键仍用于读取历史快照；新批次只执行当前服务。
-const SERVICE_KEYS = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi'];
+const SERVICE_KEYS = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi', 'new-material-rsi'];
 const INACTIVE_SERVICE_KEYS = ['alloy', 'synthesis'];
 const MAX_CONCURRENCY = 5;
 // 新方案只按服务分配题数；旧方案的航空/合成两池在读取时合并为服务题数。
 const DEFAULT_SCHEME = Object.freeze({
   services: {
     'mission-material': 20, literature: 50, 'literature-aircraft': 50, alloy: 0,
-    synthesis: 0, 'new-material': 0, 'alpha-rsi': 50, 'alpha-combined-rsi': 50,
+    synthesis: 0, 'new-material': 0, 'alpha-rsi': 50, 'alpha-combined-rsi': 50, 'new-material-rsi': 0,
   },
   rsiManufacturingCount: 0,
   compareAlloyAlpha: false,

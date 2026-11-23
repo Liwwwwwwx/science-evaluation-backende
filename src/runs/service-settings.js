@@ -8,6 +8,7 @@ const SERVICE_LABELS = Object.freeze({
   literature: '文献检索',
   'literature-aircraft': '航空文献',
   'new-material': '新材料',
+  'new-material-rsi': '新材料 RSI',
 });
 const ACTIVE_SERVICE_KEYS = Object.keys(SERVICE_LABELS);
 const ACTIVE_WORK = {
@@ -36,7 +37,7 @@ function validateAddress(input, key) {
   const match = typeof input === 'string' && input.length <= 512 && /^(wss?):\/\/([0-9.]+)(?::([1-9][0-9]{0,4}))?(\/[A-Za-z0-9._~/-]*)$/.exec(input.trim());
   if (!match || !publicIPv4(match[2]) || (match[3] && Number(match[3]) > 65535)
       || match[4].split('/').some(segment => segment === '.' || segment === '..')
-      || (key === 'new-material' && !/\/start\/?$/.test(match[4]))) {
+      || (['new-material', 'new-material-rsi'].includes(key) && !/\/start\/?$/.test(match[4]))) {
     invalid(`${SERVICE_LABELS[key]}：请填写 ws:// 或 wss:// 开头的完整公网 IPv4 地址和接口路径，不含账号、密码或查询参数`);
   }
   return new URL(match[0]).href;

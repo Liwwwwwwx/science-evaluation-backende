@@ -358,7 +358,7 @@ paths:
         - name: service
           in: query
           schema: { type: string }
-          description: 按服务过滤（mission-material / alpha-rsi / alloy / literature / literature-aircraft / synthesis / new-material）
+          description: 按服务过滤（mission-material / alpha-rsi / alpha-combined-rsi / alloy / literature / literature-aircraft / synthesis / new-material / new-material-rsi）
         - name: source
           in: query
           schema: { type: string, enum: [fixed, random] }
@@ -604,7 +604,7 @@ paths:
                         uniqueItems: true
                         items:
                           type: string
-                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material, new-material-rsi]
                         description: 可选适用服务；用于让一条测试集题同时供多个服务执行
       responses:
         '201':
@@ -1543,7 +1543,7 @@ paths:
                       properties:
                         key:
                           type: string
-                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
+                          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material, new-material-rsi]
                         label:
                           type: string
                         enabled:
@@ -1798,7 +1798,7 @@ paths:
               properties:
                 serviceKey:
                   type: string
-                  enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
+                  enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material, new-material-rsi]
                 question:
                   type: string
                   description: 题面；人工提问 8–500 字符
@@ -2927,7 +2927,7 @@ components:
       properties:
         key:
           type: string
-          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material]
+          enum: [mission-material, alpha-rsi, alpha-combined-rsi, literature, literature-aircraft, new-material, new-material-rsi]
         enabled: { type: boolean }
         address:
           type: string
@@ -3058,7 +3058,7 @@ components:
           description: 旧对比模式字段，当前不再使用
         serviceKey:
           type: string
-          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material]
+          enum: [mission-material, alpha-rsi, alpha-combined-rsi, alloy, literature, literature-aircraft, synthesis, new-material, new-material-rsi]
           description: 与 domainKey 互斥；旧服务维度请求须提供 topic
         questionKind:
           type: string
