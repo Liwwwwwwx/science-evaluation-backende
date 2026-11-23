@@ -53,9 +53,10 @@ function discoverRunImages(job) {
     if (seen.has(key)) return;
     seen.add(key);
     // 只有运行产物和产物代理允许读取的地址属于评分输入；正文引用的外部图片只计数，不参与输入完整性判定。
-    if (!artifact && !(address && artifactOriginAllowed(job, address))) { external++; return; }
+    const allowed = address && artifactOriginAllowed(job, address);
+    if (!artifact && !allowed) { external++; return; }
     if (found.length >= MAX_CANDIDATES) { overflow = true; return; }
-    found.push({ id: `image:${found.length + 1}`, ...(address ? { url: address } : {}) });
+    found.push({ id: `image:${found.length + 1}`, ...(address ? { url: address } : {}), ...(!allowed ? { blocked: true } : {}) });
   }
   for (const file of Array.isArray(details.artifacts) ? details.artifacts : []) {
     if (!file || typeof file !== 'object') continue;
@@ -81,7 +82,7 @@ function discoverRunImages(job) {
 }
 
 async function readRunImages(job, discovery, { readArtifact = readRunArtifact, signal } = {}) {
-  const candidates = discovery.candidates.slice(0, MAX_IMAGES);
+  const candidates = discovery.candidates.filter(item => !item.blocked).slice(0, MAX_IMAGES);
   // 临时替换产物索引，仍由现有代理核验运行来源、任务路径、重定向和文件类型。
   const run = { ...job, run: { ...job.run, details: { ...job.run?.details, artifacts: candidates.map(item => ({ url: item.url || '' })) } } };
   const loaded = await Promise.all(candidates.map(async (item, index) => {

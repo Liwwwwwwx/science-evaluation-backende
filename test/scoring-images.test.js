@@ -77,7 +77,7 @@ test('视觉客户端以图片内容块发送数据，并尊重明确的模型�
 });
 
 test('只有收到图片的评委可引用图片，未发送的图片令该评委分数仅供参考', async () => {
-  const rubric = { requirements: [{ requirement: '识别图中的结果', critical: true }], visualAidsApplicable: false, visualAidsReason: '无需额外图表' };
+  const rubric = { requirements: [{ requirement: '识别图中的结果', critical: true }], visualAidsApplicable: false, visualAidsReason: '无需额外图表', requiresImages: true };
   const seen = [];
   const client = supportsImages => ({ model: 'test', supportsImages, isConfigured: () => true, callJson: async (prompt, options) => {
     if (prompt.startsWith('仅根据题目')) return rubric;
@@ -99,7 +99,7 @@ test('只有收到图片的评委可引用图片，未发送的图片令该评�
   assert.ok(!JSON.stringify(result).includes(dataUrl));
 });
 
-test('图片加载异常不破坏文字评分，但必须标记图片未覆盖', async () => {
+test('历史规则中不适用图文评分时，可选图片读取失败仅记覆盖缺口', async () => {
   const rubric = { requirements: [{ requirement: '说明结果', critical: true }], visualAidsApplicable: false, visualAidsReason: '无需图表' };
   const client = { model: 'test', supportsImages: true, isConfigured: () => true, callJson: async prompt => prompt.startsWith('仅根据题目') ? rubric : {
     dimensions: { readability: { score: 80, note: '清楚' }, professionalism: { score: 80, note: '明确' }, visualAids: { score: null, note: '不适用' } },
@@ -107,7 +107,8 @@ test('图片加载异常不破坏文字评分，但必须标记图片未覆盖',
   const result = await createScoringService({ clients: { deepSeekScore: client }, imageLoader: async () => { throw Error('读取失败'); } }).score(job());
   assert.equal(result.scores.deepSeekScore.status, 'ready');
   assert.deepEqual(result.scores.deepSeekScore.quality.source.imageCoverage, { found: 1, sent: 0, overflow: false });
-  assert.equal(result.scores.deepSeekScore.quality.source.truncated, true);
+  assert.equal(result.scores.deepSeekScore.quality.source.truncated, false);
+  assert.equal(result.scores.deepSeekScore.quality.taskCompletion.status, 'completed');
 });
 
 test('正文外部引用图片只记录数量，不把完整输入判为不完整', async () => {

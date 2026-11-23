@@ -60,6 +60,33 @@ test('评委引用错误保留为不确定，不把完整答案判为内容缺�
  assert.equal(normalizeJudge(j,old,input(),{status:'passed'},builtinRule()).qualification.status,'unclear');
 });
 
+test('附件覆盖有缺口时拒绝完整范围核验，保留已读文本的直接引用', () => {
+ const r = rubric();
+ const i = { ...input(), attachments: [{ id: 'attachment:1', text: answer }], attachmentCoverage: { files: [{ state: 'included' }] } };
+ const j = judgement();
+ j.requirements[1].evidence = ['attachment:1:0'];
+ for (const scope of ['output', 'all']) {
+  r.requirements[1].scope = scope;
+  j.requirements[1].verification.scope = scope;
+  i.attachmentCoverage.files[0].state = 'included';
+  assert.equal(normalizeJudge(j, r, i, {status:'passed'}, builtinRule()).taskCompletion.requirements[1].verification.method, 'scope_review');
+  for (const state of ['partial', 'blocked', 'unreadable', 'limited']) {
+   i.attachmentCoverage.files[0].state = state;
+   const q = normalizeJudge(j, r, i, {status:'passed'}, builtinRule());
+   assert.equal(q.taskCompletion.requirements[1].status, 'unclear');
+   assert.equal(q.taskCompletion.requirements[1].verification, null);
+   assert.equal(q.taskCompletion.status, 'completed');
+   assert.equal(q.source.truncated, false);
+  }
+ }
+ i.attachmentCoverage.files[0].state = 'partial';
+ delete j.requirements[1].verification;
+ r.requirements[1].requirement = '使用指定热导率单位';
+ const direct = normalizeJudge(j, r, i, {status:'passed'}, builtinRule());
+ assert.equal(direct.taskCompletion.requirements[1].status, 'met');
+ assert.equal(direct.taskCompletion.requirements[1].evidenceRefs[0].source, 'attachment:1');
+});
+
 test('约束和交付分别判断：非关键体验约束不能否认已交付，关键约束仍能阻止合格',()=>{
  const i=input();i.process.messages.push({id:'P3',text:'先安装依赖再输出结果。'});
  const j=judgement();j.requirements[1]={id:'R2',status:'missing',evidence:[{source:'P3',quote:'先安装依赖再输出结果。'}],note:'过程含安装细节'};
