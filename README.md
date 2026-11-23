@@ -22,7 +22,7 @@
 
 已结束且保留输出的运行可生成有效期为 30 天的分享链接。个人运行由所有者管理，自动批次运行由有测评写权限的成员管理。生成或撤销沿用运行写入开关、评测会话与同源校验。活动链接重复生成时返回原链接和原到期时间，撤销匹配当前链接标识。生成和读取不触发测评或评分。
 
-`GET /api/evaluation/unified/runs/:id/share` 读取当前链接，`POST` 接受 `{"action":"create"}` 或 `{"action":"revoke","shareId":"..."}`。接收方通过 `GET /api/evaluation/unified/shared-runs/:shareId` 读取，须登录且有 `team-services:read`。分享只返回当前保存的题目、正文、团队输出与最终总结、评分摘要和到期时间。原运行及其产物访问沿用原权限。
+`GET /api/evaluation/unified/runs/:id/share` 读取当前链接，`POST` 接受 `{"action":"create"}` 或 `{"action":"revoke","shareId":"..."}`。接收方通过 `GET /api/evaluation/unified/shared-runs/:shareId` 读取，须登录且有 `team-services:read`。分享返回当前保存的题目、正文、团队输出与最终总结、评分摘要和到期时间。对于独立双评委评分，分享还返回当前评分的展示字段、本轮规则和已保存题目要求。原运行及其产物访问沿用原权限。
 
 启用前审核并执行 `migrations/018_run_shares.sql`。迁移只新建分享表，应用启动时不会自动执行。隔离测试使用 `EVALUATION_RUN_SHARE_TEST_PG_SOCKET=/tmp/evaluation-share-pg.XXXXXXXX node --test test/run-sharing-postgres.test.js`，端口 55494，数据库名 `science_evaluation`。
 

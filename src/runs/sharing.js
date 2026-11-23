@@ -1,13 +1,83 @@
 const { randomUUID } = require('node:crypto');
 const { TeamServiceError } = require('../errors');
-const { redact } = require('../scoring/service');
+const { redact, VERSION } = require('../scoring/service');
 const { scoreView } = require('../scoring/score-view');
+const { DIMENSIONS } = require('../scoring/rules');
 
 const TERMINAL = "('done','error','cancelled')";
 const MAX_TEXT = 300000;
 const SCORE_STATUS = new Set(['ready', 'pending', 'failed', 'absent', 'unavailable', 'skipped']);
 const TASK_STATUS = new Set(['completed', 'partial', 'failed', 'unclear']);
 const QUALIFICATION = new Set(['qualified', 'not_qualified', 'unclear']);
+const DIMENSION_KEYS = Object.keys(DIMENSIONS);
+
+function fields(value, keys, maxText = 1200) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(keys.flatMap(key => {
+    const item = value[key];
+    if (typeof item === 'string') return [[key, sharedText(item, maxText)]];
+    if (typeof item === 'boolean' || Number.isFinite(item) || item === null) return [[key, item]];
+    return [];
+  }));
+}
+
+function sharedText(value, limit = 1200) {
+  if (typeof value !== 'string') return '';
+  const text = value.length > limit ? value.slice(0, limit).replace(/[\uD800-\uDBFF]$/, '') : value;
+  return redact(scoreView(text, { hideHtml: false }).compact);
+}
+
+function items(value, limit, project) {
+  return Array.isArray(value) ? value.slice(0, limit).map(item => project(item)).filter(Boolean) : undefined;
+}
+
+function sharedScoreDetails(row, summaries) {
+  if (row.scoring_version !== VERSION && !Object.keys(summaries).some(key => row.scores[key]?.quality?.version === VERSION)) return {};
+  const scores = Object.fromEntries(Object.entries(summaries).map(([key, { status }]) => {
+    const quality = row.scores[key]?.quality;
+    if (status !== 'ready' || quality?.version !== VERSION) return [key, { status }];
+    const dimensions = Object.fromEntries(DIMENSION_KEYS.flatMap(dimension => {
+      const selected = fields(quality.dimensions?.[dimension], ['label', 'score', 'weight', 'applicable', 'note']);
+      return selected ? [[dimension, selected]] : [];
+    }));
+    const source = quality.source;
+    return [key, { status, quality: {
+      ...fields(quality, ['total', 'comment', 'markdownStatus']), version: VERSION, dimensions,
+      gaps: items(quality.gaps, 8, sharedText), suggestions: items(quality.suggestions, 8, sharedText),
+      taskCompletion: quality.taskCompletion && {
+        ...fields(quality.taskCompletion, ['status']),
+        requirements: items(quality.taskCompletion.requirements, 15, item => fields(item, ['id', 'requirement', 'critical', 'status', 'note'])),
+      },
+      qualification: fields(quality.qualification, ['status', 'passScore', 'markdownGate']),
+      deliveryReview: fields(quality.deliveryReview, ['status', 'note', 'evidenceIssue']),
+      evaluationIssues: items(quality.evaluationIssues, 40, item => fields(item, ['path', 'code'])),
+      source: source && {
+        ...fields(source, ['truncated', 'outputTruncated']),
+        imageCoverage: fields(source.imageCoverage, ['found', 'sent', 'external', 'blocked', 'overflow']),
+        attachmentCoverage: source.attachmentCoverage && { files: items(source.attachmentCoverage.files, 32, item => fields(item, ['state'])) },
+      },
+    } }];
+  }));
+  const rubric = row.scoring_rubric;
+  const rule = row.scoring_rule;
+  return { scoreDetails: {
+    scores,
+    scoring: { version: VERSION,
+      rubric: rubric && {
+        ...fields(rubric, ['visualAidsApplicable', 'visualAidsReason']),
+        requirements: items(rubric.requirements, 15, item => fields(item, ['id', 'requirement', 'critical'])),
+      },
+      ruleSnapshot: rule && {
+        ...fields(rule, ['name', 'version']),
+        ...(rule.id === 'builtin-v1' ? { id: 'builtin-v1' } : {}),
+        config: rule.config && {
+          ...fields(rule.config, ['passScore', 'contentInstructions', 'completionInstructions'], 6000),
+          weights: fields(rule.config.weights, DIMENSION_KEYS),
+        },
+      },
+    },
+  } };
+}
 
 function shareInfo(row) {
   return row ? { id: row.share_id, path: `/shared/runs/${row.share_id}`, expiresAt: new Date(row.expires_at).toISOString() } : null;
@@ -49,9 +119,10 @@ function sharedRun(row) {
     const team = typeof event.team?.name === 'string' ? redact(event.team.name.slice(0, 100)) : '';
     return [{ title: event.type === 'display.final_answer' ? '最终总结' : team || '团队输出', content }];
   });
+  const scores = sharedScores(row.scores);
   return { question: redact(row.question || ''), answer, sections, serviceKey: row.service_key,
     status: row.status, truncated, finishedAt: row.finished_at ? new Date(row.finished_at).toISOString() : null,
-    expiresAt: new Date(row.expires_at).toISOString(), scores: sharedScores(row.scores) };
+    expiresAt: new Date(row.expires_at).toISOString(), scores, ...sharedScoreDetails(row, scores) };
 }
 
 function createRunSharing(pool) {
@@ -91,7 +162,8 @@ function createRunSharing(pool) {
     },
     async read(shareId) {
       const [row] = await rows(`SELECT s.expires_at, r.question, r.answer, r.answer_truncated, r.finished_at, r.service_key, r.status, r.scores,
-        r.run#>'{details,displayEvents}' AS display_events, r.run#>'{details,truncated}' AS details_truncated
+        r.run#>'{details,displayEvents}' AS display_events, r.run#>'{details,truncated}' AS details_truncated,
+        r.run#>>'{scoring,version}' AS scoring_version, r.run#>'{scoring,rubric}' AS scoring_rubric, r.run#>'{scoring,ruleSnapshot}' AS scoring_rule
         FROM public.evaluation_run_shares s JOIN public.unified_evaluation_runs r ON r.id=s.run_id
         WHERE s.share_id=$1 AND s.expires_at>now() AND NOT (coalesce(r.run,'{}'::jsonb) ? 'outputClearedAt')
         AND (r.status IN ${TERMINAL} OR (r.status='scoring' AND r.run->>'status' IN ${TERMINAL}))`, [shareId]);
