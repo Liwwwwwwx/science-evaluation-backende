@@ -4,6 +4,7 @@ function sources(input, scope = 'output') {
   const entries = [
     { id: 'answer', text: input.answer || '', kind: 'output' },
     { id: 'structured', text: input.structured || '', kind: 'output' },
+    ...(input.attachments || []).map(file => ({ id: file.id, text: file.text, kind: 'output' })),
     ...(input.process?.messages || []).map(m => ({ id: m.id, text: m.text || '', kind: 'process' })),
   ];
   return entries.filter(e => typeof e.id === 'string' && typeof e.text === 'string' && (scope === 'all' || e.kind === scope));
