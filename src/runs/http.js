@@ -5,7 +5,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 // 单个结构化结果可达数MB；允许一份完整结果写出，慢连接仍受缓冲上限保护。
 const MAX_SSE_BUFFER = 8 * 1024 * 1024;
 function invalid(message) { throw new TeamServiceError(400, 'INVALID_INPUT', message); }
-async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runWriteEnabled, publicOrigin, readBody, reply }) {
+async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runSharing, runWriteEnabled, publicOrigin, readBody, reply }) {
   const base = '/api/evaluation/unified';
   if (url.pathname === `${base}/services` && req.method === 'GET') {
     const canRun = runWriteEnabled && user.permissions.includes('team-services:write');
@@ -15,6 +15,14 @@ async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runW
     })) });
   }
   if (!evaluations) throw new TeamServiceError(503, 'EVALUATION_UNAVAILABLE', '独立运行尚未配置');
+  const shared = /^\/api\/evaluation\/unified\/shared-runs\/([^/]+)$/.exec(url.pathname);
+  if (shared) {
+    if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+    if (!user.permissions.includes('team-services:read')) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评查看权限');
+    if (!UUID.test(shared[1])) throw new TeamServiceError(404, 'RUN_SHARE_INVALID', '分享链接无效或已过期');
+    if (!runSharing) throw new TeamServiceError(503, 'RUN_SHARE_STORAGE_UNAVAILABLE', '分享存储尚未开通');
+    return reply(res, 200, await runSharing.read(shared[1]));
+  }
   if (url.pathname === `${base}/history`) {
     if (req.method !== 'GET') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
     const result = await evaluations.listHistory(String(user.id));
@@ -101,14 +109,28 @@ async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runW
     const runIds = [...new Set(input.runIds)];
     return reply(res, 200, await evaluations.hideRuns(String(user.id), runIds));
   }
-  const match = /^\/api\/evaluation\/unified\/runs\/([^/]+)(\/events|\/reply|\/score|\/rerun|\/end)?$/.exec(url.pathname);
+  const match = /^\/api\/evaluation\/unified\/runs\/([^/]+)(\/events|\/reply|\/score|\/rerun|\/end|\/share)?$/.exec(url.pathname);
   if (!match) throw new TeamServiceError(404, 'NOT_FOUND', 'Not found');
   if (!UUID.test(match[1])) invalid('运行 ID 无效');
   const scope = user.permissions.includes('team-services:write') ? `evaluation-user:${user.id}` : null;
   if (!user.permissions.includes('team-services:read')) throw new TeamServiceError(403, 'FORBIDDEN', '没有运行查看权限');
   // 共享自动化运行可由有写权限的团队成员重评；其他写操作仍要求记录归属。
   const rescoreRequest = req.method === 'POST' && match[2] === '/score';
-  const access = await evaluations.assertRunAccess(match[1], String(user.id), req.method === 'POST' && !rescoreRequest);
+  const access = await evaluations.assertRunAccess(match[1], String(user.id), req.method === 'POST' && !rescoreRequest && match[2] !== '/share');
+  if (match[2] === '/share') {
+    if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有管理运行分享的权限');
+    if (!runSharing) throw new TeamServiceError(503, 'RUN_SHARE_STORAGE_UNAVAILABLE', '分享存储尚未开通');
+    if (req.method === 'GET') return reply(res, 200, { share: await runSharing.get(match[1]) });
+    if (req.method !== 'POST') throw new TeamServiceError(405, 'METHOD_NOT_ALLOWED', '请求方式不支持');
+    if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
+    if (!runWriteEnabled) throw new TeamServiceError(503, 'EVALUATION_WRITE_DISABLED', '运行写入尚未启用');
+    const input = await readBody(req, 1024);
+    const fields = Object.keys(input).length;
+    if (input.action === 'create' && fields === 1) return reply(res, 200, { share: await runSharing.create(match[1], String(user.id)) });
+    if (input.action !== 'revoke' || fields !== 2 || typeof input.shareId !== 'string' || !UUID.test(input.shareId)) invalid('请选择生成或撤销分享链接');
+    await runSharing.revoke(match[1], String(user.id), input.shareId);
+    return reply(res, 200, { share: await runSharing.get(match[1]) });
+  }
   if (['/reply', '/score', '/rerun', '/end'].includes(match[2]) && req.method === 'POST') {
     if (!scope) throw new TeamServiceError(403, 'FORBIDDEN', '没有测评执行权限');
     if (req.headers.origin !== publicOrigin || req.headers['sec-fetch-site'] === 'cross-site') throw new TeamServiceError(403, 'INVALID_ORIGIN', '请求来源无效');
@@ -139,6 +161,7 @@ async function handleRuns({ req, res, url, user, evaluations, scoringUsage, runW
     const rerunnable = ended && ['done','error'].includes(value.status) && ['done','error'].includes(value.run?.status);
     const usage = !['queued','running'].includes(value.status) ? await scoringUsage?.byRun(match[1]) : null;
     return reply(res, 200, { ...value, scoringUsage: usage ?? null, rerunPreservesOutput: true,
+      canShare: !!(scope && runSharing && (access.owned || value.origin === 'automation') && runWriteEnabled && ended && scoring?.expired !== true),
       canRescore: !!(scope && (access.owned || value.origin === 'automation') && runWriteEnabled && evaluations.scoringEnabled && ended),
       canRerun: !!(scope && access.owned && runWriteEnabled && rerunnable && value.origin === 'manual' && !value.batchId && ((await evaluations.availableServices?.()) || []).includes(value.serviceKey)) });
   }

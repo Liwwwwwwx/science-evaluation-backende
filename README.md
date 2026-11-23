@@ -18,6 +18,14 @@
 
 启用前须审核并手工执行 `migrations/011_run_ownership.sql`：先停止旧版写入并核实备份；迁移时已有的人工及 legacy 记录全部归属用户名 `admin`，自动化记录仍共享。若账号缺失或迁移已执行则整笔回滚。迁移要求旧版写入停止，因为旧版不会写入归属字段；不要将旧版与迁移后数据库混用。上线和生产迁移另行确认。未迁移时权限相关接口不可用，不回退为公开读取。
 
+## 团队内运行分享
+
+已结束且保留输出的运行可生成有效期为 30 天的分享链接。个人运行由所有者管理，自动批次运行由有测评写权限的成员管理。生成或撤销沿用运行写入开关、评测会话与同源校验。活动链接重复生成时返回原链接和原到期时间，撤销匹配当前链接标识。生成和读取不触发测评或评分。
+
+`GET /api/evaluation/unified/runs/:id/share` 读取当前链接，`POST` 接受 `{"action":"create"}` 或 `{"action":"revoke","shareId":"..."}`。接收方通过 `GET /api/evaluation/unified/shared-runs/:shareId` 读取，须登录且有 `team-services:read`。分享只返回当前保存的题目、正文、团队输出与最终总结、评分摘要和到期时间。原运行及其产物访问沿用原权限。
+
+启用前审核并执行 `migrations/018_run_shares.sql`。迁移只新建分享表，应用启动时不会自动执行。隔离测试使用 `EVALUATION_RUN_SHARE_TEST_PG_SOCKET=/tmp/evaluation-share-pg.XXXXXXXX node --test test/run-sharing-postgres.test.js`，端口 55494，数据库名 `science_evaluation`。
+
 ## 近期对话个人管理
 
 侧栏通过 `GET /api/evaluation/unified/history` 读取当前账号最近 50 条可见的人工及旧运行及其服务标识；`POST /api/evaluation/unified/history/:runId` 接收 `{ "action": "rename", "title": "名称" }` 或 `{ "action": "remove" }`。名称限定 1–100 字符；移除只隐藏当前账号侧栏中的条目，不删除运行、题目、回答或统计，也不影响其他账号。写操作要求读写权限、同源和运行写开关；显示名称与题目原文分开存储。运行记录列表使用同一隐藏状态过滤；`POST /api/evaluation/unified/runs/hide` 接收 `{ "runIds": [...] }`（1–100 个），按当前账号隐藏运行记录，同样不删除数据或影响他人；执行中的运行不可隐藏。

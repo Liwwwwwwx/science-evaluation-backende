@@ -12,6 +12,7 @@ const { createAccountService, createAccountRepository } = require('./auth/accoun
 const { createEvalQuestionBankRepository } = require('./question-bank/repository');
 const { createUnifiedEvaluationService } = require('./runs/unified-evaluation.service');
 const { createUnifiedEvaluationRepository } = require('./runs/unified-evaluation.repository');
+const { createRunSharing } = require('./runs/sharing');
 const { createBatchReadRepository } = require('./runs/batch-read.repository');
 const { createBatchReadService } = require('./runs/batch-read.service');
 const { createRunQuestionResolver } = require('./runs/question-resolver');
@@ -52,6 +53,7 @@ let accounts;
 let questionBank;
 let generator;
 let evaluations;
+let runSharing;
 let serviceSettings;
 let batches;
 let missionDaily;
@@ -73,6 +75,7 @@ if (databaseUrl) {
   rules = createRuleService(createRuleRepository(pool));
   authService = createAuthService(createAuthRepository(pool));
   accounts = createAccountService(createAccountRepository(pool));
+  runSharing = createRunSharing(pool);
   const questionRepository = createEvalQuestionBankRepository({ pool });
   standardsRepository = createStandardsRepository({ pool, questions: questionRepository });
   questionBank = createQuestionBankService(questionRepository);
@@ -148,7 +151,7 @@ if (databaseUrl) {
     return { ...info, notification };
   };
 }
-createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, scoringUsage, directScore, questionBank, generator, evaluations, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
+createApp({ token: process.env.EVALUATION_SERVICE_TOKEN, authService, accounts, scoringUsage, directScore, questionBank, generator, evaluations, runSharing, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, standardsRepository, reportWriteEnabled:process.env.EVALUATION_DAILY_REPORT_WRITE_ENABLED === 'true', rulesWriteEnabled: process.env.EVALUATION_RULES_WRITE_ENABLED === 'true', runWriteEnabled: process.env.EVALUATION_RUN_WRITE_ENABLED === 'true', nightlyEnabled, questionBankWriteEnabled: process.env.EVALUATION_QUESTION_BANK_WRITE_ENABLED === 'true', publicOrigin, secureCookies }).listen(port, host, () => {
   console.log(`Evaluation backend listening on ${host}:${port}`);
   if (process.env.EVALUATION_RUN_WRITE_ENABLED === 'true' && process.env.EVALUATION_QUEUE_RECOVERY_ENABLED !== 'false') evaluations?.startQueueRecovery({ onError: () => console.error('测评队列恢复暂不可用，将自动重试') });
   if (timeoutRecoveryEnabled()) evaluations?.startTimeoutRecovery({ onError: () => console.error('超时运行检查暂不可用，将自动重试') });

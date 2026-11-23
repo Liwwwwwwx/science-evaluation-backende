@@ -47,7 +47,7 @@ const DOCS_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, accounts, scoringUsage, questionBank, evaluations, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, nightlyEnabled = null, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
+function createApp({ token, generator = createQuestionBankGenerationService(), standards = createStandardsService(), directScore = createDirectScoreService(), standardsRepository, authService, accounts, scoringUsage, questionBank, evaluations, runSharing, serviceSettings, batches, batchSchemes, manualBatches, rules, dailyReports, reportSharing, reportWriteEnabled = false, rulesWriteEnabled = false, runWriteEnabled = false, nightlyEnabled = null, questionBankWriteEnabled = false, publicOrigin, secureCookies = true } = {}) {
   if (typeof token !== 'string' || Buffer.byteLength(token) < 32) throw new Error('EVALUATION_SERVICE_TOKEN must contain at least 32 bytes');
   if (authService && !publicOrigin) throw new Error('Authentication requires EVALUATION_PUBLIC_ORIGIN');
   const expected = crypto.createHash('sha256').update(token).digest();
@@ -237,7 +237,7 @@ function createApp({ token, generator = createQuestionBankGenerationService(), s
         if (url.pathname === '/api/evaluation/unified/batch-schemes' || url.pathname.startsWith('/api/evaluation/unified/batch-schemes/')) return await handleBatchSchemes({ req, res, url, user, schemes: batchSchemes, manualBatches, runWriteEnabled, nightlyEnabled, publicOrigin, readBody, reply, availableServices: evaluations?.availableServices, concurrencyCaps: evaluations?.concurrencyCaps ? evaluations.concurrencyCaps() : null });
         if (url.pathname === '/api/evaluation/unified/batches' || url.pathname.startsWith('/api/evaluation/unified/batches/')) return await handleBatches({ req, res, url, user, batches, reply });
         if (url.pathname.startsWith('/api/evaluation/unified/daily-reports')) return await handleDailyReports({req,res,url,user,reports:dailyReports,sharing:reportSharing,writeEnabled:reportWriteEnabled,publicOrigin,readBody,reply});
-        return await handleRuns({ req, res, url, user, evaluations, scoringUsage, runWriteEnabled, publicOrigin, readBody, reply });
+        return await handleRuns({ req, res, url, user, evaluations, scoringUsage, runSharing, runWriteEnabled, publicOrigin, readBody, reply });
       } catch (error) {
         if (res.headersSent) { res.end(); return; }
         const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
