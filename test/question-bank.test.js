@@ -83,6 +83,7 @@ test('两个 RSI 一律由模型按场景出题：只给场景、工况和性能
     '卫星支架想用铝合金，室温屈服强度不能低于 500 MPa，给出 4 组候选',
     '液氮温区 77 K 的低温结构件，想用兼顾强韧性的高熵合金，给出 3 种配方',
     '玻璃芯载板想用玻璃，模量高、介电常数低，比较两种配方',
+    '叠层光伏顶电池想用钙钛矿，给出三种候选配方，比较预测带隙。',
   ];
   const generator = createQuestionBankGenerationService({
     caseExamples: async keys => { exampleCalls.push(keys); return ['旧配比服务参考案例']; },
@@ -90,13 +91,13 @@ test('两个 RSI 一律由模型按场景出题：只给场景、工况和性能
   });
   for (const [serviceKey, questionKind, delivery] of [['alpha-combined-rsi', undefined, /只问配方和性能，不提制备/], ['alpha-combined-rsi', 'manufacturing', /每题都要请对方考虑这些候选配方如何制备/], ['alpha-rsi', 'composition', /只问配方和性能，不提制备/]]) {
     kind = questionKind || 'composition';
-    const result = await generator.generate({ generationMode: 'service', serviceKey, count: 6, ...(questionKind ? { questionKind } : {}) });
+    const result = await generator.generate({ generationMode: 'service', serviceKey, count: questions.length, ...(questionKind ? { questionKind } : {}) });
     assert.deepEqual(result.items.map(item => item.question), questions.map(question => kind === 'manufacturing' ? `${question}，并考虑他们如何制备` : question));
     assert.ok(result.items.every(item => item.serviceKey === serviceKey));
     const prompt = prompts.at(-1);
     assert.match(prompt, delivery);
     assert.match(prompt, /本批出题安排/);
-    for (const family of ['镍基高温合金', '铜合金', '不锈钢', '铝合金', '高熵合金', '芯片玻璃']) assert.ok(prompt.includes(family), family);
+    for (const family of ['镍基高温合金', '铜合金', '不锈钢', '铝合金', '高熵合金', '芯片玻璃', '钙钛矿']) assert.ok(prompt.includes(family), family);
     assert.ok(!prompt.includes('旧配比服务参考案例'));
     assert.ok(!/给出最多20组候选|总和100%|LPBF_/.test(prompt), '提示词不应再沿用元素区间模板的要求');
   }
