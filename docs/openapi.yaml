@@ -463,7 +463,8 @@ paths:
         用户在前端确认后另行调用 `random-save` / `import` 保存。
         领域维度传 `domainKey`；按被测服务出题传 `generationMode=service` 和 `serviceKey`，主题可选。
         对比出题已停用；旧的 comparison 请求返回 COMPARISON_DISABLED。
-        RSI 服务可传 `questionKind=composition` 出共同配比题；1109 可传 `manufacturing` 出制备专项题。内置牌号使用随机约束生成，其他主题由出题模型生成。
+        RSI 服务可传 `questionKind=composition` 出共同配比题；1109 可传 `manufacturing` 出制备专项题。
+        两个 RSI 与新材料 RSI 均由出题模型按场景生成：只给用途、工况和性能，元素、配比或化学式交给被测系统；写出含量区间、元素集合或点名化学式的候选会被丢弃。
         旧服务维度请求（未传 generationMode）仍需提供非空 topic。各维度互斥。
       requestBody:
         required: true
@@ -3593,7 +3594,7 @@ components:
     BatchSchemeConfig:
       type: object
       required: [services]
-      description: 1110 与 1109 的配比题共用题面并独立执行，题量不同时共同题取较小值；1109 制备专项可另设。每批最多 320 次，1109 两类题合计最多 100 次。旧配置和历史执行快照仍可读取。
+      description: 1110 与 1109 的配比题共用题面并独立执行，题量不同时共同题取较小值；1109 制备专项可另设。未给 1110 分配题量时不存在共同配比题，1109 的题全部按制备专项出题和标记，已保存的旧批次仍按原题型解释。每批最多 320 次，1109 两类题合计最多 100 次。旧配置和历史执行快照仍可读取。
       properties:
         services:
           type: object

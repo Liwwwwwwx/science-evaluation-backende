@@ -100,6 +100,7 @@ test('手动批次以个人身份派发，幂等重试复用原批次和题目',
   const first = await service.create({ config: small(), userId: 'user-a', key: 'request-1' });
   for (let i = 0; i < 20 && plan.state !== 'submitted'; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(plan.state, 'submitted'); assert.equal(calls.length, 6);
+  assert.equal(plan.configSnapshot.rsiQuestionLayout, 'shared-v2');
   assert.ok(calls.every(call => call.input.ownerUserId === 'user-a'));
   for (let i = 0; i < 3; i++) {
     const left = calls.find(call => call.options.key.endsWith(`:alpha-combined-rsi:${i}`)).input;
@@ -133,6 +134,34 @@ test('制备专项与同题配比分别派发，旧快照不添加新题型标�
   assert.equal(calls.length, 6);
   assert.ok(calls.every(item => item.questionKind === undefined));
   assert.deepEqual(oldItems['alpha-combined-rsi'][0], '历史制备测试题目第一条');
+});
+
+test('新批次未选 1110 时 1109 的题全部按制备专项出题和标记，旧快照保持原题型', async () => {
+  const config = small(); config.services['alpha-rsi'] = 0;
+  const addresses = { 'alpha-combined-rsi': 'ws://combined.test', 'alpha-rsi': 'ws://alpha.test' };
+  let plan; let index = 0; const calls = []; const inputs = [];
+  const repository = {
+    async create(value) { plan = { ...value, state: 'generating' }; return true; },
+    async get() { return structuredClone(plan); }, async ready(id, items) { plan.items = items; plan.state = 'dispatching'; return true; },
+    async submitted() { plan.state = 'submitted'; }, async fail(id, error) { plan.state = 'failed'; plan.error = error; },
+  };
+  const evaluations = { async comparisonStorageReady() { return true; }, async createBatchRun(input) { calls.push(input); } };
+  const service = createTrialBatchService({ repository, evaluations, serviceAddresses: addresses,
+    generator: { async generate(input) { inputs.push(input); return { items: Array.from({ length: input.count }, () => ({ question: `${input.questionKind} 材料测评问题，第 ${++index} 题。` })) }; } },
+    schemes: { async nightly() { return { id: 'scheme', name: '只测 1109', version: 3, config }; } } });
+  await service.prepare('2026-11-24');
+  await service.dispatch('2026-11-24');
+  assert.equal(plan.configSnapshot.rsiQuestionLayout, 'shared-v2');
+  assert.deepEqual(Object.keys(plan.items), ['alpha-combined-rsi']);
+  assert.deepEqual(inputs.map(input => [input.serviceKey, input.questionKind, input.count]), [['alpha-combined-rsi', 'manufacturing', 3]]);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(call => call.serviceKey === 'alpha-combined-rsi' && call.questionKind === 'manufacturing'));
+
+  calls.length = 0;
+  const oldItems = { 'alpha-combined-rsi': ['历史配比测试题目第一条', '历史配比测试题目第二条', '历史配比测试题目第三条'] };
+  await service.dispatchPlan({ id: 'old', items: oldItems, serviceAddresses: addresses, configSnapshot: { config, rsiQuestionLayout: 'shared-v1' } }, { async submitted() {} });
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(call => call.questionKind === 'composition'));
 });
 
 test('夜间新计划保存方案快照，按原配比派发而不是硬编码320次', async () => {

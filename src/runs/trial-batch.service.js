@@ -1,6 +1,6 @@
 const { randomUUID, createHash } = require('node:crypto');
 const { generateTrialQuestions } = require('../question-bank/trial-questions');
-const { DEFAULT_SCHEME, INACTIVE_SERVICE_KEYS, validateScheme, upgradeComparisonScheme } = require('./batch-scheme');
+const { DEFAULT_SCHEME, INACTIVE_SERVICE_KEYS, RSI_QUESTION_LAYOUT, RSI_QUESTION_LAYOUTS, sharedCombinedCount, validateScheme, upgradeComparisonScheme } = require('./batch-scheme');
 const LEGACY_TARGETS = Object.freeze({ 'mission-material': 20, literature: 50, 'literature-aircraft': 50, alloy: 50, synthesis: 50, 'new-material': 50 });
 const TARGETS = Object.freeze({ ...LEGACY_TARGETS, 'alpha-rsi': 50 });
 
@@ -16,7 +16,7 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
     const { addresses, paused, version: serviceSettingsVersion } = await serviceState();
     for (const key of paused) config.services[key] = 0;
     if (paused.includes('alpha-combined-rsi')) config.rsiManufacturingCount = 0;
-    const configSnapshot = { config, scheme: selected ? { id: selected.id, name: selected.name, version: selected.version } : null, rsiQuestionLayout: 'shared-v1' };
+    const configSnapshot = { config, scheme: selected ? { id: selected.id, name: selected.name, version: selected.version } : null, rsiQuestionLayout: RSI_QUESTION_LAYOUT };
     if (!await repository.create({ date, id, serviceAddresses: addresses, ruleSnapshot, configSnapshot, serviceSettingsVersion })) return repository.get(date);
     try {
       const selectedKeys = Object.keys(config.services).filter(key => config.services[key] > 0);
@@ -24,7 +24,7 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
       if (!selectedKeys.length) throw Object.assign(new Error('夜间方案没有可测服务，请调整配置'), { code: 'TRIAL_SERVICES_MISSING' });
       if (selectedKeys.some(key => !addresses[key])) throw Object.assign(new Error('自动测评服务配置不完整'), { code: 'TRIAL_SERVICES_MISSING' });
       if ((config.compareAlloyAlpha || config.compareSynthesisAlpha) && !await evaluations.comparisonStorageReady()) throw Object.assign(new Error('对比存储尚未迁移，不能创建自动对比计划'), { code: 'TRIAL_COMPARISON_UNAVAILABLE' });
-      const items = await generateTrialQuestions({ generator, scheme: config });
+      const items = await generateTrialQuestions({ generator, scheme: config, rsiQuestionLayout: RSI_QUESTION_LAYOUT });
       if (!await repository.ready(id, items)) throw new Error('试运行计划状态已变化');
     } catch (error) {
       // 只持久化受控错误，避免把模型或配置中的敏感信息写入数据库。
@@ -41,6 +41,9 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
   }
   async function dispatchPlan(plan, targetRepository) {
     const config = plan.configSnapshot ? validateScheme(plan.configSnapshot.config || plan.configSnapshot) : null;
+    // 题型标记随计划保存的布局解释：旧计划不因出题规则调整而改标。
+    const rsiLayout = plan.configSnapshot?.rsiQuestionLayout;
+    const rsiKinds = config && RSI_QUESTION_LAYOUTS.includes(rsiLayout);
     const alloyPaired = config ? config.compareAlloyAlpha : false;
     const synthesisPaired = config ? config.compareSynthesisAlpha : !!plan.items && Object.hasOwn(plan.items, 'alpha-rsi');
     const paired = alloyPaired || synthesisPaired;
@@ -57,8 +60,8 @@ function createTrialBatchService({ repository, evaluations, generator, scoring, 
     for (const [serviceKey, questions] of Object.entries(plan.items)) {
       for (const [index, question] of questions.entries()) {
         try {
-          const questionKind = ['alpha-rsi', 'alpha-combined-rsi'].includes(serviceKey) && config && plan.configSnapshot?.rsiQuestionLayout === 'shared-v1'
-            ? serviceKey === 'alpha-combined-rsi' && index >= config.services['alpha-combined-rsi'] ? 'manufacturing' : 'composition'
+          const questionKind = rsiKinds && ['alpha-rsi', 'alpha-combined-rsi'].includes(serviceKey)
+            ? serviceKey === 'alpha-combined-rsi' && index >= sharedCombinedCount(config, rsiLayout) ? 'manufacturing' : 'composition'
             : null;
           const comparisonGroupId = paired && ((alloyPaired && (serviceKey === 'alloy' || serviceKey === 'alpha-rsi')) || (synthesisPaired && (serviceKey === 'synthesis' || serviceKey === 'alpha-rsi')))
             ? createHash('sha256').update(JSON.stringify(['trial-comparison', plan.id, index])).digest('hex') : null;

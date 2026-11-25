@@ -4,6 +4,9 @@ const { TeamServiceError } = require('../errors');
 const SERVICE_KEYS = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'alpha-rsi', 'alpha-combined-rsi', 'new-material-rsi'];
 const INACTIVE_SERVICE_KEYS = ['alloy', 'synthesis'];
 const MAX_CONCURRENCY = 5;
+// 新批次的 RSI 题面布局；shared-v1 的历史快照继续按原规则解释。
+const RSI_QUESTION_LAYOUT = 'shared-v2';
+const RSI_QUESTION_LAYOUTS = ['shared-v1', RSI_QUESTION_LAYOUT];
 // 新方案只按服务分配题数；旧方案的航空/合成两池在读取时合并为服务题数。
 const DEFAULT_SCHEME = Object.freeze({
   services: {
@@ -96,4 +99,11 @@ function upgradeComparisonScheme(input, { allowEmpty = false } = {}) {
   return validateScheme(current);
 }
 
-module.exports = { DEFAULT_SCHEME, SERVICE_KEYS, INACTIVE_SERVICE_KEYS, MAX_CONCURRENCY, validateConcurrency, validateScheme, upgradeComparisonScheme };
+// 1109 中与 1110 共用题面、不带制备要求的题数，其余为制备专项。
+// v2 起未选 1110 时不存在共同配比题，1109 的题全部带制备要求。
+function sharedCombinedCount(config, layout) {
+  const selected = key => Number(config.services[key]) || 0;
+  return layout === RSI_QUESTION_LAYOUT && !selected('alpha-rsi') ? 0 : selected('alpha-combined-rsi');
+}
+
+module.exports = { DEFAULT_SCHEME, SERVICE_KEYS, INACTIVE_SERVICE_KEYS, MAX_CONCURRENCY, RSI_QUESTION_LAYOUT, RSI_QUESTION_LAYOUTS, sharedCombinedCount, validateConcurrency, validateScheme, upgradeComparisonScheme };

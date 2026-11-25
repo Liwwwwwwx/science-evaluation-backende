@@ -1,5 +1,5 @@
 const { generateBatchQuestions } = require('./batch-generation');
-const { DEFAULT_SCHEME, SERVICE_KEYS, validateScheme } = require('../runs/batch-scheme');
+const { DEFAULT_SCHEME, SERVICE_KEYS, sharedCombinedCount, validateScheme } = require('../runs/batch-scheme');
 
 // 两个 RSI 的配比题共用题面；旧服务和对比逻辑仅用于历史方案兼容。
 const COMPOSITION_TOPIC = '航空航天材料与高温合金：仅限镍基/钴基高温合金或航空铝合金的成分/配比设计，要求给出 wt.% 具体成分（合计100%）、目标性能数值门槛和2–3组候选配比并排序；不要出工艺优化、热处理、涂层、凝固或机理解释题';
@@ -12,7 +12,8 @@ const SERVICE_INPUTS = Object.freeze({
   'new-material-rsi': { generationMode: 'service', serviceKey: 'new-material-rsi' },
 });
 
-async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME } = {}) {
+// rsiQuestionLayout 未指定时按旧布局出题，已保存的旧计划恢复时保持原题面。
+async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME, rsiQuestionLayout = 'shared-v1' } = {}) {
   scheme = validateScheme(scheme);
   const out = {};
   const count = key => scheme.services[key] || 0;
@@ -32,15 +33,18 @@ async function generateTrialQuestions({ generator, scheme = DEFAULT_SCHEME } = {
     out.synthesis = await generate(SERVICE_INPUTS.synthesis, count('synthesis'));
   }
   const commonRsi = count('alpha-rsi'); const commonCombined = count('alpha-combined-rsi');
-  if (commonRsi || commonCombined) {
+  const sharedCombined = sharedCombinedCount(scheme, rsiQuestionLayout);
+  if (commonRsi || sharedCombined) {
     let shared = out['alpha-rsi'] || [];
-    const needed = Math.max(commonRsi, commonCombined);
+    const needed = Math.max(commonRsi, sharedCombined);
     if (shared.length < needed) shared = [...shared, ...await generate({ generationMode: 'service', serviceKey: 'alpha-rsi', questionKind: 'composition' }, needed - shared.length)];
     if (commonRsi && !out['alpha-rsi']) out['alpha-rsi'] = shared.slice(0, commonRsi);
-    if (commonCombined) out['alpha-combined-rsi'] = shared.slice(0, commonCombined);
+    if (sharedCombined) out['alpha-combined-rsi'] = shared.slice(0, sharedCombined);
   }
-  if (scheme.rsiManufacturingCount) {
-    const special = await generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing' }, scheme.rsiManufacturingCount);
+  // 1109 中不与 1110 共用题面的题都带制备要求：方案里的制备专项，加上未选 1110 时的全部 1109 题。
+  const manufacturing = scheme.rsiManufacturingCount + commonCombined - sharedCombined;
+  if (manufacturing) {
+    const special = await generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', questionKind: 'manufacturing' }, manufacturing);
     out['alpha-combined-rsi'] = [...(out['alpha-combined-rsi'] || []), ...special];
   }
   for (const key of ['mission-material', 'literature', 'literature-aircraft']) {
