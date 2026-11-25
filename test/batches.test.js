@@ -170,6 +170,20 @@ test('新批次详情计入制备专项，运行列表返回题型且旧记录�
   assert.equal(Object.hasOwn(rows.find(item => item.runId === 'old'), 'questionKind'), false);
 });
 
+test('新批次未选 1110 时 1109 全部计为制备专项，旧快照仍只计方案里的专项数', async () => {
+  const config = { services: { 'alpha-rsi': 0, 'alpha-combined-rsi': 2 }, rsiManufacturingCount: 1 };
+  const items = { 'alpha-combined-rsi': ['配方与制备问题一', '配方与制备问题二', '配方与制备问题三'] };
+  const expectedOf = async rsiQuestionLayout => {
+    const service = createBatchReadService({ repository: repository({ plans: [trialPlan({ items, config_snapshot: { config, rsiQuestionLayout } })] }) });
+    return (await service.get(TRIAL)).services.find(item => item.serviceKey === 'alpha-combined-rsi');
+  };
+  const current = await expectedOf('shared-v2');
+  assert.equal(current.expected, 3); assert.equal(current.manufacturingExpected, 3);
+  const legacy = await expectedOf('shared-v1');
+  assert.equal(legacy.expected, 3); assert.equal(legacy.manufacturingExpected, 1);
+  assert.equal(Object.hasOwn(await expectedOf(undefined), 'manufacturingExpected'), false);
+});
+
 test('批次运行列表支持服务筛选、执行状态和分数排序', async () => {
   const service = createBatchReadService({ repository: repository({
     plans: [trialPlan()],

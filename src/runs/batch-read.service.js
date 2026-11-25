@@ -1,4 +1,5 @@
 const { TeamServiceError } = require('../errors');
+const { RSI_QUESTION_LAYOUTS, sharedCombinedCount } = require('./batch-scheme');
 
 const SERVICE_ORDER = ['mission-material', 'literature', 'literature-aircraft', 'alloy', 'synthesis', 'new-material', 'new-material-rsi', 'alpha-rsi', 'alpha-combined-rsi'];
 const SERVICE_LABELS = {
@@ -226,6 +227,13 @@ function failures(runs) {
     .map(publicRun);
 }
 
+// 1109 中带制备要求的题数；v2 起未选 1110 时全部 1109 题都是制备专项。
+function manufacturingExpectedOf(plan, service) {
+  const { config, rsiQuestionLayout: layout } = plan.config_snapshot || {};
+  const manufacturing = service.key === 'alpha-combined-rsi' && RSI_QUESTION_LAYOUTS.includes(layout) ? service.expected - sharedCombinedCount(config, layout) : 0;
+  return manufacturing > 0 ? { manufacturingExpected: manufacturing } : {};
+}
+
 function serviceDetails(plan, runs) {
   return servicePlans(plan).map((service) => {
     const rows = runs.filter((run) => run.serviceKey === service.key);
@@ -234,8 +242,7 @@ function serviceDetails(plan, runs) {
       serviceKey: service.key,
       label: service.label,
       expected: service.expected,
-      ...(service.key === 'alpha-combined-rsi' && plan.config_snapshot?.rsiQuestionLayout === 'shared-v1' && plan.config_snapshot?.config?.rsiManufacturingCount > 0
-        ? { manufacturingExpected: plan.config_snapshot.config.rsiManufacturingCount } : {}),
+      ...manufacturingExpectedOf(plan, service),
       totals: totalsOf(rows, service.expected),
       scores: batchScores(rows),
       maxElapsedMs: elapsed.length ? Math.max(...elapsed) : null,

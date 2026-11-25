@@ -53,7 +53,7 @@ test('按领域生成候选，不绑定服务且拒绝未知领域', async () =>
 
 test('按被测服务出题使用对应提示、支持选填主题并绑定目标服务', async () => {
   let prompt = ''; let calls = 0;
-  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { calls++; prompt = value; return { questions: ['请检索并归纳航空发动机高温合金相关研究文献。'] }; } } });
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async value => { calls++; prompt = value; return { questions: [value.includes('服务标识为 alpha-rsi') ? '烘箱支架长期受热，请给出 3 种耐热不锈钢候选配方。' : '请检索并归纳航空发动机高温合金相关研究文献。'] }; } } });
   const labels = { 'mission-material': 'Mission 主服务', 'alpha-rsi': '材料配比 RSI', literature: '文献检索服务', 'literature-aircraft': '航空文献服务', alloy: '合金材料服务', synthesis: '合成制备服务', 'new-material': '新材料服务' };
   for (const [serviceKey, label] of Object.entries(labels)) {
     const result = await generator.generate({ generationMode: 'service', serviceKey, count: 1 });
@@ -74,37 +74,39 @@ test('按被测服务出题使用对应提示、支持选填主题并绑定目�
   assert.equal(calls, previousCalls);
 });
 
-test('配比+制备按四个示例随机出题，指定其他主题时仍可使用模型', async () => {
-  const prompts = []; const exampleCalls = [];
+test('两个 RSI 一律由模型按场景出题：只给场景、工况和性能，元素和配比交给系统，不附题库旧案例', async () => {
+  const prompts = []; const exampleCalls = []; let kind = 'composition';
+  const questions = [
+    '航发排气段的薄壁支撑件在约 600°C 工作，想提高镍基合金的高温强度，给出三种候选配方',
+    '电阻焊电极反复受热，想用导电导热好的铜合金，给出 3 种候选',
+    '液氧温区约 90 K 的推进剂贮箱，想用低温韧性好的不锈钢，给出两组候选',
+    '卫星支架想用铝合金，室温屈服强度不能低于 500 MPa，给出 4 组候选',
+    '液氮温区 77 K 的低温结构件，想用兼顾强韧性的高熵合金，给出 3 种配方',
+    '玻璃芯载板想用玻璃，模量高、介电常数低，比较两种配方',
+  ];
   const generator = createQuestionBankGenerationService({
     caseExamples: async keys => { exampleCalls.push(keys); return ['旧配比服务参考案例']; },
-    llm: { isConfigured: () => true, callJson: async prompt => {
-      prompts.push(prompt);
-      return { questions: ['请以铸态预测 IN625（wt.%）：Ni 60–67、Cr 20–23、Mo 8–10、Nb 3–4，总和100%，优化900℃屈服强度，给出最多20组候选及 LPBF_heat_treatment 共享工艺参考。'] };
-    } },
+    llm: { isConfigured: () => true, callJson: async prompt => { prompts.push(prompt); return { questions: questions.map(question => kind === 'manufacturing' ? `${question}，并考虑他们如何制备` : question) }; } },
   });
-  const result = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', count: 4 });
-  assert.equal(result.items.length, 4);
-  assert.ok(result.items.every(item => item.serviceKey === 'alpha-combined-rsi'));
-  for (const material of ['IN625', 'CuCrZr', 'IN718', 'GRCop-84']) assert.ok(result.items.some(item => item.question.includes(material)));
-  assert.deepEqual(prompts, []);
+  for (const [serviceKey, questionKind, delivery] of [['alpha-combined-rsi', undefined, /只问配方和性能，不提制备/], ['alpha-combined-rsi', 'manufacturing', /每题都要请对方考虑这些候选配方如何制备/], ['alpha-rsi', 'composition', /只问配方和性能，不提制备/]]) {
+    kind = questionKind || 'composition';
+    const result = await generator.generate({ generationMode: 'service', serviceKey, count: 6, ...(questionKind ? { questionKind } : {}) });
+    assert.deepEqual(result.items.map(item => item.question), questions.map(question => kind === 'manufacturing' ? `${question}，并考虑他们如何制备` : question));
+    assert.ok(result.items.every(item => item.serviceKey === serviceKey));
+    const prompt = prompts.at(-1);
+    assert.match(prompt, delivery);
+    assert.match(prompt, /本批出题安排/);
+    for (const family of ['镍基高温合金', '铜合金', '不锈钢', '铝合金', '高熵合金', '芯片玻璃']) assert.ok(prompt.includes(family), family);
+    assert.ok(!prompt.includes('旧配比服务参考案例'));
+    assert.ok(!/给出最多20组候选|总和100%|LPBF_/.test(prompt), '提示词不应再沿用元素区间模板的要求');
+  }
   assert.deepEqual(exampleCalls, []);
-  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: '高温材料与制备', count: 1 });
-  const prompt = prompts.at(-1);
-  for (const material of ['IN625', 'CuCrZr', 'IN718', 'GRCop-84']) assert.ok(prompt.includes(material));
-  for (const route of ['LPBF_heat_treatment', 'LPBF_solution_aging', 'LPBF_HIP_heat_treatment']) assert.ok(prompt.includes(route));
-  assert.match(prompt, /铸态是性能预测条件/);
-  assert.match(prompt, /不要求制备工艺或工艺参考/);
-  assert.match(prompt, /保证存在总和为100%的可行配比/);
-  assert.ok(!prompt.includes('旧配比服务参考案例'));
-
-  const named = await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: 'IN625', count: 2 });
-  assert.ok(named.items.every(item => item.question.includes('IN625')));
-  assert.equal(prompts.length, 1);
-  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 });
-  assert.deepEqual(exampleCalls, [['alpha-rsi']]);
+  kind = 'composition';
+  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', topic: 'IN625', count: 2 });
+  assert.ok(prompts.at(-1).includes('"IN625"'));
+  await generator.generate({ generationMode: 'service', serviceKey: 'alloy', count: 1 });
+  assert.deepEqual(exampleCalls, [['alloy']]);
   assert.ok(prompts.at(-1).includes('旧配比服务参考案例'));
-  assert.ok(!prompts.at(-1).includes('LPBF_solution_aging'));
 });
 
 test('对比出题已停用且不调用模型', async () => {
@@ -162,16 +164,24 @@ test('测试集题标记适用服务后可被两个材料服务使用', async ()
   await assert.rejects(() => limited({ ...base, serviceKey: 'alpha-rsi' }), e => e.code === 'QUESTION_NOT_RUNNABLE');
 });
 
-test('两个 RSI 独立出题，不共用题库参考案例', async () => {
-  let prompt = ''; const requested = [];
-  const generator = createQuestionBankGenerationService({
-    caseExamples: async keys => { requested.push(keys); return ['案例：某高温合金要求700℃、抗拉强度≥800 MPa，请给出配比候选并排序。']; },
-    llm: { isConfigured: () => true, callJson: async value => { prompt = value; return { questions: ['某高温合金要求700℃、抗拉强度≥800 MPa，请给出配比候选并排序。'] }; } },
-  });
-  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-rsi', count: 1 });
-  assert.match(prompt, /参考案例/); assert.match(prompt, /不要照抄或复述原题/);
-  await generator.generate({ generationMode: 'service', serviceKey: 'alpha-combined-rsi', count: 1 });
-  assert.deepEqual(requested, [['alpha-rsi']]);
+test('新材料 RSI 按场景出题：点名化学式和元素集合的题被丢弃，参照写法可以保留化学式', async () => {
+  const prompts = [];
+  const generator = createQuestionBankGenerationService({ llm: { isConfigured: () => true, callJson: async prompt => { prompts.push(prompt); return { questions: [
+    '给定化学式BaTiO3，请生成一个钙钛矿结构CIF。',
+    '在元素范围{Ca,Ti,O}内，生成一个钙钛矿候选CIF。',
+    '低轨太阳翼想用无铅钙钛矿，能找几种带隙在 1.3–1.7 eV 的晶体并给出材料结构文件',
+    '想做类似 LiNbO3 的压电晶体，但希望不含稀有元素，能找出几种并给我结构文件',
+  ] }; } } });
+  const result = await generator.generate({ generationMode: 'service', serviceKey: 'new-material-rsi', count: 8 });
+  assert.deepEqual(result.items.map(item => item.question), [
+    '低轨太阳翼想用无铅钙钛矿，能找几种带隙在 1.3–1.7 eV 的晶体并给出材料结构文件',
+    '想做类似 LiNbO3 的压电晶体，但希望不含稀有元素，能找出几种并给我结构文件',
+  ]);
+  assert.ok(result.items.every(item => item.serviceKey === 'new-material-rsi' && item.domainKey === undefined));
+  assert.match(prompts[0], /本批出题安排/);
+  assert.match(prompts[0], /不列元素范围或元素集合/);
+  assert.match(prompts[0], /单胞原子数不超过 20/);
+  for (const family of ['钙钛矿', '氧化物', '氮化物', '硫族化合物', '卤化物', '金属间化合物', '磷酸盐', '硅酸盐']) assert.ok(prompts[0].includes(family), family);
 });
 
 test('服务题过滤无效、重复及超长候选，模型无有效结果时返回错误', async () => {  let candidates = ['请说明适合该材料的制备条件和验证方法。', '请说明适合该材料的制备条件和验证方法。', '太短', '过'.repeat(201)];
