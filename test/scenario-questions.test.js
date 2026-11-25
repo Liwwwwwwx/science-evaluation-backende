@@ -68,7 +68,7 @@ test('晶体题校验拒绝点名化学式和元素集合，参照写法与环�
 });
 
 test('场景种子按体系交错排列，任意连续一段（含首尾相接）都覆盖全部体系', () => {
-  assert.equal(new Set(ALLOY.seeds.map(([family]) => family)).size, 6);
+  assert.equal(new Set(ALLOY.seeds.map(([family]) => family)).size, 7);
   assert.equal(new Set(CRYSTAL.seeds.map(([family]) => family)).size, 8);
   for (const spec of [ALLOY, CRYSTAL]) {
     const distinct = new Set(spec.seeds.map(([family]) => family)).size;
@@ -81,6 +81,18 @@ test('场景种子按体系交错排列，任意连续一段（含首尾相接�
   assert.equal(scenarioOf('alpha-combined-rsi'), ALLOY);
   assert.equal(scenarioOf('new-material-rsi'), CRYSTAL);
   for (const key of ['alloy', 'new-material', 'literature', '', 'mission-material']) assert.equal(scenarioOf(key), null);
+});
+
+test('默认场景聚焦航天、封装和光伏，钙钛矿配方可直接要求制膜工艺', () => {
+  const focus = /民用航空航天、芯片封装和钙钛矿清洁能源/;
+  for (const spec of [ALLOY, CRYSTAL]) {
+    assert.match(scenarioBlock(spec, { count: 1 }), focus);
+    const uses = spec.seeds.map(([, use]) => use);
+    assert.ok(uses.some(use => /民航|卫星|太阳翼/.test(use)));
+    assert.ok(uses.some(use => /芯片封装/.test(use)));
+    assert.ok(uses.some(use => /钙钛矿/.test(use)));
+  }
+  assert.ok(isScenarioAlloyQuestion('给叠层光伏顶电池设计 3 种钙钛矿配方，比较带隙并说明各自的制膜工艺。', 'manufacturing'));
 });
 
 test('出题要求写入提示：按体系和信息量安排每道题，给出参考写法，自定义主题时只安排信息量', () => {
